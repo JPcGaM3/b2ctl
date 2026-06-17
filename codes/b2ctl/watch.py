@@ -169,14 +169,15 @@ def _assign_free_disk(d, tbw, all_disks=None) -> None:
             safety.end_op(op_id, False, "", out, 1)
             return
         print(G + "  ✔ replace started — resilvering" + N)
-        while True:
-            time.sleep(2)
-            st = zfs.poll_resilver_status(pool)
-            if st["completed"]:
-                sys.stdout.write(f"\r{G}  ✔ resilver completed{N}                    \n")
-                break
-            sys.stdout.write(f"\r{Y}  resilvering... {st['done']}% done, ETA {st['eta']}{N}")
-            sys.stdout.flush()
+        if not _DRY_RUN:
+            while True:
+                time.sleep(2)
+                st = zfs.poll_resilver_status(pool)
+                if st["completed"]:
+                    sys.stdout.write(f"\r{G}  ✔ resilver completed{N}                    \n")
+                    break
+                sys.stdout.write(f"\r{Y}  resilvering... {st['done']}% done, ETA {st['eta']}{N}")
+                sys.stdout.flush()
         old_token = tgt["token"]
         topo = zfs.topology()
         if any(e["pool"] == pool and e["token"] == old_token for e in topo.values()):
@@ -188,7 +189,7 @@ def _assign_free_disk(d, tbw, all_disks=None) -> None:
         avail = zfs.spares(pool)
         if avail:
             print(G + f"  ✔ spare restored to AVAIL: {', '.join(avail)}" + N)
-        safety.end_op(op_id, True, out, "", 0)
+        safety.end_op(op_id, True, out, "", 0, dry_run=_DRY_RUN)
     elif choice == "4":
         pool = _pick_pool()
         if pool:
@@ -398,20 +399,21 @@ def _replace_onto_spare(d, spare) -> bool:
         safety.end_op(op_id, False, "", out, 1)
         return False
     print(G + "  ✔ replace started — resilvering onto spare" + N)
-    while True:
-        time.sleep(2)
-        st = zfs.poll_resilver_status(pool)
-        if st["completed"]:
-            sys.stdout.write(f"\r{G}  ✔ resilver completed 100%{N}                 \n")
-            break
-        sys.stdout.write(f"\r{Y}  resilvering... {st['done']}% done, ETA {st['eta']}{N}")
-        sys.stdout.flush()
+    if not _DRY_RUN:
+        while True:
+            time.sleep(2)
+            st = zfs.poll_resilver_status(pool)
+            if st["completed"]:
+                sys.stdout.write(f"\r{G}  ✔ resilver completed 100%{N}                 \n")
+                break
+            sys.stdout.write(f"\r{Y}  resilvering... {st['done']}% done, ETA {st['eta']}{N}")
+            sys.stdout.flush()
 
     topo = zfs.topology()
     old_token = _pool_dev(d)
     lingers = any(e["pool"] == pool and e["token"] == old_token for e in topo.values())
     if lingers:
-        ok_d, out_d = zfs.detach(pool, old_token)
+        ok_d, out_d = zfs.detach(pool, old_token, dry_run=_DRY_RUN)
         if ok_d:
             print(G + f"  ✔ detached old disk {d.dev}" + N)
         else:
@@ -419,7 +421,7 @@ def _replace_onto_spare(d, spare) -> bool:
 
     print(f"{Y}  please pull bay {d.bay or '?'} ... blinking LED{N}")
     locate.blink(d.dev, locate.DEFAULT_SECONDS)
-    safety.end_op(op_id, True, out, "", 0)
+    safety.end_op(op_id, True, out, "", 0, dry_run=_DRY_RUN)
     return True
 
 

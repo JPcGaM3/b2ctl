@@ -72,12 +72,13 @@ def begin_op(
     return op_id
 
 
-def end_op(op_id: str, success: bool, stdout: str, stderr: str, exit_code: int) -> None:
+def end_op(op_id: str, success: bool, stdout: str, stderr: str, exit_code: int,
+           *, dry_run: bool = False) -> None:
     """Update audit entry status + print rollback hint."""
     entry = _load_entry(op_id)
     if entry is None:
         return
-    entry["status"]    = "ok" if success else "fail"
+    entry["status"]    = "dry_run" if dry_run else ("ok" if success else "fail")
     entry["exit_code"] = exit_code
     entry["stdout"]    = stdout
     entry["stderr"]    = stderr

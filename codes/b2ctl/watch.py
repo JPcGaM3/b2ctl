@@ -70,14 +70,14 @@ def _confirm(msg: str) -> bool:
 
 def _confirm_op(op, disk_from, disk_to, pool, vdev, cmds, snap_path=None):
     """Enhanced confirmation box showing op, disk IDs, and exact commands."""
-    from .ui import disk_label
+    import textwrap
     width = 52
     border = "─" * width
     print(f"┌─ CONFIRM OPERATION {border[:width-20]}┐")
 
     def _row(label, val):
         line = f"│ {label:<8} {val}"
-        print(line[:width+2].ljust(width + 2) + "│")
+        print(line[:width+1].ljust(width + 1) + "│")
 
     _row("Op:", op)
     if disk_from:
@@ -89,7 +89,8 @@ def _confirm_op(op, disk_from, disk_to, pool, vdev, cmds, snap_path=None):
     print(f"│ {'Will run:':<{width-1}}│")
     for cmd in cmds:
         joined = " ".join(cmd)
-        for chunk in [joined[i:i+width-4] for i in range(0, max(1, len(joined)), width-4)]:
+        chunks = textwrap.wrap(joined, width - 4) or [joined]
+        for chunk in chunks:
             print(f"│   {chunk:<{width-3}}│")
     if snap_path:
         snap_short = snap_path[-44:] if len(snap_path) > 44 else snap_path

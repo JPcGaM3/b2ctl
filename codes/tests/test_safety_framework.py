@@ -154,5 +154,6 @@ class TestConfirmOp(unittest.TestCase):
             with patch("sys.stdout", new_callable=io.StringIO) as mock_out:
                 watch._confirm_op("replace", disk, None, "tank", "raidz1-0", cmds)
                 output = mock_out.getvalue()
-        self.assertIn("/dev/disk/by-id/", output)
+        self.assertIn("/dev/disk/by-id/wwn-0xDEAD", output)
+        self.assertIn("/dev/disk/by-id/wwn-0xBEEF", output)
         self.assertIn("replace", output)

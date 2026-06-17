@@ -89,7 +89,7 @@ def _confirm_op(op, disk_from, disk_to, pool, vdev, cmds, snap_path=None):
     print(f"│ {'Will run:':<{width-1}}│")
     for cmd in cmds:
         joined = " ".join(cmd)
-        chunks = textwrap.wrap(joined, width - 4) or [joined]
+        chunks = textwrap.wrap(joined, width - 4, break_on_hyphens=False) or [joined]
         for chunk in chunks:
             print(f"│   {chunk:<{width-3}}│")
     if snap_path:

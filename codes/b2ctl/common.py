@@ -98,6 +98,7 @@ class Disk:
     vdev_state: str | None = None  # ONLINE / DEGRADED / FAULTED / AVAIL ...
     level: str = "NORMAL"
     reasons: list = field(default_factory=list)
+    spare_replacing: str | None = None
 
     @property
     def in_pool(self) -> bool:

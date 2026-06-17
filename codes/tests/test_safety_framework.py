@@ -3,10 +3,9 @@ import json
 import os
 import tempfile
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 # Patch log dirs to temp before importing safety
-import importlib
 
 
 class TestBeginOp(unittest.TestCase):

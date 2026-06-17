@@ -40,8 +40,11 @@ def begin_op(
     cmds: list[list[str]],
 ) -> str:
     """Write pending audit entry + snapshot. Return op_id."""
-    os.makedirs(LOG_DIR, exist_ok=True)
-    os.makedirs(SNAP_DIR, exist_ok=True)
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        os.makedirs(SNAP_DIR, exist_ok=True)
+    except OSError:
+        pass
     now = datetime.now()
     op_id = now.strftime("%Y%m%d-%H%M%S") + f"-{op}"
     entry = {
@@ -103,7 +106,10 @@ def _build_rollback_hint(entry: dict) -> str | None:
 
 def _capture_snapshot(op_id: str, pool: str, dev_path: str) -> str | None:
     """Capture zpool status + smartctl to snapshot file. Return path or None."""
-    os.makedirs(SNAP_DIR, exist_ok=True)
+    try:
+        os.makedirs(SNAP_DIR, exist_ok=True)
+    except OSError:
+        pass
     lines = [f"=== b2ctl pre-op snapshot: {op_id} ===\n"]
     for cmd in (
         ["zpool", "status", pool],

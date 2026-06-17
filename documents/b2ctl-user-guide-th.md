@@ -10,8 +10,9 @@
 4. [การอ่านตาราง](#4-การอ่านตาราง)
 5. [ฟีเจอร์ทั้งหมดในโหมด watch](#5-ฟีเจอร์ทั้งหมดในโหมด-watch)
 6. [สถานการณ์ที่พบบ่อย](#6-สถานการณ์ที่พบบ่อย)
-7. [ข้อควรระวัง](#7-ข้อควรระวัง)
-8. [สรุปคำสั่งลัด](#8-สรุปคำสั่งลัด)
+7. [ระบบความปลอดภัย](#7-ระบบความปลอดภัย)
+8. [ข้อควรระวัง](#8-ข้อควรระวัง)
+9. [สรุปคำสั่งลัด](#9-สรุปคำสั่งลัด)
 
 ---
 
@@ -101,7 +102,7 @@ Pools:
   tank      2.72T   1.72G   free=2.72T   ONLINE    cap=0%
 [OK] all disks healthy and assigned
 
-[r]efresh  [a]ssign  [o]ffload  [s]wap  [d]emote  [n]ew-pool  [l]ocate  [q]uit   (or hot-plug)
+[r]efresh  [a]ssign  [o]ffload  [s]wap  [d]emote  [n]ew-pool  [t]oggle-dryrun  [l]ocate  [q]uit   (or hot-plug)
 b2ctl>
 ```
 
@@ -356,7 +357,35 @@ b2ctl> l
 
 ---
 
-### 5.8 `q` — Quit (ออก)
+### 5.8 `t` — สลับโหมด Dry-run (ทดลองโดยไม่เปลี่ยนแปลงจริง)
+
+**ใช้เมื่อ:** ต้องการดูว่าระบบจะรันคำสั่งอะไร **โดยไม่แตะดิสก์จริงๆ** — เหมาะสำหรับ
+ฝึกซ้อม ตรวจสอบ หรือเรียนรู้การทำงานของ b2ctl
+
+```
+b2ctl> t
+[DRY-RUN] enabled — write commands will be printed, not executed
+b2ctl> s
+  swap (1:4) Samsung SSD 870 (...) onto spare (1:7)? [y/N]> y
+  [DRY-RUN] would run: zpool replace tank
+    /dev/disk/by-id/ata-Samsung_SSD_870_EVO_1TB_S74ZNS0W...
+    /dev/disk/by-id/ata-Samsung_SSD_870_EVO_1TB_S74ZNS0W582283V
+b2ctl> t
+[DRY-RUN] disabled — back to live mode
+```
+
+ขณะ dry-run ทำงาน:
+- คำสั่ง **เขียน** (`zpool`, `wipefs`, `sgdisk`, `dd`) → แสดงเท่านั้น ไม่รันจริง
+- คำสั่ง **อ่าน** (`smartctl`, `zpool status`) → ยังรันตามปกติ แสดงข้อมูลจริง
+
+สามารถเปิด dry-run ตั้งแต่ต้นได้ด้วย: `sudo b2ctl --dry-run watch`
+
+> 💡 **เคล็ดลับ:** ใช้ dry-run ก่อนทุกครั้งที่ทำงานกับดิสก์ที่ไม่คุ้นเคย เพื่อตรวจสอบ
+> ว่าคำสั่งถูกต้องก่อนยืนยัน
+
+---
+
+### 5.9 `q` — Quit (ออก)
 
 ```
 b2ctl> q
@@ -365,7 +394,7 @@ bye
 
 ---
 
-### 5.9 การเสียบ/ถอดดิสก์ขณะ watch ทำงาน (Hot-plug)
+### 5.10 การเสียบ/ถอดดิสก์ขณะ watch ทำงาน (Hot-plug)
 
 **เสียบดิสก์ใหม่:**
 
@@ -488,7 +517,115 @@ Pools:
 
 ---
 
-## 7. ข้อควรระวัง
+## 7. ระบบความปลอดภัย
+
+b2ctl บันทึกทุก operation ที่เปลี่ยนแปลงดิสก์ และให้เครื่องมือตรวจสอบ ย้อนกลับ และ
+ทดลองล่วงหน้าก่อนลงมือจริง
+
+---
+
+### 7.1 กล่อง Confirm รายละเอียดครบ
+
+ก่อนทุกคำสั่งที่เปลี่ยนแปลงดิสก์ ระบบจะแสดงกล่องยืนยัน พร้อม **path เต็มของดิสก์**:
+
+```
+┌─ CONFIRM OPERATION ──────────────────────────────────────────┐
+│ Op:    replace                                                 │
+│ From:  bay 1:4  S74ZNS0WXXXXXXX  ONLINE  (tank/raidz1-0)     │
+│ To:    bay 1:7  S8ABCXXXXXXXX    AVAILABLE                    │
+│ Pool:  tank/raidz1-0                                           │
+│                                                                │
+│ Will run:                                                      │
+│   zpool replace tank                                           │
+│     /dev/disk/by-id/ata-Samsung_SSD_870_EVO_1TB_S74ZNS0W...  │
+│     /dev/disk/by-id/ata-Samsung_SSD_870_EVO_1TB_S8ABC123...  │
+│                                                                │
+│ Snapshot → /var/log/b2ctl/snapshots/20260617-143022-...txt   │
+└────────────────────────────────────────────────────────────────┘
+Proceed? [y/N]:
+```
+
+ค่าเริ่มต้นคือ **N** — กด Enter เปล่าๆ = ยกเลิกทันที ไม่มีอะไรเกิดขึ้น
+
+---
+
+### 7.2 Audit Trail (บันทึก operation ทุกครั้ง)
+
+ทุกครั้งที่รัน operation ระบบจะบันทึกลง `/var/log/b2ctl/ops.jsonl` โดยอัตโนมัติ
+
+ดูรายการที่ผ่านมาด้วย:
+
+```bash
+b2ctl log              # 20 รายการล่าสุด
+b2ctl log --last 50    # 50 รายการ
+```
+
+ผลลัพธ์:
+
+```
+OP_ID                       OP        BAY  SERIAL            POOL  STATUS  STARTED
+20260617-143022-replace     replace   1:4  S74ZNS0WXXXXXXX   tank  ok      2026-06-17 14:30:22
+20260617-120011-add_spare   add_spare 1:7  S8ABCXXXXXXXX     tank  ok      2026-06-17 12:00:11
+```
+
+---
+
+### 7.3 Snapshot ก่อน operation
+
+ก่อนทุกคำสั่งที่เขียนดิสก์ ระบบจะ snapshot สถานะ pool และดิสก์ที่เกี่ยวข้องไว้ที่
+`/var/log/b2ctl/snapshots/<op_id>.txt` ประกอบด้วย:
+- `zpool status <pool>`
+- `zpool list -v`
+- `smartctl -a <dev>` ของดิสก์นั้น
+
+ดู path ของ snapshot ได้ในกล่อง Confirm และใน `b2ctl log`
+
+---
+
+### 7.4 Rollback — ย้อนกลับ operation ที่ผ่านมา
+
+หลังทุก operation ระบบจะแสดงคำสั่ง rollback:
+
+```
+✔ replace started — resilvering
+  Rollback if needed: zpool replace tank /dev/disk/by-id/<new> /dev/disk/by-id/<old>
+```
+
+รัน rollback ได้ทันทีด้วย:
+
+```bash
+b2ctl rollback 20260617-143022-replace
+```
+
+ระบบจะแสดงกล่อง Confirm พร้อมคำสั่งที่จะรัน และบันทึก rollback ลง audit trail ด้วย
+
+**Operations ที่ย้อนได้:**
+
+| operation | ย้อนได้? |
+|-----------|---------|
+| offline (ปิด disk) | ✅ ใช่ |
+| add spare (เพิ่ม spare) | ✅ ใช่ |
+| replace (สลับดิสก์) | ✅ ได้ ถ้า resilver ยังไม่เสร็จ |
+| demote (ลด mirror ลง spare) | ✅ ใช่ |
+| create pool (สร้าง pool) | ⚠️ ได้ แต่ `zpool destroy` จะลบข้อมูลทั้งหมด |
+| wipe (ล้างดิสก์) | ❌ ไม่ได้ — ถาวร |
+
+---
+
+### 7.5 Post-op Verification (ตรวจสอบหลัง operation)
+
+หลัง operation เสร็จ ระบบจะ scan pool อีกครั้งเพื่อยืนยันว่าผลลัพธ์ถูกต้อง ถ้ามีปัญหา:
+
+```
+⚠ Post-op check FAILED: disk wwn-0x... not found in tank/raidz1-0
+  Expected state not reached. See snapshot:
+  /var/log/b2ctl/snapshots/20260617-143022-replace.txt
+  Run: b2ctl rollback 20260617-143022-replace
+```
+
+---
+
+## 8. ข้อควรระวัง
 
 ### ⚠️ อย่าผสม SAS กับ SATA โดยไม่ทดสอบก่อน
 
@@ -503,8 +640,9 @@ Pools:
 
 ### ⚠️ ทุกคำสั่งที่เปลี่ยนแปลงข้อมูลจะถามยืนยัน
 
-ไม่ต้องกังวลว่าจะกดผิดแล้วข้อมูลหาย — ระบบจะถาม `[y/N]` ก่อนทุกครั้ง ค่าเริ่มต้นคือ
-**N (No)** ดังนั้นถ้ากด Enter เปล่าๆ จะไม่มีอะไรเกิดขึ้น
+ไม่ต้องกังวลว่าจะกดผิดแล้วข้อมูลหาย — ระบบจะแสดงกล่อง Confirm พร้อม path
+เต็มของดิสก์ก่อนทุกครั้ง ค่าเริ่มต้นคือ **N (No)** ดังนั้นถ้ากด Enter เปล่าๆ จะไม่มีอะไร
+เกิดขึ้น
 
 ### ⚠️ ZFS resilver ใช้เวลา
 
@@ -513,7 +651,7 @@ Pools:
 
 ---
 
-## 8. สรุปคำสั่งลัด
+## 9. สรุปคำสั่งลัด
 
 ### คำสั่ง CLI (ใช้จาก terminal โดยตรง)
 
@@ -523,7 +661,11 @@ Pools:
 | `sudo b2ctl status --locate` | ดูตาราง + กระพริบไฟดิสก์ที่มีปัญหา |
 | `sudo b2ctl status --json` | แสดงผลเป็น JSON |
 | `sudo b2ctl watch` | ⭐ เข้าโหมดเฝ้าดู (แนะนำ) |
+| `sudo b2ctl --dry-run watch` | เข้าโหมดเฝ้าดูแบบ dry-run (ไม่เปลี่ยนแปลงจริง) |
 | `sudo b2ctl locate <bay/serial/sdX>` | กระพริบไฟดิสก์ตัวนั้น |
+| `sudo b2ctl log` | ดู 20 operation ล่าสุดจาก audit trail |
+| `sudo b2ctl log --last N` | ดู N operation ล่าสุด |
+| `sudo b2ctl rollback <op_id>` | ย้อนกลับ operation ก่อนหน้า (พร้อม confirm) |
 | `sudo b2ctl version` | แสดงเวอร์ชัน |
 
 ### คำสั่งในโหมด watch (พิมพ์ที่ `b2ctl>`)
@@ -536,6 +678,7 @@ Pools:
 | `s` | swap | สลับดิสก์สึกหรอไปยัง spare (ดิสก์เก่ากลายเป็น spare) |
 | `d` | demote | ลดดิสก์ mirror ลงเป็น spare |
 | `n` | new-pool | สร้าง pool ใหม่ |
+| `t` | toggle dry-run | สลับโหมด dry-run เปิด/ปิด |
 | `l` | locate | กระพริบไฟ LED หาดิสก์ (~5 วินาที) |
 | `q` | quit | ออก |
 

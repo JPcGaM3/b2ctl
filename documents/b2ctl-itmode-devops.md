@@ -38,9 +38,14 @@ those only work behind a RAID controller and are removed in this build.
 | `ui.py` | table / pools / details / new-disk rendering | none |
 | `watch.py` | interactive select()-loop, event + command handlers | `lsblk` (poll) |
 | `cli.py` | argparse, subcommand dispatch, `--locate` blink | — |
+| `safety.py` | audit trail, pre-op snapshots, rollback hints, post-op verify | `zpool`, `smartctl` (snapshot only) |
 
 `run()` is list-form `subprocess.run` (no shell), 30 s timeout, returns stdout
 or `''`. `run_check()` is for mutating actions: returns `(ok, stdout+stderr)`.
+Extended signature: `run_check(args, timeout=120, *, op_id=None, dry_run=False)`.
+When `dry_run=True` and `args[0]` is in `safety.WRITE_CMDS`, prints
+`[DRY-RUN] would run: ...` and returns `(True, "")` without executing.
+Read commands still run in dry-run mode.
 
 ---
 
@@ -171,7 +176,7 @@ A single `select.select([sys.stdin], [], [], 2.0)` loop:
 1. Print table + pools + details once (`_cmd_refresh`).
 2. Snapshot block devices (`_block_devs()` via `lsblk -P NAME,TYPE`).
 3. Each iteration:
-   - If stdin is ready → read a line → dispatch `r/s/l/q`.
+   - If stdin is ready → read a line → dispatch `r/a/o/s/d/n/t/l/q`.
    - Re-snapshot devices. `new = current - baseline`,
      `gone = baseline - current`.
    - For each `gone` → `_handle_removed()` (report + reprint pool health).
@@ -189,17 +194,131 @@ console.
 
 ## 6. Safety model
 
+### 6.1 Core invariants
+
 - **Read path is side-effect-free.** `status` only runs `lsblk`/`smartctl`/
   `zpool status|list`/`sas2ircu DISPLAY`.
-- **Every mutating action is confirmed** with a `[y/N]` prompt that names the
-  target device, pool, and operation. `wipe` adds an extra warning with the
-  serial.
+- **Every mutating action is confirmed** with an enhanced box dialog that shows
+  the full `/dev/disk/by-id/` path, pool, vdev, and the exact commands that will
+  run. `wipe` adds an extra serial-level warning.
 - Actions always use the **by-id** name, never the unstable `/dev/sdX`, so a
   reslotted disk can't be acted on by accident.
 - b2ctl never deletes data, never touches access controls, never edits Proxmox
   boot config. Boot-disk (rpool) replacement still needs
-  `proxmox-boot-tool format/init` on the new ESP **manually** — b2ctl will
-  resilver the ZFS side but does not run proxmox-boot-tool.
+  `proxmox-boot-tool format/init` on the new ESP **manually** — b2ctl resilvered
+  the ZFS side but does not run proxmox-boot-tool.
+
+### 6.2 Write-command allowlist
+
+`safety.WRITE_CMDS = {"zpool", "wipefs", "sgdisk", "dd"}` — any `run_check`
+call whose `args[0]` is in this set is classified as mutating. Everything else
+is read-only. This set governs both dry-run suppression and pre-op snapshot
+triggering.
+
+### 6.3 Dry-run mode
+
+Activated by `--dry-run` global CLI flag or by the `t` keystroke in watch.
+`watch._DRY_RUN` module-level bool is toggled by `_toggle_dry_run()`. All
+`run_check` calls in watch receive `dry_run=watch._DRY_RUN`.
+
+When dry-run is active:
+- Write commands: print `[DRY-RUN] would run: <cmd>`, return `(True, "")`.
+- Read commands: execute normally (real disk state shown).
+- Audit entry written with `status: "dry_run"`.
+
+### 6.4 Audit trail — `/var/log/b2ctl/ops.jsonl`
+
+JSONL (one JSON object per line, append-only). Each entry written by
+`safety.begin_op()` (status `"pending"`) and updated by `safety.end_op()`
+(status `"ok"` / `"fail"` / `"dry_run"`).
+
+Schema:
+
+```json
+{
+  "op_id":        "20260617-143022-replace",
+  "op":           "replace",
+  "disk_serial":  "S3EVNX0K123456",
+  "disk_bay":     "1:4",
+  "dev_path":     "/dev/disk/by-id/ata-Samsung_SSD_870_EVO_1TB_S74ZNS0W...",
+  "pool":         "tank",
+  "vdev":         "raidz1-0",
+  "cmds":         [["zpool", "replace", "tank", "/dev/disk/by-id/old", "/dev/disk/by-id/new"]],
+  "status":       "ok",
+  "exit_code":    0,
+  "stdout":       "...",
+  "stderr":       "",
+  "started_at":   "2026-06-17T14:30:22",
+  "ended_at":     "2026-06-17T14:30:23",
+  "rollback_hint":"zpool replace tank /dev/disk/by-id/<new> /dev/disk/by-id/<old>",
+  "snapshot_path":"/var/log/b2ctl/snapshots/20260617-143022-replace.txt"
+}
+```
+
+`op_id` format: `YYYYMMDD-HHMMSS-<op>` (second-granularity; collision possible
+if two ops fire in the same second, which is safe because ops are sequential).
+
+Read via `b2ctl log [--last N]`. Rendered by `cli._log_cmd()`.
+
+### 6.5 Pre-op snapshots — `/var/log/b2ctl/snapshots/<op_id>.txt`
+
+Captured inside `safety.begin_op()` before any write command runs. Runs and
+concatenates:
+- `zpool status <pool>`
+- `zpool list -v`
+- `zfs list`
+- `smartctl -a <dev>` for the affected disk
+
+Stored under `SNAP_DIR = /var/log/b2ctl/snapshots`. If the directory is not
+writable, the snapshot is silently skipped — b2ctl must not crash on read-only
+log dirs (all `os.makedirs` calls are wrapped in `try/except OSError: pass`).
+
+### 6.6 Enhanced confirmation dialog — `watch._confirm_op()`
+
+Called before every destructive action in `watch.py`. Draws a bordered box using
+stdlib `textwrap.wrap(..., break_on_hyphens=False)` (the `break_on_hyphens=False`
+parameter is critical — by-id names like `ata-Samsung_SSD_870_EVO_1TB_...` must
+not be split at hyphens). Box width is 60 chars.
+
+Returns `True` if user types `y`, `False` on any other input (including bare
+Enter). Callers must check the return value and abort if `False`.
+
+### 6.7 Rollback hints
+
+Stored as `rollback_hint` string in each audit entry. Printed by `end_op()` after
+the op completes.
+
+| op | rollback cmd |
+|----|-------------|
+| `offline` | `zpool online <pool> <dev_path>` |
+| `add_spare` | `zpool remove <pool> <dev_path>` |
+| `replace` | `zpool replace <pool> <new_dev> <old_dev>` |
+| `demote` | `zpool attach <pool> <remaining_member> <dev_path>` |
+| `create` | `zpool destroy <pool>` (printed with red warning) |
+| `wipefs` / `wipe` / `sgdisk` | `""` — no rollback (destruction is permanent) |
+
+`b2ctl rollback <op_id>` reads `ops.jsonl`, finds the entry, confirms with the
+same box dialog, and executes `rollback_hint` via `run_check`. The rollback is
+itself recorded as a new audit entry.
+
+### 6.8 Post-op verification
+
+Runs inside `end_op()` after the subprocess exits. Re-calls `zpool status` on
+the affected pool and checks the expected state was reached:
+
+| op | expected state |
+|----|---------------|
+| `replace` | new disk appears in target vdev |
+| `add_spare` | spare count in pool increased by 1 |
+| `offline` | leaf state shows `OFFLINE` |
+
+If the check fails:
+```
+⚠ Post-op check FAILED: <reason>
+  Expected state not reached. See snapshot:
+  /var/log/b2ctl/snapshots/<op_id>.txt
+  Run: b2ctl rollback <op_id>
+```
 
 ---
 
@@ -207,12 +326,19 @@ console.
 
 ```bash
 cd codes && sudo ./install.sh
-# package  -> /opt/b2ctl/b2ctl
-# spec     -> /opt/b2ctl/ssd_spec.json
-# launcher -> /usr/local/sbin/b2ctl  (exec env PYTHONPATH=/opt/b2ctl python3 -P -m b2ctl)
+# package   -> /opt/b2ctl/b2ctl
+# spec      -> /opt/b2ctl/ssd_spec.json
+# launcher  -> /usr/local/sbin/b2ctl  (exec env PYTHONPATH=/opt/b2ctl python3 -P -m b2ctl)
+# log dirs  -> /var/log/b2ctl/
+#              /var/log/b2ctl/snapshots/
 ```
 `ssd_spec.json` overrides/extends the built-in TBW defaults; model match is
 case/space-insensitive substring. Add new SSD models here as you buy them.
+
+The log directory `/var/log/b2ctl/` is created by `install.sh` (`mkdir -p`).
+If it disappears or permissions change, b2ctl logs to `/dev/null` silently
+(all `os.makedirs` calls in `safety.py` are wrapped in `try/except OSError: pass`).
+To reset manually: `sudo mkdir -p /var/log/b2ctl/snapshots && sudo chown root:root /var/log/b2ctl`
 
 ---
 
@@ -226,8 +352,12 @@ case/space-insensitive substring. Add new SSD models here as you buy them.
 | locate lights many bays | you're on old sas2ircu-slot locate; this build uses device-based locate — rebuild/redeploy |
 | POOL `-` for in-pool disk | by-id/dev mismatch — verify `zpool status -P` leaf paths resolve (`realpath`) to the same `/dev/sdX` lsblk reports |
 | END(left) `N/A` on SSD | model not in `ssd_spec.json` / no `241 Total_LBAs_Written` attr; add the rating |
-| `swap` says no spare | pool has no `AVAIL` spare — add one (`[1]`) first |
+| `swap` says no spare | pool has no `AVAIL` spare — add one (`[2]`) first |
 | action fails | read the `✗ failed: <output>` line — it's the raw `zpool` stderr |
+| `b2ctl log` shows nothing | `/var/log/b2ctl/ops.jsonl` missing — run `install.sh` or `mkdir -p /var/log/b2ctl` |
+| snapshots not written | `/var/log/b2ctl/snapshots/` not writable — check permissions; b2ctl silently skips if not writable |
+| `b2ctl rollback` says "not reversible" | wipe/wipefs ops have no rollback — check the snapshot at the path shown |
+| post-op check FAILED after replace | ZFS might still be resilvering — `zpool status tank` to confirm; retry rollback only if resilver never starts |
 
 ---
 

@@ -1,71 +1,405 @@
 # b2ctl (IT-mode) — Reader Guide
 
-A small command-line tool for watching SSD/HDD health and managing ZFS disks
-on a Dell R620 whose PERC H710 has been crossflashed to **IT/HBA mode**
-(it presents as an LSI SAS9207-8i / SAS2308). In this mode the disks are raw —
-there is no RAID controller to ask — so b2ctl reads each drive directly and
-talks to ZFS for everything else.
+---
 
-This is the IT-mode sibling of the original storcli/RAID-mode b2ctl. Same look
-and feel (a wide health table with a details block underneath), but it no
-longer needs perccli/storcli or megaraid passthrough.
+## Contents
+
+1. [What it does](#1-what-it-does)
+2. [Install](#2-install)
+3. [Getting started](#3-getting-started)
+4. [Reading the table](#4-reading-the-table)
+5. [All features in watch mode](#5-all-features-in-watch-mode)
+6. [Common tasks](#6-common-tasks)
+7. [Safety features](#7-safety-features)
+8. [Warnings](#8-warnings)
+9. [Command reference](#9-command-reference)
 
 ---
 
-## What it does
+## 1. What it does
 
-- Shows one table row per physical disk: bay, device, model, serial, power-on
-  hours, wear, endurance left, total written, bad sectors, SMART health, the
-  pool/vdev it belongs to, and an overall **LEVEL** (NORMAL / CONFIG / WARNING /
-  CRITICAL).
-- Lists your ZFS pools and their health underneath.
-- Spells out exactly which disks need attention and why.
-- **Watches for disks you plug in or pull out while it runs**, and asks what to
-  do with a new disk — make it a spare, use it to replace a failed disk, or
-  wipe it blank.
-- Blinks a single disk's LED (by device) so you know which physical drive to
-  pull — works around the scrambled bay numbering (see note below).
+A command-line tool for watching SSD/HDD health and managing ZFS disks on a
+Dell R620 whose PERC H710 has been crossflashed to **IT/HBA mode** (presents as
+LSI SAS9207-8i / SAS2308). Disks are raw — no RAID controller to query — so
+b2ctl reads each drive directly and talks to ZFS for everything else.
+
+**b2ctl can:**
+
+- Show one table row per physical disk: bay, device, model, serial, power-on
+  hours, wear, endurance left, total written, bad sectors, SMART health, pool/vdev,
+  and an overall **LEVEL** (NORMAL / CONFIG / WARNING / CRITICAL).
+- List ZFS pools and their health.
+- Spell out exactly which disks need attention and why.
+- **Watch for disks you plug in or pull out** — asks what to do with a new disk:
+  add spare, replace a failed disk, or wipe it blank.
+- Blink a disk's LED so you know which physical drive to pull (works around
+  scrambled bay numbers — see §8).
+- **Preview operations in dry-run mode** — shows the exact commands that would
+  run without changing anything.
+- **Record every mutating action** to an audit trail at `/var/log/b2ctl/ops.jsonl`,
+  with a pre-op snapshot and rollback hint.
+- **Roll back a previous operation** with `b2ctl rollback <op_id>`.
+
+> This is the IT-mode sibling of the original storcli/RAID-mode b2ctl. Same look
+> and feel, but no perccli/storcli or megaraid passthrough needed.
 
 ---
 
-## Install (about a minute)
+## 2. Install
 
 ```bash
 cd codes
 sudo ./install.sh
 ```
 
-This copies the package to `/opt/b2ctl` and creates the `b2ctl` command.
-You need `smartctl` (smartmontools), `zpool` (zfsutils), and `lsblk` already
-present. `sas2ircu` gives bay numbers; `ledmon` (`ledctl`) gives nicer locate
-LEDs but is optional — without it, b2ctl blinks the disk's activity LED instead.
+Copies the package to `/opt/b2ctl`, creates the `b2ctl` launcher at
+`/usr/local/sbin/b2ctl`, and creates `/var/log/b2ctl/snapshots/` for the audit
+system.
+
+**Dependencies:**
+
+| binary | purpose | required? |
+|--------|---------|-----------|
+| `smartctl` (smartmontools) | read disk SMART health | required |
+| `zpool` (zfsutils-linux) | ZFS pool management | required |
+| `lsblk` | disk enumeration | required |
+| `sas2ircu` | bay numbers (enclosure:slot mapping) | optional — bays show `-` without it |
+| `ledctl` (ledmon) | activity LED locate | optional — falls back to dd |
+| `wipefs`, `sgdisk` | disk wipe action | optional — needed for wipe only |
 
 ---
 
-## The two ways to use it
+## 3. Getting started
 
-### 1. A quick health check
+Two ways to run b2ctl:
+
+### 3.1 Quick health check (status)
 
 ```bash
 sudo b2ctl status
 ```
 
-You get the table, the pool summary, and the details block — the same shape as
-the old hardware-RAID version. Add `--locate` to blink the LEDs on any at-risk
-disks for a few seconds (`--seconds N` to change). Add `--json` for a
-machine-readable dump.
+Shows the disk table, pool summary, and details block — then exits.
 
-### 2. The interactive watcher (the main event)
+**Options:**
+
+| command | what it does |
+|---------|-------------|
+| `sudo b2ctl status --locate` | same + blink LEDs on WARNING/CRITICAL disks for ~5s |
+| `sudo b2ctl status --json` | machine-readable JSON output |
+| `sudo b2ctl --dry-run status` | preview mode — read commands still run, writes suppressed |
+
+### 3.2 Interactive watcher (the main event)
 
 ```bash
 sudo b2ctl watch
 ```
 
-It prints the table once, then sits and watches. Two things can happen:
+Shows the table once, then watches continuously. Two things happen automatically:
 
-**You insert a disk.** b2ctl notices within a couple of seconds, prints a panel
-about the new drive (model, serial, size, health), and asks:
+- **You insert a disk** — b2ctl detects it within ~2 seconds, prints a panel
+  about the new drive, and asks what to do.
+- **You pull a disk** — b2ctl reports which device disappeared and reprints pool
+  health so you can see if a pool went DEGRADED.
 
+After it starts you'll see:
+
+```
+================================================================================
+BAY   DEV  IF   MODEL            SERIAL            POWER_ON      WEAR   END    ...
+--------------------------------------------------------------------------------
+1:0   sdf  SAS  Samsung SSD 860  S5G8NE0MXXXXXXX   51020h(~5.8y) 1%     99.2% ...
+1:1   sda  SAS  Samsung SSD 860  S5G8NE0MXXXXXXX   51021h(~5.8y) 1%     99.1% ...
+1:4   sdb  SAS  Samsung SSD 870  S74ZNS0WXXXXXXX   18238h(~2.1y) 1%     98.4% ...
+1:5   sdc  SAS  Samsung SSD 870  S74ZNS0WXXXXXXX   18243h(~2.1y) 1%     98.4% ...
+1:6   sdd  SAS  Samsung SSD 870  S74ZNS0WXXXXXXX   18246h(~2.1y) 1%     98.4% ...
+1:7   sde  SAS  Samsung SSD 870  S74ZNS0WXXXXXXX   18247h(~2.1y) 1%     99.8% ...
+================================================================================
+Pools:
+  rpool   952G   4.83G  free=947G   ONLINE   cap=0%
+  tank    2.72T  1.72G  free=2.72T  ONLINE   cap=0%
+[OK] all disks healthy and assigned
+
+[r]efresh  [a]ssign  [o]ffload  [s]wap  [d]emote  [n]ew-pool  [t]oggle-dryrun  [l]ocate  [q]uit
+b2ctl>
+```
+
+Type a single letter to act.
+
+---
+
+## 4. Reading the table
+
+| column | meaning | example |
+|--------|---------|---------|
+| **BAY** | enclosure:slot number | `1:4` = enclosure 1, slot 4 |
+| **DEV** | Linux device name | `sda`, `sdb` |
+| **IF** | interface type | `SAS`, `SATA`, `NVMe` |
+| **MODEL** | drive model | `Samsung SSD 870` |
+| **SERIAL** | unique serial number | `S74ZNS0WXXXXXXX` |
+| **POWER_ON** | hours powered on | `18238h (~2.1y)` |
+| **WEAR(used)** | SSD life consumed — from SMART counter (lower = better) | `1%` |
+| **END(left)** | endurance remaining vs. rated TBW | `98.4%` |
+| **WRITTEN** | total written / rated TBW | `9.87TB/600TBW` |
+| **BAD** | reallocated sectors (SATA) or grown defects (SAS) | `0` = normal; `>0` = danger |
+| **HEALTH** | SMART self-test result | `PASSED`, `FAILED` |
+| **POOL** | pool/vdev membership | `tank/raidz1-0`, `rpool/mirror-0` |
+| **LEVEL** | overall status | see table below |
+
+**LEVEL meanings:**
+
+| level | meaning |
+|-------|---------|
+| **NORMAL** | healthy, assigned to a pool — no action needed |
+| **CONFIG** | healthy but not in any pool — needs assignment (add as spare, or build a pool) |
+| **WARNING** | endurance/wear getting low, or vdev DEGRADED — prepare to act soon |
+| **CRITICAL** | SMART failed, bad sectors, near-zero endurance, FAULTED/UNAVAIL vdev, or GHOST (OS rejected drive — no `/dev/sdX` node) — act immediately |
+
+---
+
+## 5. All features in watch mode
+
+After `sudo b2ctl watch`, type single-letter commands at `b2ctl>`.
+
+---
+
+### 5.1 `r` — Refresh table
+
+**When to use:** want fresh data without restarting.
+
+```
+b2ctl> r
+```
+
+Rescans all disks and reprints the table.
+
+---
+
+### 5.2 `a` — Assign a free disk
+
+**When to use:** a disk shows **CONFIG** (free/unassigned) and you want to put it to work.
+
+```
+b2ctl> a
+    [1] bay 1:7 /dev/sde (Samsung SSD 870, SN S74ZNS0WXXXXXXX)
+  assign which #>
+```
+
+Pick the disk, then choose an action:
+
+| choice | action | when to use |
+|--------|--------|-------------|
+| **[1]** Blink LED | LED flickers ~5s | identify the bay before pulling |
+| **[2]** Add as hot SPARE | add to pool as spare | pool needs a standby disk |
+| **[3]** REPLACE faulted disk | replace a FAULTED/DEGRADED member | pool has a failed disk |
+| **[4]** ATTACH as mirror | attach to existing disk as mirror pair | want to add redundancy |
+| **[5]** ADD single disk | add as vdev with no redundancy | ⚠ one failure = total loss |
+| **[6]** WIPE | clear all labels and data | prepare disk for a new pool |
+| **[s]** Skip | do nothing now | decide later |
+
+> Every destructive action shows a confirmation box with full `/dev/disk/by-id/` paths before executing. Default answer is **N** — pressing Enter without typing cancels safely.
+
+**Example: add as spare**
+
+```
+  action> 2
+    [1] rpool (ONLINE)
+    [2] tank (ONLINE)
+  pool #> 2
+
+┌─ CONFIRM OPERATION ─────────────────────────────────────────────────────┐
+│ Op:    add_spare                                                          │
+│ Disk:  bay 1:7  S74ZNS0WXXXXXXX  AVAILABLE                               │
+│ Pool:  tank                                                               │
+│                                                                           │
+│ Will run:                                                                 │
+│   zpool add tank spare                                                    │
+│     /dev/disk/by-id/ata-Samsung_SSD_870_EVO_1TB_S74ZNS0W582280E          │
+│                                                                           │
+│ Snapshot → /var/log/b2ctl/snapshots/20260617-120011-add_spare.txt        │
+└───────────────────────────────────────────────────────────────────────────┘
+Proceed? [y/N]> y
+✔ added as spare
+```
+
+---
+
+### 5.3 `o` — Offload (remove disk from pool)
+
+**When to use:** need to physically pull a disk out of its pool.
+
+```
+b2ctl> o
+    [1] bay 1:0 /dev/sdf in rpool (vdev mirror-0)
+    [2] bay 1:1 /dev/sda in rpool (vdev mirror-0)
+    [3] bay 1:4 /dev/sdb in tank (vdev raidz1-0)
+    ...
+  offload which #>
+```
+
+What happens depends on the disk's role:
+
+| disk role | what b2ctl does |
+|-----------|----------------|
+| **spare** | removes from pool immediately — no resilver needed |
+| **mirror member** | detaches the mirror leg immediately (if other legs are ONLINE) |
+| **raidz member** | must resilver data to a spare first — takes time |
+
+**Example: offload a raidz disk (needs spare)**
+
+```
+  offload which #> 3
+  Replace (1:4) Samsung SSD 870 (S74ZNS0WXXXXXXX) onto spare (1:7)
+    Samsung SSD 870 (S74ZNS0W582283V)? [y/N]> y
+  ✔ replace started — resilvering onto spare
+  resilvering... 45.2% done, ETA 00:03:21
+  ✔ resilver completed 100%
+  ✔ detached old disk /dev/sdb
+  please pull bay 1:4 ... blinking LED
+```
+
+---
+
+### 5.4 `s` — Swap worn disk onto spare
+
+**When to use:** a disk is wearing out (WEAR high, END left low) but hasn't failed yet — resilver it onto the hot spare before it dies.
+
+> **Difference from offload:** swap trades places (old disk becomes the new spare; spare enters the pool as a member). Offload removes the disk from the pool entirely.
+
+```
+b2ctl> s
+    [1] (1:0) SAMSUNG MZ7LH1T9 (S4F2NY0XXXXXXX) in rpool
+    [2] (1:4) Samsung SSD 870 (S74ZNS0WXXXXXXX) in tank
+    ...
+  swap which #> 2
+  swap (1:4) Samsung SSD 870 (S74ZNS0WXXXXXXX) onto spare
+    (1:7) Samsung SSD 870 (S74ZNS0W582283V)? [y/N]> y
+  ✔ swap started — resilvering onto spare
+  ✔ resilver completed 100%
+  ✔ detached old disk /dev/sdb
+  ✔ (1:4) Samsung SSD 870 (S74ZNS0WXXXXXXX) is now a hot spare in 'tank'
+```
+
+Result: spare enters pool as raidz1 member; worn disk becomes the new spare. Both stay in the chassis — no physical move needed.
+
+---
+
+### 5.5 `d` — Demote mirror member to spare
+
+**When to use:** mirror has more than 2 legs (e.g., 3-way mirror) and you want to pull one leg down to a spare.
+
+```
+b2ctl> d
+    [1] (1:0) SAMSUNG MZ7LH1T9 (S4F2NY0XXXXXXX) in rpool
+    [2] (1:1) SAMSUNG MZ7LH1T9 (S4F2NY0XXXXXXX) in rpool
+  demote which #> 2
+  demote (1:1) SAMSUNG MZ7LH1T9 (...) in 'rpool' to a hot spare? [y/N]> y
+  ✔ demoted to spare
+```
+
+> b2ctl refuses if detaching would leave a vdev with only one member (no redundancy).
+
+---
+
+### 5.6 `n` — Create new pool
+
+**When to use:** have free disks and want a new ZFS pool.
+
+```
+b2ctl> n
+    [1] /dev/sdb (bay 1:4)
+    [2] /dev/sdc (bay 1:5)
+    [3] /dev/sdd (bay 1:6)
+  pick disks (space-separated #)> 1 2 3
+  pool name> backup
+  raid type (stripe, mirror, raidz1, raidz2) [mirror]> raidz1
+  create pool 'backup' (raidz1) with 3 disks? [y/N]> y
+  ✔ pool created
+```
+
+**RAID types:**
+
+| type | minimum disks | tolerates failures | usable space |
+|------|--------------|-------------------|--------------|
+| **stripe** | 1 | 0 — one failure = total data loss | 100% |
+| **mirror** | 2 | 1 | 50% |
+| **raidz1** | 2 (recommend 3+) | 1 | (N-1)/N |
+| **raidz2** | 4 | 2 | (N-2)/N |
+
+> If disks have existing labels or data, b2ctl warns and asks to wipe first.
+
+---
+
+### 5.7 `t` — Toggle dry-run mode
+
+**When to use:** want to see exactly what commands would run without making any changes — for learning, rehearsing, or verifying before a real operation.
+
+```
+b2ctl> t
+[DRY-RUN] enabled — write commands will be printed, not executed
+b2ctl> s
+  swap (1:4) Samsung SSD 870 (...) onto spare (1:7)? [y/N]> y
+  [DRY-RUN] would run: zpool replace tank
+    /dev/disk/by-id/ata-Samsung_SSD_870_EVO_1TB_S74ZNS0W...
+    /dev/disk/by-id/ata-Samsung_SSD_870_EVO_1TB_S74ZNS0W582283V
+b2ctl> t
+[DRY-RUN] disabled — back to live mode
+```
+
+While dry-run is active, write commands (`zpool`, `wipefs`, `sgdisk`, `dd`) print
+`[DRY-RUN] would run:` instead of executing. Read commands (SMART reads, pool
+status) still execute so you see real disk state.
+
+Also available as a startup flag: `sudo b2ctl --dry-run watch`
+
+---
+
+### 5.8 `l` — Locate (blink LED)
+
+**When to use:** need to confirm which physical bay a disk occupies before pulling it.
+
+```
+b2ctl> l
+  locate which (bay/serial/sdX)> sdc
+  blinking /dev/sdc for 5s ...
+  ✔ done
+```
+
+Accepts three identifier formats:
+- **Bay number:** `1:4`
+- **Serial:** `S74ZNS0WXXXXXXX`
+- **Device name:** `sdc` or `/dev/sdc`
+
+The bay's activity LED blinks for ~5 seconds then stops automatically.
+
+> Always use `l` before physically pulling a disk — bay numbers may be cosmetically scrambled (see §8).
+
+---
+
+### 5.9 `q` — Quit
+
+```
+b2ctl> q
+bye
+```
+
+---
+
+### 5.10 Hot-plug (automatic detection)
+
+**Inserting a disk:**
+
+b2ctl detects it within ~2 seconds and shows a panel:
+
+```
+╔══ NEW DISK DETECTED: /dev/sdg ══════════════════════════════════
+  device : /dev/sdg  (/dev/disk/by-id/ata-Samsung_SSD_870...)
+  model  : Samsung SSD 870   SN S74ZNS0WXXXXXXX
+  bay    : 1:3   size 1.0T   SAS   SSD
+  health : PASSED   wear 0% used   endurance 100.0% left
+╚══════════════════════════════════════════════════════════════════
+
+  Disk /dev/disk/by-id/ata-Samsung_SSD_870... is free.
   What do you want to do with it?
     [1] Prepare for physical removal (Blink LED)
     [2] Add to a pool as hot SPARE
@@ -74,131 +408,294 @@ about the new drive (model, serial, size, health), and asks:
     [5] ADD single disk to a pool (expand capacity - WARNING: no redundancy)
     [6] WIPE it blank (for a new pool)
     [s] skip / decide later
+  action>
 ```
 
-Pick one, confirm, and b2ctl runs the right `zpool` command for you.
+**Removing a disk:**
 
-**You pull a disk.** b2ctl reports which device disappeared and reprints the
-pool health so you can see whether a pool went DEGRADED.
+```
+■ disk removed: /dev/sdc
+  current pool health:
+Pools:
+  rpool   952G   4.83G  free=947G   ONLINE    cap=0%
+  tank    2.72T  1.72G  free=2.72T  DEGRADED  cap=0%    <-- not ONLINE
+```
 
-While watching, you can also type a single-letter command at the `b2ctl>`
-prompt:
-
-| key | action |
-|----|--------|
-| `r` | refresh the table |
-| `a` | assign a free disk |
-| `o` | offload an in-pool disk |
-| `s` | swap an in-pool disk onto an existing spare |
-| `d` | demote a mirror member to a spare |
-| `n` | create a new pool (warns if disks contain existing labels) |
-| `l` | blink one disk's LED (~5s) by bay/serial/device |
-| `q` | quit |
+> If a pool goes DEGRADED after a removal, replace the missing disk promptly.
 
 ---
 
-## Commands (one-shot)
+## 6. Common tasks
+
+### A disk failed — replace it
+
+1. `b2ctl> l` → enter the failed disk's serial → LED blinks on its bay → pull it
+2. Insert the new disk → b2ctl detects it, shows a panel
+3. Choose `[3] REPLACE` → pick the FAULTED pool member → confirm the dialog
+4. ZFS resilver starts automatically — check progress with `zpool status tank`
+
+```
+  action> 3
+    [1] tank: /dev/disk/by-id/ata-Samsung_SSD_870_EVO_1TB_S74ZNS0W... (FAULTED)
+  replace #> 1
+```
+
+### A disk is wearing out — swap to spare before it fails
+
+1. Watch shows LEVEL = **WARNING**, END(left) low
+2. `b2ctl> s` → pick the worn disk → confirm
+3. Resilver starts onto the spare — wait for completion
+4. Worn disk becomes the new spare; spare enters the pool as a member
+5. No physical move needed
+
+### Add a fresh spare
+
+1. Insert the disk → b2ctl detects it
+2. Choose `[2] Add to a pool as hot SPARE` → pick the pool → confirm
+
+### Create a new pool
+
+1. `b2ctl> n` → pick disks → name the pool → pick RAID type → confirm
+2. Recommended: `raidz1` for 3 disks, `mirror` for 2 disks
+
+### Safely remove a disk from a pool
+
+1. `b2ctl> o` → pick the disk → confirm resilver to spare (raidz) or confirm detach (mirror/spare)
+2. Wait for resilver to complete (if needed)
+3. `b2ctl> l` → blink the bay → physically pull the disk
+
+### Preview an operation before running it
+
+1. `b2ctl> t` → dry-run enabled
+2. Run any operation — commands print without executing
+3. `b2ctl> t` → dry-run disabled, back to live
+
+---
+
+## 7. Safety features
+
+b2ctl records every destructive operation and gives you the tools to verify, preview, and reverse what it does.
+
+### 7.1 Dry-run mode
+
+Preview any operation without changing anything:
+
+```bash
+# Startup flag — dry-run for entire session
+sudo b2ctl --dry-run watch
+
+# Or toggle inside watch
+b2ctl> t
+```
+
+Write commands (`zpool`, `wipefs`, `sgdisk`, `dd`) print `[DRY-RUN] would run:`
+and do nothing. Read commands still run so you see real disk state.
+
+### 7.2 Enhanced confirmation dialog
+
+Every destructive action shows a box with the **full `/dev/disk/by-id/` path**
+before executing — you can verify the exact device before confirming:
+
+```
+┌─ CONFIRM OPERATION ─────────────────────────────────────────────────────┐
+│ Op:    replace                                                            │
+│ From:  bay 1:4  S74ZNS0WXXXXXXX  ONLINE  (tank/raidz1-0)                │
+│ To:    bay 1:7  S8ABCXXXXXXXX    AVAILABLE                               │
+│ Pool:  tank/raidz1-0                                                      │
+│                                                                           │
+│ Will run:                                                                 │
+│   zpool replace tank                                                      │
+│     /dev/disk/by-id/ata-Samsung_SSD_870_EVO_1TB_S74ZNS0W...             │
+│     /dev/disk/by-id/ata-Samsung_SSD_870_EVO_1TB_S8ABC123...             │
+│                                                                           │
+│ Snapshot → /var/log/b2ctl/snapshots/20260617-143022-replace.txt         │
+└───────────────────────────────────────────────────────────────────────────┘
+Proceed? [y/N]:
+```
+
+Default is **N** — pressing Enter without typing `y` cancels safely.
+
+### 7.3 Pre-op snapshots
+
+Before any write operation, b2ctl captures the state of the pool and the
+affected disk, saved to `/var/log/b2ctl/snapshots/<op_id>.txt`:
+
+- `zpool status <pool>`
+- `zpool list -v`
+- `zfs list`
+- `smartctl -a <dev>` for the affected disk
+
+The snapshot path is shown in the confirmation dialog and in `b2ctl log`.
+
+### 7.4 Audit trail
+
+Every operation is recorded in `/var/log/b2ctl/ops.jsonl`. View with:
+
+```bash
+b2ctl log             # last 20 operations
+b2ctl log --last 50   # last 50
+```
+
+Output:
+
+```
+OP_ID                       OP        BAY  SERIAL            POOL  STATUS  STARTED
+20260617-143022-replace     replace   1:4  S74ZNS0WXXXXXXX   tank  ok      2026-06-17 14:30:22
+20260617-120011-add_spare   add_spare 1:7  S8ABCXXXXXXXX     tank  ok      2026-06-17 12:00:11
+```
+
+### 7.5 Rollback hints
+
+After each operation, b2ctl prints the command to undo it:
+
+```
+✔ replace started — resilvering
+  Rollback if needed: zpool replace tank /dev/disk/by-id/<new> /dev/disk/by-id/<old>
+```
+
+To execute a rollback:
+
+```bash
+b2ctl rollback 20260617-143022-replace
+```
+
+b2ctl shows a confirmation dialog with the rollback command and executes on `y`.
+The rollback itself is written to the audit log.
+
+**Reversibility:**
+
+| operation | reversible? |
+|-----------|------------|
+| offline | yes — `zpool online <pool> <dev>` |
+| add spare | yes — `zpool remove <pool> <dev>` |
+| replace (resilver in progress) | yes — swap back |
+| replace (resilver complete) | no |
+| demote mirror to spare | yes — `zpool attach <pool> <remaining> <demoted>` |
+| create pool | yes — `zpool destroy <pool>` ⚠ destroys all data |
+| wipe (`wipefs`/`sgdisk`) | **no — permanent** |
+
+### 7.6 Post-op verification
+
+After each operation completes, b2ctl re-scans the pool to confirm the expected
+state was reached. If something looks wrong:
+
+```
+⚠ Post-op check FAILED: disk wwn-0x... not found in tank/raidz1-0
+  Expected state not reached. See snapshot:
+  /var/log/b2ctl/snapshots/20260617-143022-replace.txt
+  Run: b2ctl rollback 20260617-143022-replace
+```
+
+---
+
+## 8. Warnings
+
+### Bay numbers may be scrambled
+
+On this Dell 12G backplane in IT mode, the controller reports scrambled slot
+numbers (known issue — the Dell slot-translation map is absent in LSI
+firmware). b2ctl corrects them via `bay_map.json`. The numbers are display-only;
+every action keys off the disk **serial**, not the bay. Always use `l` (locate)
+to blink the bay and confirm before pulling.
+
+### Mixing SAS and SATA drives
+
+Mixing a SAS drive as a hot spare into an all-SATA pool is technically allowed
+in IT mode, but reformat enterprise SAS drives to 512-byte sectors first and
+test on a spare bay. When in doubt, match the existing drive type.
+
+### resilver takes time
+
+ZFS resilver time depends on how much data is in the pool. Do not power off or
+pull disks during a resilver. Wait for `zpool status` to show `resilvered with
+0 errors` before touching anything.
+
+### Confirmation default is N
+
+Every destructive prompt defaults to **N**. Pressing Enter without typing cancels
+safely. `wipe` prompts twice.
+
+### rpool boot-disk replacement
+
+Replacing a disk in `rpool` (the Proxmox boot pool) — b2ctl resilvered the ZFS
+side, but you must also run `proxmox-boot-tool format/init` on the new disk's
+ESP partition **manually**. b2ctl does not touch Proxmox boot config.
+
+---
+
+## 9. Command reference
+
+### One-shot CLI commands
 
 | command | what it does |
 |---------|--------------|
-| `b2ctl status [--locate] [--json]` | one-shot health table + pool summary + details block |
-| `b2ctl locate <bay\|serial\|dev> [secs]` | blink one disk's LED for ~5 s |
-| `b2ctl offload` | guided: safely detach or resilver an in-pool disk |
-| `b2ctl replace` | guided: simulate-fail and replace a disk onto a spare |
-| `b2ctl swap` | guided: swap a wearing disk onto an existing spare |
+| `b2ctl status` | health table + pool summary + details block |
+| `b2ctl status --locate` | same + blink LEDs on WARNING/CRITICAL disks |
+| `b2ctl status --json` | JSON output |
+| `b2ctl --dry-run <cmd>` | preview what commands would run — no writes |
+| `b2ctl locate <bay\|serial\|dev> [secs]` | blink one disk's LED (~5s) |
+| `b2ctl offload` | guided: safely remove an in-pool disk |
+| `b2ctl replace` | guided: replace a disk onto a spare |
+| `b2ctl swap` | guided: swap a worn disk onto an existing spare |
 | `b2ctl demote` | guided: demote a mirror leg to a spare |
 | `b2ctl create` | guided: create a new ZFS pool |
-| `b2ctl check` | verify tools, show which backend was detected, config file status |
-| `b2ctl config show` | print current effective configuration as JSON |
+| `b2ctl log [--last N]` | show last N ops from audit trail (default 20) |
+| `b2ctl rollback <op_id>` | roll back a previous operation (with confirmation) |
+| `b2ctl check` | verify tools, show backend detected, config file status |
+| `b2ctl config show` | print current effective config as JSON |
 | `b2ctl config init` | write `/etc/b2ctl/config.json` with auto-detected defaults |
 | `b2ctl version` | print version string |
 
----
+### Watch mode keys (at `b2ctl>`)
 
-## Configuration
+| key | action |
+|-----|--------|
+| `r` | refresh the health table |
+| `a` | assign a free disk to a pool |
+| `o` | offload (remove) a disk from a pool |
+| `s` | swap a worn in-pool disk onto a spare |
+| `d` | demote a mirror member to a spare |
+| `n` | create a new pool |
+| `t` | toggle dry-run mode on/off |
+| `l` | blink one disk's LED (~5s) by bay/serial/device |
+| `q` | quit |
 
-b2ctl works out of the box with no config file. A config file at
-`/etc/b2ctl/config.json` lets you override tool paths and force a backend mode.
+### New disk / assign menu choices
 
-**The file is never auto-created.** Run `b2ctl config init` on the server to
-generate it with auto-detected defaults, then edit as needed.
+| choice | action |
+|--------|--------|
+| `1` | blink LED (identify bay before pulling) |
+| `2` | add to pool as hot spare |
+| `3` | replace a FAULTED/DEGRADED disk in a pool |
+| `4` | attach to existing disk (expand mirror) |
+| `5` | add as single vdev — no redundancy ⚠ |
+| `6` | wipe all labels and data |
+| `s` | skip — decide later; come back with `a` |
 
-### Key fields
+### Audit trail
 
-- **`tool_paths.<name>`** — absolute path to a binary, e.g.
-  `"/tool_paths/sas2ircu": "/usr/local/bin/sas2ircu"`. An empty string means
-  "auto-detect from PATH".
-- **`controller.mode`** — `"auto"` (default), `"it"` (HBA/sas2ircu), or
-  `"raid"` (storcli/perccli). Use `"it"` or `"raid"` to skip auto-detection
-  and guarantee the right backend.
-- **`controller.index`** — `"all"` (default, scan all controllers) or a numeric
-  string like `"0"` to restrict to one controller.
-- **`bay_map_path`** — path to a custom `bay_map.json`. Empty means use the
-  bundled file next to the installed package.
+| command | example |
+|---------|---------|
+| `b2ctl log` | show last 20 ops |
+| `b2ctl log --last N` | `b2ctl log --last 50` |
+| `b2ctl rollback <op_id>` | `b2ctl rollback 20260617-143022-replace` |
 
-### Useful commands
+### Configuration
+
+b2ctl works out of the box with no config file. A file at `/etc/b2ctl/config.json`
+lets you override tool paths and force a backend mode.
 
 ```bash
-# On the server — first-time setup
-sudo b2ctl config init          # writes /etc/b2ctl/config.json
-sudo b2ctl config show          # print current effective config
-sudo b2ctl check                # verify tools, detect backend, show config path
+sudo b2ctl config init   # write /etc/b2ctl/config.json with auto-detected defaults
+sudo b2ctl config show   # print current effective config
+sudo b2ctl check         # verify tools, detect backend, show config path
 ```
 
-`b2ctl check` is the first thing to run when something looks wrong. It shows
+`b2ctl check` is the first thing to run when something looks wrong — it shows
 which tools were found, which backend was detected, and whether the config file
 exists.
 
 ---
 
-## Reading the table
-
-- **WEAR(used)** — how much SSD life the drive's own SMART counter says is used.
-- **END(left)** — endurance left, worked out from total bytes written versus
-  the drive's rated TBW (from `ssd_spec.json`). For the Samsung 870 EVO 1TB
-  that rating is 600 TBW; for the 860 PRO 1TB it is 1200 TBW.
-- **BAD** — reallocated sectors (SATA) or grown defects (SAS). Anything above 0
-  is treated as critical.
-- **LEVEL**
-  - `NORMAL` — healthy and assigned to a pool.
-  - `CONFIG` — healthy but **not in any pool** (a spare-in-waiting or a fresh
-    disk to add).
-  - `WARNING` — endurance/wear getting low, or vdev degraded.
-  - `CRITICAL` — failed SMART, bad sectors, almost no endurance left, or a
-    faulted/unavailable vdev member. GHOST disks (OS rejected the drive, no `/dev/sdX` node exists) also show as CRITICAL.
-
----
-
-## Common tasks
-
-**A disk failed — replace it.** Pull the dead one (use
-`b2ctl locate <bay|serial> ` first if unsure which it is — it blinks for ~5s), slot in the new one, and let `b2ctl watch` catch
-it — choose `[2]` and pick the faulted member. ZFS resilvers automatically.
-
-**A disk is wearing out but still alive.** If you keep a spare in the pool,
-press `s` in `watch`, pick the worn disk, and b2ctl resilvers it onto the spare
-before it dies. Then physically swap the worn one out at your leisure.
-
-**Adding a fresh spare.** Insert the disk, choose `[1]`, pick the pool.
-
-> On IT mode there is no automatic hardware rebuild. ZFS does the rebuild
-> (resilver), and b2ctl turns each of these into one guided step.
-
----
-
-## A note on bay numbers
-
-On this Dell 12G backplane flashed to LSI IT mode, the controller reports
-**scrambled slot numbers** (a known issue — the Dell firmware's slot map is
-gone). b2ctl corrects them via `bay_map.json`; this server uses a simple
-mirror-reversal across 8 bays. The numbers are cosmetic — every action keys off
-the disk **serial**, not the bay. To recalibrate, run `b2ctl locate <serial>`,
-watch which bay blinks, and adjust `bay_map.json`.
-
-## A safety note specific to your hardware
-
-Mixing a **SAS** drive as a hot spare into an all-**SATA** pool used to hang the
-megaraid driver back when the card was in RAID mode. In IT mode that code path
-is gone, so it is technically allowed — but reformat enterprise SAS drives to
-512-byte sectors first and test on a spare bay. When in doubt, match the
-existing drives.
+> **Not sure what to do?** Press `s` (skip) — nothing changes. Come back with
+> `a` (assign) when you're ready.

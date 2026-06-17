@@ -20,7 +20,7 @@ import select
 import sys
 import time
 
-from . import core, hba, zfs, spec, locate
+from . import core, hba, zfs, spec, locate, safety
 from .common import Disk, R, Y, G, C, N, run_check
 from . import ui
 
@@ -142,7 +142,7 @@ def _assign_free_disk(d, tbw, all_disks=None) -> None:
     elif choice == "2":
         pool = _pick_pool()
         if pool and _confirm(f"add {ui.disk_label(d)} to '{pool}' as spare?"):
-            ok, out = zfs.add_spare(pool, d.by_id or d.dev)
+            ok, out = zfs.add_spare(pool, d.by_id or d.dev, dry_run=_DRY_RUN)
             print((G + "  ✔ added as spare" if ok else R + f"  ✗ failed: {out}") + N)
     elif choice == "3":
         bad = zfs.degraded_leaves()
@@ -156,33 +156,39 @@ def _assign_free_disk(d, tbw, all_disks=None) -> None:
             tgt = bad[int(sel) - 1]
         except (ValueError, IndexError):
             print(f"{Y}  cancelled{N}"); return
-        if _confirm(f"replace {tgt['token']} in '{tgt['pool']}' with {ui.disk_label(d)}?"):
-            ok, out = zfs.replace(tgt["pool"], tgt["token"], d.by_id or d.dev)
-            if not ok:
-                print(R + f"  ✗ failed: {out}" + N)
-                return
-            print(G + "  ✔ replace started — resilvering" + N)
-            pool = tgt["pool"]
-            while True:
-                time.sleep(2)
-                st = zfs.poll_resilver_status(pool)
-                if st["completed"]:
-                    sys.stdout.write(f"\r{G}  ✔ resilver completed{N}                    \n")
-                    break
-                sys.stdout.write(f"\r{Y}  resilvering... {st['done']}% done, ETA {st['eta']}{N}")
-                sys.stdout.flush()
-            # detach lingering REMOVED token if still in topology
-            old_token = tgt["token"]
-            topo = zfs.topology()
-            if any(e["pool"] == pool and e["token"] == old_token for e in topo.values()):
-                ok_d, out_d = zfs.detach(pool, old_token)
-                if ok_d:
-                    print(G + f"  ✔ detached old token {old_token}" + N)
-                else:
-                    print(R + f"  ✗ detach failed: {out_d}" + N)
-            avail = zfs.spares(pool)
-            if avail:
-                print(G + f"  ✔ spare restored to AVAIL: {', '.join(avail)}" + N)
+        pool = tgt["pool"]
+        vdev = tgt.get("vdev", "unknown")
+        cmds = [["zpool", "replace", "-f", pool, tgt["token"], d.by_id or d.dev]]
+        op_id = safety.begin_op("replace", d.serial, d.bay, tgt["token"], pool, vdev, cmds)
+        if not _confirm_op("replace", None, d, pool, vdev, cmds):
+            safety.end_op(op_id, False, "", "cancelled", 0)
+            return
+        ok, out = run_check(cmds[0], dry_run=_DRY_RUN)
+        if not ok:
+            print(R + f"  ✗ failed: {out}" + N)
+            safety.end_op(op_id, False, "", out, 1)
+            return
+        print(G + "  ✔ replace started — resilvering" + N)
+        while True:
+            time.sleep(2)
+            st = zfs.poll_resilver_status(pool)
+            if st["completed"]:
+                sys.stdout.write(f"\r{G}  ✔ resilver completed{N}                    \n")
+                break
+            sys.stdout.write(f"\r{Y}  resilvering... {st['done']}% done, ETA {st['eta']}{N}")
+            sys.stdout.flush()
+        old_token = tgt["token"]
+        topo = zfs.topology()
+        if any(e["pool"] == pool and e["token"] == old_token for e in topo.values()):
+            ok_d, out_d = zfs.detach(pool, old_token, dry_run=_DRY_RUN)
+            if ok_d:
+                print(G + f"  ✔ detached old token {old_token}" + N)
+            else:
+                print(R + f"  ✗ detach failed: {out_d}" + N)
+        avail = zfs.spares(pool)
+        if avail:
+            print(G + f"  ✔ spare restored to AVAIL: {', '.join(avail)}" + N)
+        safety.end_op(op_id, True, out, "", 0)
     elif choice == "4":
         pool = _pick_pool()
         if pool:
@@ -198,18 +204,18 @@ def _assign_free_disk(d, tbw, all_disks=None) -> None:
             except (ValueError, IndexError):
                 print(f"{Y}  cancelled{N}"); return
             if _confirm(f"attach {ui.disk_label(d)} to {ui.disk_label(tgt)} in '{pool}'?"):
-                ok, out = zfs.attach(pool, tgt.by_id or tgt.dev, d.by_id or d.dev)
+                ok, out = zfs.attach(pool, tgt.by_id or tgt.dev, d.by_id or d.dev, dry_run=_DRY_RUN)
                 print((G + "  ✔ attached" if ok else R + f"  ✗ failed: {out}") + N)
     elif choice == "5":
         pool = _pick_pool()
         if pool:
             if _confirm(f"Adding a single disk vdev means if this disk fails, the ENTIRE pool is lost. Proceed?"):
-                ok, out = zfs.run_check(["zpool", "add", "-f", pool, d.by_id or d.dev])
+                ok, out = run_check(["zpool", "add", "-f", pool, d.by_id or d.dev], dry_run=_DRY_RUN)
                 print((G + "  ✔ added" if ok else R + f"  ✗ failed: {out}") + N)
     elif choice == "6":
         print(f"{R}  WIPE erases ALL data on {d.dev} (SN {d.serial or '?'}){N}")
         if _confirm(f"really wipe {ui.disk_label(d)}?"):
-            ok, out = zfs.wipe(d.by_id or d.dev)
+            ok, out = zfs.wipe(d.by_id or d.dev, dry_run=_DRY_RUN)
             print((G + "  ✔ wiped blank" if ok else R + f"  ✗ failed: {out}") + N)
     else:
         print("  skipped")
@@ -242,7 +248,7 @@ def _wipe_ghost(d, tbw) -> None:
         return
 
     print(f"\n  {C}[1/3]{N} Zeroing 40 MB RAID metadata on {sg} ...")
-    ok, msg = zfs.wipe_sg(sg)
+    ok, msg = zfs.wipe_sg(sg, dry_run=_DRY_RUN)
     if not ok:
         print(R + f"\n  ✗ failed: {msg}" + N)
         return
@@ -331,7 +337,7 @@ def _cmd_offload(tbw) -> None:
 
     if d.vdev == "spares":
         if _confirm(f"This disk is a hot spare. Remove {ui.disk_label(d)} from '{d.pool}'?"):
-            ok, out = zfs.run_check(["zpool", "remove", d.pool, _pool_dev(d)])
+            ok, out = run_check(["zpool", "remove", d.pool, _pool_dev(d)], dry_run=_DRY_RUN)
             if not ok:
                 print(R + f"  ✗ failed: {out}" + N)
                 return
@@ -341,7 +347,7 @@ def _cmd_offload(tbw) -> None:
 
     if zfs.can_detach(d.pool, _pool_dev(d)):
         if _confirm(f"This disk is in a mirror. Detach {ui.disk_label(d)} instantly?"):
-            ok, out = zfs.detach(d.pool, _pool_dev(d))
+            ok, out = zfs.detach(d.pool, _pool_dev(d), dry_run=_DRY_RUN)
             if not ok:
                 print(R + f"  ✗ failed: {out}" + N)
                 return
@@ -380,7 +386,6 @@ def _cmd_locate(tbw) -> None:
 
 
 def _replace_onto_spare(d, spare) -> bool:
-    from . import safety
     pool = d.pool
     cmds = [["zpool", "replace", pool, _pool_dev(d), spare.pool_token or spare.by_id]]
     op_id = safety.begin_op("replace", d.serial, d.bay, _pool_dev(d), pool, d.vdev, cmds)
@@ -475,10 +480,10 @@ def _cmd_create(tbw) -> None:
         if not _confirm("these disks already contain data/labels — wipe and continue?"):
             return
         for disk in dirty:
-            zfs.wipe(disk.by_id or disk.dev)
+            zfs.wipe(disk.by_id or disk.dev, dry_run=_DRY_RUN)
 
     if _confirm(f"create pool '{name}' ({raid_type}) with {len(devs)} disks?"):
-        ok, out = zfs.create_pool(name, raid_type, devs)
+        ok, out = zfs.create_pool(name, raid_type, devs, dry_run=_DRY_RUN)
         print((G + "  ✔ pool created" if ok else R + f"  ✗ failed: {out}") + N)
 
 
@@ -502,7 +507,7 @@ def _cmd_swap(tbw) -> None:
         return
     
     if _confirm(f"swap {ui.disk_label(d)} onto spare {ui.disk_label(spares[0])}?"):
-        ok, out = zfs.swap_to_spare(d.pool, _pool_dev(d), spares[0].pool_token or spares[0].by_id)
+        ok, out = zfs.swap_to_spare(d.pool, _pool_dev(d), spares[0].pool_token or spares[0].by_id, dry_run=_DRY_RUN)
         if not ok:
             print(R + f"  ✗ failed: {out}" + N)
             return
@@ -515,18 +520,18 @@ def _cmd_swap(tbw) -> None:
                 break
             sys.stdout.write(f"\r{Y}  resilvering... {st['done']}% done, ETA {st['eta']}{N}")
             sys.stdout.flush()
-        
+
         topo = zfs.topology()
         old_token = _pool_dev(d)
         lingers = any(e["pool"] == d.pool and e["token"] == old_token for e in topo.values())
         if lingers:
-            ok_d, out_d = zfs.detach(d.pool, old_token)
+            ok_d, out_d = zfs.detach(d.pool, old_token, dry_run=_DRY_RUN)
             if ok_d:
                 print(G + f"  ✔ detached old disk {d.dev}" + N)
             else:
                 print(R + f"  ✗ failed to detach old disk: {out_d}" + N)
-        
-        ok_s, out_s = zfs.add_spare(d.pool, d.by_id or d.dev)
+
+        ok_s, out_s = zfs.add_spare(d.pool, d.by_id or d.dev, dry_run=_DRY_RUN)
         if ok_s:
             print(G + f"  ✔ {ui.disk_label(d)} is now a hot spare in '{d.pool}'" + N)
         else:
@@ -552,7 +557,7 @@ def _cmd_demote(tbw) -> None:
         return
     
     if _confirm(f"demote {ui.disk_label(d)} in '{d.pool}' to a hot spare?"):
-        ok, out = zfs.demote_to_spare(d.pool, _pool_dev(d))
+        ok, out = zfs.demote_to_spare(d.pool, _pool_dev(d), dry_run=_DRY_RUN)
         if ok:
             print(G + "  ✔ demoted to spare" + N)
         else:

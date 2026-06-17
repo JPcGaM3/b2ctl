@@ -148,7 +148,8 @@ def spares(pool: str) -> list[str]:
 
 
 def spares_replacing(pool: str) -> dict[str, str]:
-    """Return {spare_token: replaced_token} for all active replacements in pool.
+    """Return {spare_token: replaced_token} for replacements where the replaced
+    leaf has a bad state (REMOVED/FAULTED/UNAVAIL/OFFLINE).
 
     Parses replacing-N vdevs from zpool status. Returns {} if none in progress.
     """
@@ -276,12 +277,14 @@ def poll_resilver_status(pool: str) -> dict:
     return res
 
 
-def wipe_sg(sg_dev: str) -> tuple[bool, str]:
+def wipe_sg(sg_dev: str, *, dry_run: bool = False) -> tuple[bool, str]:
     """Zero first 40 MB of a SCSI generic device to erase RAID metadata.
 
     Uses subprocess directly (not run_check) so dd's status=progress output
     flows live to the terminal via stderr.
     """
+    if dry_run:
+        return True, f"dry-run: would zero 40 MB on {sg_dev}"
     r = subprocess.run(
         ["dd", "if=/dev/zero", f"of={sg_dev}", "bs=4M", "count=10",
          "conv=fsync", "status=progress"],

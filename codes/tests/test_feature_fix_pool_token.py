@@ -23,18 +23,20 @@ class TestFeatureFixPoolToken(unittest.TestCase):
         self.assertEqual(d.pool_token, "/dev/disk/by-id/wwn-0xABC-part1")
         self.assertEqual(d.pool, "tank")
         
-        with patch("b2ctl.zfs.replace") as mock_replace, \
-             patch("b2ctl.zfs.detach") as mock_detach, \
+        with patch("b2ctl.zfs.detach") as mock_detach, \
              patch("b2ctl.zfs.poll_resilver_status") as mock_poll, \
              patch("b2ctl.zfs.topology") as mock_topo, \
              patch("b2ctl.core.scan") as mock_scan, \
-             patch("b2ctl.watch._confirm", return_value=True), \
+             patch("b2ctl.watch._confirm_op", return_value=True), \
+             patch("b2ctl.watch.run_check") as mock_run_check, \
+             patch("b2ctl.safety.begin_op", return_value="test-op-id"), \
+             patch("b2ctl.safety.end_op"), \
              patch("b2ctl.watch._ask", return_value="1"), \
              patch("b2ctl.locate.blink"):
-            
+
             spare_disk = Disk(dev="/dev/sdc", by_id="/dev/disk/by-id/wwn-SPARE", serial="67890", pool="tank", vdev="spares", vdev_state="AVAIL")
             mock_scan.return_value = [d, spare_disk]
-            mock_replace.return_value = (True, "")
+            mock_run_check.return_value = (True, "")
             mock_detach.return_value = (True, "")
             mock_poll.return_value = {"completed": True, "done": 100.0, "eta": ""}
             mock_topo.return_value = topo
@@ -42,8 +44,11 @@ class TestFeatureFixPoolToken(unittest.TestCase):
             # mock sys.stdout.write and flush
             with patch("sys.stdout.write"), patch("sys.stdout.flush"), patch("builtins.print"):
                 watch._cmd_replace(None)
-            
-            mock_replace.assert_called_with("tank", "/dev/disk/by-id/wwn-0xABC-part1", "/dev/disk/by-id/wwn-SPARE")
+
+            mock_run_check.assert_called_with(
+                ["zpool", "replace", "tank", "/dev/disk/by-id/wwn-0xABC-part1", "/dev/disk/by-id/wwn-SPARE"],
+                dry_run=False
+            )
 
 if __name__ == "__main__":
     unittest.main()

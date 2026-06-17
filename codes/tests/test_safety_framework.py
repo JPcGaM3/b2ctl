@@ -157,3 +157,47 @@ class TestConfirmOp(unittest.TestCase):
         self.assertIn("/dev/disk/by-id/wwn-0xDEAD", output)
         self.assertIn("/dev/disk/by-id/wwn-0xBEEF", output)
         self.assertIn("replace", output)
+
+
+class TestDryRunToggle(unittest.TestCase):
+
+    def test_t_key_sets_dry_run(self):
+        import b2ctl.watch as watch
+        watch._DRY_RUN = False
+        # Simulate pressing 't' in the watch loop toggle function
+        watch._toggle_dry_run()
+        self.assertTrue(watch._DRY_RUN)
+        watch._toggle_dry_run()
+        self.assertFalse(watch._DRY_RUN)
+
+
+class TestOpWrapping(unittest.TestCase):
+
+    def test_replace_onto_spare_calls_begin_end_op(self):
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+        import b2ctl.watch as watch
+        import b2ctl.safety as safety
+        from b2ctl.common import Disk
+
+        disk = Disk.__new__(Disk)
+        disk.serial = "S1"; disk.bay = 1; disk.pool = "tank"
+        disk.vdev = "raidz1-0"; disk.pool_token = "/dev/disk/by-id/old"
+        disk.by_id = "/dev/disk/by-id/old"; disk.dev = "/dev/sda"
+
+        spare = Disk.__new__(Disk)
+        spare.serial = "S2"; spare.bay = 2; spare.pool = "tank"
+        spare.vdev = "spares"; spare.pool_token = "/dev/disk/by-id/spare"
+        spare.by_id = "/dev/disk/by-id/spare"; spare.dev = "/dev/sdb"
+
+        with patch.object(watch, "_confirm_op", return_value=True), \
+             patch("b2ctl.zfs.replace", return_value=None), \
+             patch("b2ctl.zfs.poll_resilver_status", return_value=None), \
+             patch.object(safety, "begin_op", return_value="20260617-replace") as mock_begin, \
+             patch.object(safety, "end_op") as mock_end:
+            watch._replace_onto_spare(disk, spare)
+
+        mock_begin.assert_called_once()
+        mock_end.assert_called_once()
+        call_args = mock_end.call_args[0]
+        self.assertEqual(call_args[0], "20260617-replace")

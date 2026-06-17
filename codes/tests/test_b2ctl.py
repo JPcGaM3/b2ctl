@@ -414,8 +414,10 @@ class TestSpecLookup:
 class TestWatchOffloadGuard:
     """Tests for the offload bug fix: _replace_onto_spare return value guards."""
 
-    @patch("b2ctl.watch._confirm", return_value=False)
-    def test_replace_onto_spare_returns_false_on_decline(self, _mock_confirm):
+    @patch("b2ctl.safety.end_op")
+    @patch("b2ctl.safety.begin_op", return_value="test-op-id")
+    @patch("b2ctl.watch._confirm_op", return_value=False)
+    def test_replace_onto_spare_returns_false_on_decline(self, _mock_confirm_op, _mock_begin, _mock_end):
         from b2ctl.watch import _replace_onto_spare
         d = _disk()
         spare = _disk(dev="/dev/sdb", serial="SPARE1", vdev="spares",
@@ -426,10 +428,12 @@ class TestWatchOffloadGuard:
 
     @patch("b2ctl.watch.locate")
     @patch("b2ctl.watch.zfs")
-    @patch("b2ctl.watch._confirm", return_value=True)
-    def test_replace_onto_spare_returns_false_on_zfs_failure(self, _mc, mock_zfs, _ml):
+    @patch("b2ctl.safety.end_op")
+    @patch("b2ctl.safety.begin_op", return_value="test-op-id")
+    @patch("b2ctl.watch._confirm_op", return_value=True)
+    @patch("b2ctl.watch.run_check", return_value=(False, "some zfs error"))
+    def test_replace_onto_spare_returns_false_on_zfs_failure(self, _mrc, _mc, _mb, _me, mock_zfs, _ml):
         from b2ctl.watch import _replace_onto_spare
-        mock_zfs.replace.return_value = (False, "some zfs error")
         d = _disk()
         spare = _disk(dev="/dev/sdb", serial="SPARE1", vdev="spares",
                       pool_token="/dev/disk/by-id/wwn-0xSPARE",
@@ -439,10 +443,12 @@ class TestWatchOffloadGuard:
 
     @patch("b2ctl.watch.locate")
     @patch("b2ctl.watch.zfs")
-    @patch("b2ctl.watch._confirm", return_value=True)
-    def test_replace_onto_spare_returns_true_on_success(self, _mc, mock_zfs, _ml):
+    @patch("b2ctl.safety.end_op")
+    @patch("b2ctl.safety.begin_op", return_value="test-op-id")
+    @patch("b2ctl.watch._confirm_op", return_value=True)
+    @patch("b2ctl.watch.run_check", return_value=(True, ""))
+    def test_replace_onto_spare_returns_true_on_success(self, _mrc, _mc, _mb, _me, mock_zfs, _ml):
         from b2ctl.watch import _replace_onto_spare
-        mock_zfs.replace.return_value = (True, "")
         mock_zfs.poll_resilver_status.return_value = {"completed": True, "done": 100.0, "eta": ""}
         mock_zfs.topology.return_value = {}
         d = _disk()

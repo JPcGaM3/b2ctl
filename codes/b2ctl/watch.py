@@ -21,8 +21,17 @@ import sys
 import time
 
 from . import core, hba, zfs, spec, locate
-from .common import Disk, R, Y, G, C, N
+from .common import Disk, R, Y, G, C, N, run_check
 from . import ui
+
+_DRY_RUN: bool = False
+
+
+def _toggle_dry_run() -> None:
+    global _DRY_RUN
+    _DRY_RUN = not _DRY_RUN
+    state = f"{Y}ON{N}" if _DRY_RUN else f"{G}OFF{N}"
+    print(f"[DRY-RUN MODE: {state}]")
 
 
 def _pool_dev(d) -> str:
@@ -371,36 +380,42 @@ def _cmd_locate(tbw) -> None:
 
 
 def _replace_onto_spare(d, spare) -> bool:
+    from . import safety
     pool = d.pool
-    if _confirm(f"Replace {ui.disk_label(d)} onto spare {ui.disk_label(spare)}?"):
-        ok, out = zfs.replace(pool, _pool_dev(d), spare.pool_token or spare.by_id)
-        if not ok:
-            print(R + f"  ✗ failed: {out}" + N)
-            return False
-        print(G + "  ✔ replace started — resilvering onto spare" + N)
-        while True:
-            time.sleep(2)
-            st = zfs.poll_resilver_status(pool)
-            if st["completed"]:
-                sys.stdout.write(f"\r{G}  ✔ resilver completed 100%{N}                 \n")
-                break
-            sys.stdout.write(f"\r{Y}  resilvering... {st['done']}% done, ETA {st['eta']}{N}")
-            sys.stdout.flush()
-        
-        topo = zfs.topology()
-        old_token = _pool_dev(d)
-        lingers = any(e["pool"] == pool and e["token"] == old_token for e in topo.values())
-        if lingers:
-            ok_d, out_d = zfs.detach(pool, old_token)
-            if ok_d:
-                print(G + f"  ✔ detached old disk {d.dev}" + N)
-            else:
-                print(R + f"  ✗ failed to detach old disk: {out_d}" + N)
-        
-        print(f"{Y}  please pull bay {d.bay or '?'} ... blinking LED{N}")
-        locate.blink(d.dev, locate.DEFAULT_SECONDS)
-        return True
-    return False
+    cmds = [["zpool", "replace", pool, _pool_dev(d), spare.pool_token or spare.by_id]]
+    op_id = safety.begin_op("replace", d.serial, d.bay, _pool_dev(d), pool, d.vdev, cmds)
+    if not _confirm_op("replace", d, spare, pool, d.vdev, cmds):
+        safety.end_op(op_id, False, "", "cancelled", 0)
+        return False
+    ok, out = run_check(cmds[0], dry_run=_DRY_RUN)
+    if not ok:
+        print(R + f"  ✗ failed: {out}" + N)
+        safety.end_op(op_id, False, "", out, 1)
+        return False
+    print(G + "  ✔ replace started — resilvering onto spare" + N)
+    while True:
+        time.sleep(2)
+        st = zfs.poll_resilver_status(pool)
+        if st["completed"]:
+            sys.stdout.write(f"\r{G}  ✔ resilver completed 100%{N}                 \n")
+            break
+        sys.stdout.write(f"\r{Y}  resilvering... {st['done']}% done, ETA {st['eta']}{N}")
+        sys.stdout.flush()
+
+    topo = zfs.topology()
+    old_token = _pool_dev(d)
+    lingers = any(e["pool"] == pool and e["token"] == old_token for e in topo.values())
+    if lingers:
+        ok_d, out_d = zfs.detach(pool, old_token)
+        if ok_d:
+            print(G + f"  ✔ detached old disk {d.dev}" + N)
+        else:
+            print(R + f"  ✗ failed to detach old disk: {out_d}" + N)
+
+    print(f"{Y}  please pull bay {d.bay or '?'} ... blinking LED{N}")
+    locate.blink(d.dev, locate.DEFAULT_SECONDS)
+    safety.end_op(op_id, True, out, "", 0)
+    return True
 
 
 def _cmd_replace(tbw) -> None:
@@ -544,8 +559,8 @@ def _cmd_demote(tbw) -> None:
             print(R + f"  ✗ failed: {out}" + N)
 
 
-_MENU = (f"{C}[r]{N}efresh  {C}[a]{N}ssign  {C}[o]{N}ffload  {C}[s]{N}wap  {C}[d]{N}emote  {C}[n]{N}ew-pool  {C}[l]{N}ocate  "
-         f"{C}[q]{N}uit   (or hot-plug)")
+_MENU = (f"{C}[r]{N}efresh  {C}[a]{N}ssign  {C}[o]{N}ffload  {C}[s]{N}wap  {C}[d]{N}emote  {C}[t]{N}oggle-dryrun  "
+         f"{C}[n]{N}ew-pool  {C}[l]{N}ocate  {C}[q]{N}uit   (or hot-plug)")
 
 
 def run() -> int:
@@ -574,6 +589,8 @@ def run() -> int:
                 _cmd_swap(tbw)
             elif cmd in ("d", "demote"):
                 _cmd_demote(tbw)
+            elif cmd in ("t", "dryrun"):
+                _toggle_dry_run()
             elif cmd == "n":
                 _cmd_create(tbw)
             elif cmd == "l":

@@ -3,7 +3,7 @@ import json
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 # Patch log dirs to temp before importing safety
 
@@ -72,3 +72,45 @@ class TestBeginOp(unittest.TestCase):
             op_id = safety.begin_op("add_spare", "AAA", 1, "/dev/disk/by-id/x", "tank", "spares", cmds)
         snap_path = os.path.join(self.snap_dir, f"{op_id}.txt")
         self.assertTrue(os.path.exists(snap_path))
+
+
+class TestRunCheckDryRun(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def test_dry_run_write_cmd_no_subprocess(self):
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+        import b2ctl.common as common
+        import b2ctl.safety as safety
+        safety.WRITE_CMDS = {"zpool", "wipefs", "sgdisk", "dd"}
+        with patch("subprocess.run") as mock_run:
+            ok, out = common.run_check(["zpool", "replace", "tank", "x", "y"], dry_run=True)
+        mock_run.assert_not_called()
+        self.assertTrue(ok)
+        self.assertEqual(out, "")
+
+    def test_dry_run_read_cmd_executes(self):
+        # "smartctl" is not in WRITE_CMDS — it is a read-only cmd that must
+        # pass through even when dry_run=True.
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+        import b2ctl.common as common
+        import b2ctl.safety as safety
+        safety.WRITE_CMDS = {"zpool", "wipefs", "sgdisk", "dd"}
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="pool: tank\n", stderr="")
+            ok, out = common.run_check(["smartctl", "-a", "/dev/sda"], dry_run=True)
+        mock_run.assert_called_once()
+        self.assertTrue(ok)
+
+    def test_dry_run_false_write_cmd_executes(self):
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+        import b2ctl.common as common
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok\n", stderr="")
+            ok, out = common.run_check(["zpool", "offline", "tank", "x"])
+        mock_run.assert_called_once()
+        self.assertTrue(ok)

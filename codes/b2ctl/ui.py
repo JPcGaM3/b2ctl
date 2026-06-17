@@ -41,7 +41,7 @@ def _status_cell(d: Disk) -> str:
             return G + f"{'AVAIL':<10}" + N
         if d.vdev_state == "INUSE":
             tgt = f"→{d.spare_replacing}" if d.spare_replacing else ""
-            return Y + f"{'INUSE' + tgt:<10}" + N
+            return Y + f"{('INUSE' + tgt)[:10]:<10}" + N
         return f"{(d.vdev_state or ''):<10}"
     if d.in_pool and d.vdev_state:
         raw = f"{d.vdev_state[:10]:<10}"

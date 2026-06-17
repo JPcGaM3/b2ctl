@@ -183,10 +183,70 @@ def _config_init(_args) -> int:
     return 0
 
 
+def _log_cmd(args):
+    from . import safety
+    entries = safety.load_log(last=getattr(args, "last", 20))
+    if not entries:
+        print("No operations logged yet.")
+        return
+    print(f"\n{'OP_ID':<28} {'OP':<10} {'BAY':<4} {'SERIAL':<16} {'POOL':<8} {'STATUS':<7} {'STARTED'}")
+    print("─" * 100)
+    for e in entries:
+        status = e.get("status", "?")
+        color = G if status == "ok" else (R if status == "fail" else Y)
+        print(
+            f"{e.get('op_id',''):<28} "
+            f"{e.get('op',''):<10} "
+            f"{str(e.get('disk_bay','')):<4} "
+            f"{e.get('disk_serial',''):<16} "
+            f"{e.get('pool',''):<8} "
+            f"{color}{status:<7}{N} "
+            f"{e.get('started_at','')}"
+        )
+    print()
+
+
+def _rollback_cmd(op_id: str):
+    from . import safety
+    entry = safety.find_entry(op_id)
+    if entry is None:
+        print(f"Op not found: {op_id}")
+        return
+    hint = entry.get("rollback_hint")
+    if not hint:
+        snap = entry.get("snapshot_path", "")
+        print("Op not reversible.")
+        if snap:
+            print(f"  See snapshot: {snap}")
+        return
+    print(f"\nOp:       {entry.get('op')}  ({entry.get('started_at','')})")
+    print(f"Disk:     bay {entry.get('disk_bay')} | {entry.get('disk_serial')}")
+    print(f"Pool:     {entry.get('pool')}/{entry.get('vdev')}")
+    print(f"Rollback: {hint}\n")
+    ans = input("Execute rollback? [y/N]: ").strip().lower()
+    if ans not in ("y", "yes"):
+        print("Cancelled.")
+        return
+    from .common import run_check
+    cmd = hint.split()
+    rb_op_id = safety.begin_op(
+        f"rollback-{entry.get('op')}", entry.get("disk_serial", ""),
+        entry.get("disk_bay"), entry.get("dev_path", ""),
+        entry.get("pool", ""), entry.get("vdev", ""), [cmd]
+    )
+    ok, out = run_check(cmd)
+    safety.end_op(rb_op_id, ok, out, "" if ok else out, 0 if ok else 1)
+    print(f"{'✓' if ok else '✗'} rollback {'complete' if ok else 'failed'}")
+    if not ok:
+        print(f"  {R}{out}{N}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="b2ctl",
                                 description="ZFS/HBA disk health & lifecycle "
                                             "(IT-mode, LSI SAS2308)")
+    p.add_argument("--dry-run", action="store_true", default=False,
+                   help="preview write commands without executing them")
     sub = p.add_subparsers(dest="cmd")
 
     st = sub.add_parser("status", help="health table + details")
@@ -238,15 +298,27 @@ def build_parser() -> argparse.ArgumentParser:
     cfg_init.set_defaults(func=_config_init)
     cfg_p.set_defaults(func=lambda a: (print(f"{Y}  usage: b2ctl config show|init{N}") or 0))
 
+    log_p = sub.add_parser("log", help="show operation history")
+    log_p.add_argument("--last", type=int, default=20,
+                       metavar="N", help="show last N entries (default 20)")
+    log_p.set_defaults(func=lambda a: _log_cmd(a))
+
+    rb_p = sub.add_parser("rollback", help="reverse a logged operation")
+    rb_p.add_argument("op_id", help="op_id from b2ctl log output")
+    rb_p.set_defaults(func=lambda a: _rollback_cmd(a.op_id))
+
     return p
 
 
 def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if getattr(args, "dry_run", False):
+        from . import watch as _watch
+        _watch._DRY_RUN = True
     if not getattr(args, "cmd", None):
         args = parser.parse_args(["status"])
-    if args.cmd not in ("version", "check", "config"):
+    if args.cmd not in ("version", "check", "config", "log", "rollback"):
         need_root()
     return args.func(args)
 

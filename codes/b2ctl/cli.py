@@ -1,0 +1,255 @@
+"""b2ctl.cli — command-line entrypoint for the IT-mode (HBA) build.
+
+Subcommands:
+    status [--locate] [--json]   one-shot health table + details
+    watch                        interactive hotplug-aware loop
+    locate <target> [seconds]    blink ONE disk's LED (~5s), by device
+    offload                      safely detach or resilver a disk to offload it
+    version
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+
+from . import core, watch, zfs, spec, locate as locatemod
+from . import backend as _backend_mod, config as _cfg_mod
+from .common import need_root, run, R, Y, G, C, N
+from . import ui
+
+__version__ = "0.5.0-itmode"
+
+
+def _resolve_dev(target: str, disks=None):
+    """Resolve a bay label / serial / sdX / /dev path to a /dev device."""
+    if target.startswith("/dev/"):
+        return target
+    disks = disks if disks is not None else core.scan()
+    for d in disks:
+        if target in (d.bay, d.serial, d.dev, d.dev.replace("/dev/", "")):
+            return d.dev
+    return None
+
+
+def _status(args) -> int:
+    tbw = spec.load()
+    disks = core.scan(tbw)
+    if args.json:
+        print(json.dumps([vars(d) for d in disks], indent=2, default=str))
+        return 0
+    print(ui.render_table(disks))
+    print(ui.render_pools(zfs.list_pools()))
+    print(ui.render_details(disks))
+
+    if args.locate:
+        risky = [d for d in disks if d.level in ("WARNING", "CRITICAL")]
+        if not risky:
+            print(f"{G}[OK] nothing at risk — no LED lit{N}")
+            return 0
+        devs = [d.dev for d in risky]
+        bays = ", ".join(d.bay or d.dev for d in risky)
+        print(f"{Y}[!] blinking {args.seconds}s on: {bays}{N}")
+        method = locatemod.blink_many(devs, args.seconds)
+        print(f"{G}[+] done (via {method}){N}")
+    return 0
+
+
+def _watch(_args) -> int:
+    return watch.run()
+
+
+def _locate(args) -> int:
+    dev = _resolve_dev(args.target)
+    if not dev:
+        print(f"{R}[-] could not resolve '{args.target}' to a disk{N}")
+        return 1
+    print(f"{Y}[*] blinking {dev} for {args.seconds}s ...{N}")
+    ok, method = locatemod.blink(dev, args.seconds)
+    print((G + f"[+] done (via {method})" if ok
+           else R + "[-] failed") + N)
+    return 0 if ok else 1
+
+
+def _offload(_args) -> int:
+    watch._cmd_offload(spec.load())
+    return 0
+
+
+def _replace(_args) -> int:
+    watch._cmd_replace(spec.load())
+    return 0
+
+
+def _create(_args) -> int:
+    watch._cmd_create(spec.load())
+    return 0
+
+
+def _swap(_args) -> int:
+    watch._cmd_swap(spec.load())
+    return 0
+
+
+def _demote(_args) -> int:
+    watch._cmd_demote(spec.load())
+    return 0
+
+
+def _check(_args) -> int:
+    """Check all required tools and show environment summary."""
+    ok_mark = f"{G}[✔]{N}"
+    fail_mark = f"{R}[✗]{N}"
+    warn_mark = f"{Y}[!]{N}"
+
+    print(f"\n{C}[b2ctl environment check]{N}")
+
+    # root check
+    if os.geteuid() == 0:
+        print(f"  {ok_mark} Running as root")
+    else:
+        print(f"  {warn_mark} Not running as root (some checks may fail)")
+
+    # tool checks with version
+    _TOOL_VERSION_ARGS = {
+        "smartctl":  ["--version"],
+        "sas2ircu":  ["list"],
+        "storcli64": ["show", "ctrlcount"],
+        "storcli":   ["show", "ctrlcount"],
+        "perccli64": ["show", "ctrlcount"],
+        "perccli":   ["show", "ctrlcount"],
+        "zpool":     ["version"],
+        "wipefs":    ["--version"],
+        "sgdisk":    ["--version"],
+        "udevadm":   ["--version"],
+        "dd":        ["--version"],
+    }
+
+    for tname, ver_args in _TOOL_VERSION_ARGS.items():
+        path = _cfg_mod.tool(tname)
+        out = run([path] + ver_args)
+        if out:
+            ver = out.splitlines()[0][:60] if out else ""
+            print(f"  {ok_mark} {tname:<12} {path:<40} ({ver.strip()})")
+        else:
+            hint = ""
+            if tname in ("sas2ircu",):
+                hint = " (needed for IT/HBA mode)"
+            elif tname in ("storcli64", "storcli", "perccli64", "perccli"):
+                hint = " (needed for RAID mode)"
+            print(f"  {fail_mark} {tname:<12} not found{hint}")
+
+    # backend detection
+    print()
+    try:
+        bk = _backend_mod.get_backend()
+        print(f"  {ok_mark} Detected backend: {bk.name.upper()}-mode")
+        if bk.have_tool():
+            bm = bk.bay_map()
+            print(f"  {ok_mark} Controllers found: {len(set(bm.values()) or {0})} "
+                  f"({len(bm)} disks in bay map)")
+    except SystemExit:
+        print(f"  {fail_mark} Backend detection failed — set controller.mode in config")
+
+    # config file status
+    cfg_path = _cfg_mod.CONFIG_PATH
+    if os.path.exists(cfg_path):
+        print(f"  {ok_mark} Config: {cfg_path}")
+    else:
+        print(f"  {warn_mark} Config: {cfg_path} (missing — using defaults, run 'b2ctl config init' to create)")
+
+    return 0
+
+
+def _config_show(_args) -> int:
+    print(_cfg_mod.as_json())
+    return 0
+
+
+def _config_init(_args) -> int:
+    path = _cfg_mod.CONFIG_PATH
+    if os.path.exists(path):
+        print(f"{Y}[!] {path} already exists. Delete it first to regenerate.{N}")
+        return 1
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    cfg = _cfg_mod.load()
+    with open(path, "w") as f:
+        json.dump(cfg, f, indent=2)
+    print(f"{G}[+] Written: {path}{N}")
+    print(f"    Edit tool_paths to override binary locations.")
+    print(f"    Set controller.mode to 'it' or 'raid' to skip auto-detection.")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="b2ctl",
+                                description="ZFS/HBA disk health & lifecycle "
+                                            "(IT-mode, LSI SAS2308)")
+    sub = p.add_subparsers(dest="cmd")
+
+    st = sub.add_parser("status", help="health table + details")
+    st.add_argument("--locate", action="store_true",
+                    help="blink LEDs on at-risk disks for a few seconds")
+    st.add_argument("--seconds", type=int, default=locatemod.DEFAULT_SECONDS,
+                    help="blink duration (default 5)")
+    st.add_argument("--json", action="store_true", help="machine-readable output")
+    st.set_defaults(func=_status)
+
+    w = sub.add_parser("watch", help="interactive hotplug-aware loop")
+    w.set_defaults(func=_watch)
+
+    lo = sub.add_parser("locate", help="blink ONE disk's LED (by bay/serial/dev)")
+    lo.add_argument("target", help="bay label (1:4), serial, sdX, or /dev/sdX")
+    lo.add_argument("seconds", nargs="?", type=int,
+                    default=locatemod.DEFAULT_SECONDS,
+                    help="blink duration (default 5)")
+    lo.set_defaults(func=_locate)
+
+    off = sub.add_parser("offload", help="safely detach or resilver a disk to offload it")
+    off.set_defaults(func=_offload)
+
+    re_cmd = sub.add_parser("replace", help="simulate-fail and replace onto spare")
+    re_cmd.set_defaults(func=_replace)
+
+    cr = sub.add_parser("create", help="create a new zfs pool")
+    cr.set_defaults(func=_create)
+
+    sw = sub.add_parser("swap", help="swap wearing disk onto spare")
+    sw.set_defaults(func=_swap)
+
+    de = sub.add_parser("demote", help="demote mirror leg to spare")
+    de.set_defaults(func=_demote)
+
+    v = sub.add_parser("version", help="print version")
+    v.set_defaults(func=lambda _a: (print(f"b2ctl {__version__}") or 0))
+
+    # check
+    chk = sub.add_parser("check", help="verify tools and environment on this server")
+    chk.set_defaults(func=_check)
+
+    # config
+    cfg_p = sub.add_parser("config", help="manage /etc/b2ctl/config.json")
+    cfg_sub = cfg_p.add_subparsers(dest="config_cmd")
+    cfg_show = cfg_sub.add_parser("show", help="print current config")
+    cfg_show.set_defaults(func=_config_show)
+    cfg_init = cfg_sub.add_parser("init", help="write default config to /etc/b2ctl/config.json")
+    cfg_init.set_defaults(func=_config_init)
+    cfg_p.set_defaults(func=lambda a: (print(f"{Y}  usage: b2ctl config show|init{N}") or 0))
+
+    return p
+
+
+def main(argv=None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not getattr(args, "cmd", None):
+        args = parser.parse_args(["status"])
+    if args.cmd not in ("version", "check", "config"):
+        need_root()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

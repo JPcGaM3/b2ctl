@@ -114,3 +114,45 @@ class TestRunCheckDryRun(unittest.TestCase):
             ok, out = common.run_check(["zpool", "offline", "tank", "x"])
         mock_run.assert_called_once()
         self.assertTrue(ok)
+
+
+class TestConfirmOp(unittest.TestCase):
+
+    def _make_disk(self, bay=3, serial="S3EV123", model="Samsung 870 EVO 1TB",
+                   by_id="/dev/disk/by-id/wwn-0xDEAD", pool="tank", vdev="raidz1-0"):
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+        from b2ctl.common import Disk
+        d = Disk.__new__(Disk)
+        d.bay = bay; d.serial = serial; d.model = model
+        d.by_id = by_id; d.pool = pool; d.vdev = vdev
+        d.dev = "/dev/sda"; d.pool_token = by_id
+        return d
+
+    def test_confirm_op_yes(self):
+        import b2ctl.watch as watch
+        disk = self._make_disk()
+        cmds = [["zpool", "replace", "tank", "/dev/disk/by-id/old", "/dev/disk/by-id/new"]]
+        with patch("builtins.input", return_value="y"):
+            result = watch._confirm_op("replace", disk, None, "tank", "raidz1-0", cmds)
+        self.assertTrue(result)
+
+    def test_confirm_op_no(self):
+        import b2ctl.watch as watch
+        disk = self._make_disk()
+        cmds = [["zpool", "offline", "tank", "/dev/disk/by-id/x"]]
+        with patch("builtins.input", return_value="n"):
+            result = watch._confirm_op("offline", disk, None, "tank", "raidz1-0", cmds)
+        self.assertFalse(result)
+
+    def test_confirm_op_shows_device_path(self):
+        import b2ctl.watch as watch
+        import io
+        disk = self._make_disk()
+        cmds = [["zpool", "replace", "tank", "/dev/disk/by-id/wwn-0xDEAD", "/dev/disk/by-id/wwn-0xBEEF"]]
+        with patch("builtins.input", return_value="n"):
+            with patch("sys.stdout", new_callable=io.StringIO) as mock_out:
+                watch._confirm_op("replace", disk, None, "tank", "raidz1-0", cmds)
+                output = mock_out.getvalue()
+        self.assertIn("/dev/disk/by-id/", output)
+        self.assertIn("replace", output)

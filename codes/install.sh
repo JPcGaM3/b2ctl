@@ -14,6 +14,7 @@ fi
 
 echo "[*] installing b2ctl package -> ${PREFIX}"
 mkdir -p "${PREFIX}"
+mkdir -p /var/log/b2ctl/snapshots
 cp -r "${SRC_DIR}/b2ctl" "${PREFIX}/"
 cp "${SRC_DIR}/ssd_spec.json" "${PREFIX}/"
 [ -f "${SRC_DIR}/bay_map.json" ] && cp "${SRC_DIR}/bay_map.json" "${PREFIX}/"

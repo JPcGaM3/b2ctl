@@ -9,7 +9,7 @@ SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOOLS_DIR="$(dirname "${SRC_DIR}")/tools"
 
 _GDRIVE_SAS2IRCU="1rP7f8weCvXEaqWSAj5MDNwMDvK2RXTCt"
-_GDRIVE_STORCLI="1u9x1RCsnz2VaAt6NxEE90mJJdCgps_60"
+_GDRIVE_STORCLI="1nMbQFD94vdDl6QNjUzRtp1UHlKwDwmYN"
 _GDRIVE_PERCCLI="1hJt5Sr2xNW4OHCD-AoefiHhjJCeWVWVk"
 _GDRIVE_BASE="https://drive.usercontent.google.com/download?export=download&confirm=t&id="
 
@@ -56,7 +56,7 @@ download_tools() {
     }
 
     _gdrive_get "${_GDRIVE_SAS2IRCU}" "${_dest}/SAS2IRCU_P20.zip"          || return 1
-    _gdrive_get "${_GDRIVE_STORCLI}"  "${_dest}/007.3703.0000.0000_MR 7.37_Storcli.zip" || return 1
+    _gdrive_get "${_GDRIVE_STORCLI}"  "${_dest}/storcli.zip" || return 1
     _gdrive_get "${_GDRIVE_PERCCLI}"  "${_dest}/perccli_7.1-007.0127_linux.tar.gz"       || return 1
 }
 
@@ -68,7 +68,7 @@ install_tools() {
 
     echo ""
     echo "=== Installing tool binaries ==="
-    apt-get install -y alien unzip smartmontools zfsutils-linux gdisk util-linux coreutils udev
+    apt-get install -y alien unzip libc6-i386 smartmontools zfsutils-linux gdisk util-linux coreutils udev
 
     # ── sas2ircu ──────────────────────────────────────────────────────────────
     echo "[*] sas2ircu..."
@@ -93,29 +93,22 @@ install_tools() {
 
     # ── storcli64 ─────────────────────────────────────────────────────────────
     echo "[*] storcli64..."
-    local _stor_zip="${_tools}/007.3703.0000.0000_MR 7.37_Storcli.zip"
-    if [ -f "${_stor_zip}" ]; then
-        unzip -q "${_stor_zip}" -d "${_tmp}/stor_outer" || true
-        unzip -q "${_tmp}/stor_outer/storcli_rel/Unified_storcli_all_os.zip" \
-            -d "${_tmp}/stor_inner" 2>/dev/null || true
-        local _stor_deb="${_tmp}/stor_inner/Unified_storcli_all_os/Ubuntu/storcli_007.3703.0000.0000_all.deb"
-        if [ -f "${_stor_deb}" ]; then
-            dpkg-deb -x "${_stor_deb}" "${_tmp}/stor_bin" 2>/dev/null || true
-            local _stor
-            _stor=$(find "${_tmp}/stor_bin" -name "storcli64" -type f 2>/dev/null | head -1)
-            if [ -n "${_stor}" ]; then
-                cp "${_stor}" /usr/local/sbin/storcli64
-                chmod +x /usr/local/sbin/storcli64
-                ln -sf /usr/local/sbin/storcli64 /usr/local/sbin/storcli
-                echo "  [✔] storcli64 -> /usr/local/sbin/storcli64"
+    if [ -f "${_tools}/storcli.zip" ]; then
+        unzip -q "${_tools}/storcli.zip" -d "${_tmp}/storcli" || true
+        local _stor_deb
+        _stor_deb=$(find "${_tmp}/storcli" -path "*/Ubuntu/*.deb" 2>/dev/null | head -1)
+        if [ -n "${_stor_deb}" ]; then
+            if dpkg -i "${_stor_deb}" 2>&1; then
+                ln -sf /opt/MegaRAID/storcli/storcli64 /usr/local/bin/storcli
+                echo "  [✔] storcli64 -> /opt/MegaRAID/storcli/storcli64"
             else
-                echo "  [✗] storcli64: binary not found in DEB"
+                echo "  [✗] storcli64: dpkg install failed"
             fi
         else
-            echo "  [✗] storcli64: Ubuntu DEB not found in inner archive"
+            echo "  [✗] storcli64: Ubuntu DEB not found in archive"
         fi
     else
-        echo "  [✗] storcli64: archive not found"
+        echo "  [✗] storcli64: archive not found at ${_tools}/storcli.zip"
     fi
 
     # ── perccli64 ─────────────────────────────────────────────────────────────
@@ -126,23 +119,11 @@ install_tools() {
         local _perc_rpm
         _perc_rpm=$(find "${_tmp}/perc_src" -name "*.rpm" 2>/dev/null | head -1)
         if [ -n "${_perc_rpm}" ]; then
-            (cd "${_tmp}/perc_src" && alien --to-deb "${_perc_rpm}" 2>/dev/null) || true
-            local _perc_deb
-            _perc_deb=$(find "${_tmp}/perc_src" -name "*.deb" 2>/dev/null | head -1)
-            if [ -n "${_perc_deb}" ]; then
-                dpkg-deb -x "${_perc_deb}" "${_tmp}/perc_bin" 2>/dev/null || true
-                local _perc
-                _perc=$(find "${_tmp}/perc_bin" \( -name "perccli64" -o -name "perccli" \) -type f 2>/dev/null | head -1)
-                if [ -n "${_perc}" ]; then
-                    cp "${_perc}" /usr/local/sbin/perccli64
-                    chmod +x /usr/local/sbin/perccli64
-                    ln -sf /usr/local/sbin/perccli64 /usr/local/sbin/perccli
-                    echo "  [✔] perccli64 -> /usr/local/sbin/perccli64"
-                else
-                    echo "  [✗] perccli64: binary not found in converted DEB"
-                fi
+            if (cd "${_tmp}/perc_src" && alien --scripts -i "${_perc_rpm}" 2>&1); then
+                ln -sf /opt/MegaRAID/perccli/perccli64 /usr/local/bin/perccli
+                echo "  [✔] perccli64 -> /opt/MegaRAID/perccli/perccli64"
             else
-                echo "  [✗] perccli64: alien conversion produced no DEB"
+                echo "  [✗] perccli64: alien install failed"
             fi
         else
             echo "  [✗] perccli64: RPM not found in archive"

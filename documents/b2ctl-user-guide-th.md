@@ -44,6 +44,17 @@ cd codes
 sudo ./install.sh
 ```
 
+ติดตั้งพร้อม tool binaries (แนะนำสำหรับเซิร์ฟเวอร์ใหม่):
+
+```bash
+cd codes
+sudo ./install.sh --with-tools
+```
+
+Flag `--with-tools` จะ **ดาวน์โหลด** `sas2ircu`, `storcli64`, และ `perccli64`
+จาก Google Drive โดยอัตโนมัติ ติดตั้งลงใน `/usr/local/sbin/` แล้วลบไฟล์ที่ดาวน์โหลดออก
+ต้องการ `curl` หรือ `wget` (มีติดตั้งมาแล้วใน Proxmox VE)
+
 ### สิ่งที่ต้องมีในเครื่องก่อน:
 
 | โปรแกรม | ทำหน้าที่ | ต้องมีไหม? |
@@ -128,6 +139,7 @@ b2ctl>
 | **BAD** | จำนวน bad sectors | `0` = ปกติ, `มากกว่า 0` = อันตราย! |
 | **HEALTH** | ผลตรวจ SMART | `PASSED`, `FAILED` |
 | **POOL** | อยู่ใน pool / vdev ไหน | `tank/raidz1-0`, `rpool/mirror-0` |
+| **STATUS** | สถานะ vdev ของ ZFS — สีเขียว ONLINE/AVAIL, สีเหลือง DEGRADED/INUSE→bay, สีแดง FAULTED/REMOVED | `ONLINE`, `AVAIL`, `INUSE→1:4` |
 | **LEVEL** | ระดับสถานะรวม | ดูตารางด้านล่าง |
 
 ### ความหมายของ LEVEL:

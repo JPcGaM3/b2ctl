@@ -123,6 +123,13 @@ zpool status -P -v <pool>      # for each pool
   realpath. That is why membership still resolves whether the pool was built
   with by-id or `/dev/sdX`.
 
+`zfs.spares_replacing(pool)` — called from `core.scan()` for any pool that has at
+least one INUSE spare. Parses `zpool status -P -v <pool>` again (one extra call per
+resilvering pool, which is rare). Finds `replacing-N` vdev blocks; returns
+`{spare_token: replaced_token}` where the replaced leaf has state
+`REMOVED`/`FAULTED`/`UNAVAIL`/`OFFLINE`. Used by `ui._status_cell()` to show
+`INUSE→bay` in the STATUS column.
+
 ### 3.6 Mutating actions — `zfs.*` (all via `run_check`)
 | action | command |
 |--------|---------|
@@ -155,6 +162,7 @@ enumerate_disks (lsblk -P)
   → attach_bays (sas2ircu DISPLAY, by serial; remapped via bay_map.json)
   → smart.read per disk (smartctl direct)
   → attach_membership (zpool status -P, by by-id/dev/realpath)
+  → spares_replacing (zpool status -P -v, per pool with INUSE spares — sets Disk.spare_replacing to bay of replaced disk)
   → assess per disk (set LEVEL + reasons)
   → sort by (bay, dev)
 ```
@@ -339,6 +347,48 @@ The log directory `/var/log/b2ctl/` is created by `install.sh` (`mkdir -p`).
 If it disappears or permissions change, b2ctl logs to `/dev/null` silently
 (all `os.makedirs` calls in `safety.py` are wrapped in `try/except OSError: pass`).
 To reset manually: `sudo mkdir -p /var/log/b2ctl/snapshots && sudo chown root:root /var/log/b2ctl`
+
+### 7.1 `--with-tools` flag
+
+```bash
+cd codes && sudo ./install.sh --with-tools
+```
+
+Downloads archives for `sas2ircu`, `storcli64`, `perccli64` from Google Drive, then
+extracts and installs the binaries. Runs after the main b2ctl install; each tool is
+independent. Downloads are deleted on EXIT via `trap`.
+
+**Download step — `download_tools(dest)`:**
+
+- Checks for `curl` (preferred) or `wget`; aborts with `[✗]` if neither found.
+- Downloads 3 archives to a temp dir using:
+  `https://drive.usercontent.google.com/download?export=download&confirm=t&id=<FILE_ID>`
+  (modern Google Drive endpoint — `confirm=t` bypasses the virus-scan warning page).
+- Validates each download: if the file is < 1 KB it was likely an HTML error page —
+  prints `[✗] <name>: download too small` and aborts.
+- File IDs are hardcoded constants at the top of `install.sh`:
+  `_GDRIVE_SAS2IRCU`, `_GDRIVE_STORCLI`, `_GDRIVE_PERCCLI`.
+
+**apt prerequisites installed automatically:**
+
+| package | why |
+|---------|-----|
+| `alien` | converts perccli `.rpm` → `.deb` |
+| `unzip` | extracts `.zip` archives (sas2ircu, storcli) |
+
+**Extraction chain per tool:**
+
+| tool | archive | method | binary dest |
+|------|---------|--------|-------------|
+| `sas2ircu` | `SAS2IRCU_P20.zip` | `unzip` → find `x86-64_rel/sas2ircu` (falls back to `x86_rel`) | `/usr/local/sbin/sas2ircu` |
+| `storcli64` | `007.3703.0000.0000_MR 7.37_Storcli.zip` | double-unzip → `dpkg-deb -x` Ubuntu DEB | `/usr/local/sbin/storcli64` + symlink `storcli` |
+| `perccli64` | `perccli_7.1-007.0127_linux.tar.gz` | `tar` → `alien --to-deb` RPM → `dpkg-deb -x` | `/usr/local/sbin/perccli64` + symlink `perccli` |
+
+`dpkg-deb -x` extracts binary contents without touching the package database.
+A tmpdir is created via `mktemp -d` and cleaned on EXIT via `trap`.
+
+**Error handling:** missing archive or failed extraction prints `[✗] <tool>: reason`
+and continues. Never aborts the b2ctl package install above it.
 
 ---
 

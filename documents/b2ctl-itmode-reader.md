@@ -56,6 +56,19 @@ Copies the package to `/opt/b2ctl`, creates the `b2ctl` launcher at
 `/usr/local/sbin/b2ctl`, and creates `/var/log/b2ctl/snapshots/` for the audit
 system.
 
+**Install tool binaries at the same time (recommended on a fresh server):**
+
+```bash
+cd codes
+sudo ./install.sh --with-tools
+```
+
+The `--with-tools` flag automatically **downloads** `sas2ircu`, `storcli64`, and
+`perccli64` archives from Google Drive, extracts the binaries, and places them in
+`/usr/local/sbin/`. Downloads are deleted on completion. Each tool installs
+independently — if a download or extraction fails it prints `[✗]` and continues.
+Requires `curl` or `wget` (both available by default on Proxmox VE).
+
 **Dependencies:**
 
 | binary | purpose | required? |
@@ -144,6 +157,7 @@ Type a single letter to act.
 | **BAD** | reallocated sectors (SATA) or grown defects (SAS) | `0` = normal; `>0` = danger |
 | **HEALTH** | SMART self-test result | `PASSED`, `FAILED` |
 | **POOL** | pool/vdev membership | `tank/raidz1-0`, `rpool/mirror-0` |
+| **STATUS** | ZFS vdev state — green ONLINE/AVAIL, yellow DEGRADED/INUSE→bay, red FAULTED/REMOVED | `ONLINE`, `AVAIL`, `INUSE→1:4` |
 | **LEVEL** | overall status | see table below |
 
 **LEVEL meanings:**

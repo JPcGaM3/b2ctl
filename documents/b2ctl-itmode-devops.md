@@ -233,6 +233,12 @@ When dry-run is active:
 - Write commands: print `[DRY-RUN] would run: <cmd>`, return `(True, "")`.
 - Read commands: execute normally (real disk state shown).
 - Audit entry written with `status: "dry_run"`.
+- No physical side effects: the replace flow skips the locate-LED blink
+  (`watch._replace_onto_spare` gates it behind `if not _DRY_RUN`).
+- `safety.end_op` skips `_post_op_verify()` (no live re-scan / false rollback
+  prompt), and `_print_op_result` renders a neutral line
+  `• <op> dry-run preview — nothing changed (...)` instead of the red `✗`
+  / rollback hint used for real ops.
 
 ### 6.4 Audit trail — `/var/log/b2ctl/ops.jsonl`
 

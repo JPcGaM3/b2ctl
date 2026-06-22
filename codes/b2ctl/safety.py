@@ -89,7 +89,9 @@ def end_op(op_id: str, success: bool, stdout: str, stderr: str, exit_code: int,
     entry["rollback_hint"] = hint
     _rewrite_entry(op_id, entry)
     _print_op_result(entry, hint)
-    if success:
+    # dry-run changed nothing — skip the live post-op verification (it would
+    # re-scan the real pool and could falsely warn / suggest a rollback).
+    if success and not dry_run:
         _post_op_verify(entry)
 
 
@@ -176,6 +178,10 @@ def _print_op_result(entry: dict, hint: str | None) -> None:
     status = entry.get("status", "")
     pool   = entry.get("pool", "")
     vdev   = entry.get("vdev", "")
+    # dry-run: nothing was executed — don't render a red ✗ or a rollback hint.
+    if status == "dry_run":
+        print(f"{Y}• {entry.get('op')} dry-run preview — nothing changed ({pool}/{vdev}){N}")
+        return
     icon   = f"{G}✓{N}" if status == "ok" else f"{R}✗{N}"
     print(f"{icon} {entry.get('op')} complete ({pool}/{vdev})")
     snap = entry.get("snapshot_path")

@@ -70,5 +70,41 @@ class TestBeginOp(unittest.TestCase):
         self.assertTrue(os.path.exists(snap_path))
 
 
+class TestEndOpDryRun(unittest.TestCase):
+    """dry-run end_op must not render an error icon, suggest a rollback, or
+    run the live post-op verification."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.log_file = os.path.join(self.tmp, "ops.jsonl")
+        self.snap_dir = os.path.join(self.tmp, "snapshots")
+
+    def _import_safety(self):
+        import b2ctl.safety as safety
+        safety.LOG_DIR = self.tmp
+        safety.SNAP_DIR = self.snap_dir
+        safety.LOG_FILE = self.log_file
+        return safety
+
+    def test_dry_run_clean_output_and_no_verify(self):
+        import io
+        safety = self._import_safety()
+        cmds = [["zpool", "replace", "tank", "a", "b"]]
+        with patch.object(safety, "_capture_snapshot", return_value=None):
+            op_id = safety.begin_op("replace", "S1", 3, "/dev/disk/by-id/x",
+                                    "tank", "raidz1-0", cmds)
+        with patch.object(safety, "_post_op_verify") as mock_verify:
+            with patch("sys.stdout", new_callable=io.StringIO) as out:
+                safety.end_op(op_id, True, "", "", 0, dry_run=True)
+        text = out.getvalue()
+        mock_verify.assert_not_called()          # no live re-scan on dry-run
+        self.assertIn("dry-run", text)
+        self.assertNotIn("✗", text)              # no red error icon
+        self.assertNotIn("Rollback", text)       # nothing to roll back
+        with open(self.log_file) as f:
+            entry = json.loads(f.readline())
+        self.assertEqual(entry["status"], "dry_run")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -423,8 +423,9 @@ def _replace_onto_spare(d, spare) -> bool:
         else:
             print(R + f"  ✗ failed to detach old disk: {out_d}" + N)
 
-    print(f"{Y}  please pull bay {d.bay or '?'} ... blinking LED{N}")
-    locate.blink(d.dev, locate.DEFAULT_SECONDS)
+    if not _DRY_RUN:
+        print(f"{Y}  please pull bay {d.bay or '?'} ... blinking LED{N}")
+        locate.blink(d.dev, locate.DEFAULT_SECONDS)
     safety.end_op(op_id, True, out, "", 0, dry_run=_DRY_RUN)
     return True
 

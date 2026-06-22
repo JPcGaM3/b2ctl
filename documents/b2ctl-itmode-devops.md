@@ -390,6 +390,39 @@ A tmpdir is created via `mktemp -d` and cleaned on EXIT via `trap`.
 **Error handling:** missing archive or failed extraction prints `[✗] <tool>: reason`
 and continues. Never aborts the b2ctl package install above it.
 
+### §7.2 `b2ctl install` — post-install tool management
+
+After b2ctl is installed, tool binaries can be installed or reinstalled without re-running `install.sh`:
+
+```bash
+sudo b2ctl install                  # install all missing tools
+sudo b2ctl install --tool sas2ircu  # install one specific tool
+```
+
+Implemented in `b2ctl/installer.py`. Each tool is independent — one failure does not abort others.
+
+| tool | archive | method | binary path |
+|------|---------|--------|------------|
+| sas2ircu | SAS2IRCU_P20.zip (zip) | `cp + chmod` | `/usr/local/bin/sas2ircu` |
+| storcli | storcli.zip (zip) | `dpkg -i Ubuntu/*.deb` | `/opt/MegaRAID/storcli/storcli64` → `/usr/local/bin/storcli` |
+| perccli | perccli.tar.gz | `alien --scripts -i *.rpm` | `/opt/MegaRAID/perccli/perccli64` → `/usr/local/bin/perccli` |
+
+Downloads use `urllib.request` (stdlib) from Google Drive. Size validation: < 1 KB = HTML error page → aborts with `[✗]`. Temp dir cleaned up via `try/finally`.
+
+### §7.3 `b2ctl update` — config validation and bay_map export
+
+```bash
+b2ctl update                        # validate config, report tool status (no root needed)
+sudo b2ctl update --export-bay-map  # copy bundled bay_map.json to /etc/b2ctl/
+```
+
+`b2ctl update` reads the active config and reports per-item status:
+- `[✔]` — config file parses OK, tool found, bay_map exists
+- `[i]` — warn: config missing (using defaults), tool not found, bay_map is bundled
+- `[✗]` — error: JSON parse error, bay_map file missing
+
+`--export-bay-map`: copies `/opt/b2ctl/bay_map.json` → `/etc/b2ctl/bay_map.json` and writes `bay_map_path` into `/etc/b2ctl/config.json`. The `/etc/b2ctl/` copy is never overwritten by `install.sh`.
+
 ---
 
 ## 8. Troubleshooting

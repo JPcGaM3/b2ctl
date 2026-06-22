@@ -679,6 +679,10 @@ b2ctl rollback 20260617-143022-replace
 | `sudo b2ctl log --last N` | ดู N operation ล่าสุด |
 | `sudo b2ctl rollback <op_id>` | ย้อนกลับ operation ก่อนหน้า (พร้อม confirm) |
 | `sudo b2ctl version` | แสดงเวอร์ชัน |
+| `sudo b2ctl install` | ดาวน์โหลดและติดตั้ง sas2ircu, storcli, perccli จาก Google Drive (ข้ามตัวที่ติดตั้งแล้ว) |
+| `sudo b2ctl install --tool sas2ircu` | ติดตั้งเฉพาะ tool ที่ระบุ (`sas2ircu`, `storcli`, หรือ `perccli`) |
+| `b2ctl update` | ตรวจสอบ config และ tool ทั้งหมด แสดงสถานะ |
+| `sudo b2ctl update --export-bay-map` | คัดลอก bay_map.json ไปยัง /etc/b2ctl/ เพื่อแก้ไขได้อิสระ |
 
 ### คำสั่งในโหมด watch (พิมพ์ที่ `b2ctl>`)
 

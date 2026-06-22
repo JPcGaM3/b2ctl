@@ -30,3 +30,9 @@ trace.txt
 .idea/
 *.swp
 *.swo
+
+# Obsidian
+*.obsidian/
+
+# Tool binary archives (downloaded by b2ctl install)
+tools/

@@ -659,6 +659,10 @@ ESP partition **manually**. b2ctl does not touch Proxmox boot config.
 | `b2ctl config show` | print current effective config as JSON |
 | `b2ctl config init` | write `/etc/b2ctl/config.json` with auto-detected defaults |
 | `b2ctl version` | print version string |
+| `sudo b2ctl install` | download and install sas2ircu, storcli, perccli from Google Drive (skips already-installed) |
+| `sudo b2ctl install --tool sas2ircu` | install only one tool (`sas2ircu`, `storcli`, or `perccli`) |
+| `b2ctl update` | validate config, check tool paths, report missing tools |
+| `sudo b2ctl update --export-bay-map` | copy bundled bay_map.json to /etc/b2ctl/ and update config |
 
 ### Watch mode keys (at `b2ctl>`)
 

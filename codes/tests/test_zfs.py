@@ -1,0 +1,359 @@
+"""Unit tests for b2ctl.zfs — topology parsing, membership, actions, resilver."""
+from __future__ import annotations
+
+import unittest
+from unittest.mock import patch
+
+import pytest
+
+from helpers import (_disk, _MIRROR_STATUS, _RAIDZ_STATUS, _DEGRADED_STATUS,
+                     _RESILVER_DONE, _RESILVER_PROGRESS)
+from b2ctl import zfs, watch, core
+from b2ctl.common import Disk
+
+
+# ========================================================================== #
+# Topology parsing + membership + inspection
+# ========================================================================== #
+
+class TestZfsTopologyParsing:
+    """Tests for ZFS topology parsing, membership, and pool inspection."""
+
+    def test_parse_mirror_pool(self):
+        topo = {}
+        zfs._parse("rpool", _MIRROR_STATUS, topo)
+        assert "/dev/disk/by-id/wwn-0xAAA-part3" in topo
+        assert "/dev/disk/by-id/wwn-0xBBB-part3" in topo
+        e = topo["/dev/disk/by-id/wwn-0xAAA-part3"]
+        assert e["pool"] == "rpool"
+        assert e["vdev"] == "mirror-0"
+        assert e["state"] == "ONLINE"
+
+    def test_parse_raidz1_with_spares(self):
+        topo = {}
+        zfs._parse("tank", _RAIDZ_STATUS, topo)
+        assert "/dev/disk/by-id/wwn-0xCCC" in topo
+        assert "/dev/disk/by-id/wwn-0xDDD" in topo
+        assert "/dev/disk/by-id/wwn-0xEEE" in topo
+        spare = topo["/dev/disk/by-id/wwn-0xFFF"]
+        assert spare["vdev"] == "spares"  # note: parser stores the vdev keyword
+        assert spare["state"] == "AVAIL"
+
+    def test_parse_mixed_pools(self):
+        topo = {}
+        zfs._parse("rpool", _MIRROR_STATUS, topo)
+        zfs._parse("tank", _RAIDZ_STATUS, topo)
+        pools = {e["pool"] for e in topo.values()}
+        assert "rpool" in pools
+        assert "tank" in pools
+
+    def test_attach_membership_by_id(self):
+        topo = {}
+        zfs._parse("tank", _RAIDZ_STATUS, topo)
+        d = _disk(by_id="/dev/disk/by-id/wwn-0xCCC", pool=None, vdev=None,
+                  vdev_state=None, pool_token=None)
+        zfs.attach_membership([d], topo)
+        assert d.pool == "tank"
+        assert d.vdev == "raidz1-0"
+        assert d.vdev_state == "ONLINE"
+
+    def test_attach_membership_by_serial_fallback(self):
+        topo = {}
+        zfs._parse("tank", _RAIDZ_STATUS, topo)
+        d = _disk(by_id="/dev/disk/by-id/totally-different", serial="wwn-0xCCC",
+                  pool=None, vdev=None, vdev_state=None, pool_token=None)
+        zfs.attach_membership([d], topo)
+        assert d.pool == "tank"
+
+    @patch("b2ctl.zfs.topology")
+    def test_degraded_leaves_finds_faulted(self, mock_topo):
+        topo = {}
+        zfs._parse("tank", _DEGRADED_STATUS, topo)
+        mock_topo.return_value = topo
+        bad = zfs.degraded_leaves()
+        assert len(bad) == 1
+        assert bad[0]["state"] == "FAULTED"
+        assert bad[0]["pool"] == "tank"
+
+    @patch("b2ctl.zfs.topology")
+    def test_degraded_leaves_ignores_online(self, mock_topo):
+        topo = {}
+        zfs._parse("tank", _RAIDZ_STATUS, topo)
+        mock_topo.return_value = topo
+        bad = zfs.degraded_leaves()
+        assert len(bad) == 0
+
+    @patch("b2ctl.zfs.topology")
+    def test_can_detach_mirror_with_other_online(self, mock_topo):
+        topo = {}
+        zfs._parse("rpool", _MIRROR_STATUS, topo)
+        mock_topo.return_value = topo
+        result = zfs.can_detach("rpool", "/dev/disk/by-id/wwn-0xAAA-part3")
+        assert result is True
+
+    @patch("b2ctl.zfs.topology")
+    def test_can_detach_raidz_always_false(self, mock_topo):
+        topo = {}
+        zfs._parse("tank", _RAIDZ_STATUS, topo)
+        mock_topo.return_value = topo
+        result = zfs.can_detach("tank", "/dev/disk/by-id/wwn-0xCCC")
+        assert result is False
+
+    @patch("b2ctl.zfs.run")
+    def test_poll_resilver_completed(self, mock_run):
+        mock_run.return_value = _RESILVER_DONE
+        st = zfs.poll_resilver_status("tank")
+        assert st["completed"] is True
+        assert st["done"] == 100.0
+
+    @patch("b2ctl.zfs.run")
+    def test_poll_resilver_in_progress(self, mock_run):
+        mock_run.return_value = _RESILVER_PROGRESS
+        st = zfs.poll_resilver_status("tank")
+        assert st["completed"] is False
+        assert st["done"] == pytest.approx(45.2)
+        assert "03:21" in st["eta"]
+
+
+# ========================================================================== #
+# Resilver status parsing (extra real-world dumps)
+# ========================================================================== #
+
+class TestZfsResilver(unittest.TestCase):
+
+    @patch('b2ctl.zfs.run')
+    def test_poll_resilver_status_in_progress(self, mock_run):
+        mock_run.return_value = """  pool: tank
+ state: DEGRADED
+status: One or more devices is currently being resilvered.  The pool will
+        continue to function, possibly in a degraded state.
+action: Wait for the resilver to complete.
+  scan: resilver in progress since Wed Jun 10 06:40:00 2026
+        100G scanned at 500M/s, 50G issued at 250M/s, 1000G total
+        50.0G resilvered, 5.00% done, 01:03:20 to go
+"""
+        status = zfs.poll_resilver_status("tank")
+        self.assertIsNotNone(status)
+        self.assertEqual(status["done"], 5.0)
+        self.assertEqual(status["eta"], "01:03:20")
+        self.assertFalse(status["completed"])
+
+    @patch('b2ctl.zfs.run')
+    def test_poll_resilver_status_completed(self, mock_run):
+        mock_run.return_value = """  pool: tank
+ state: ONLINE
+  scan: resilvered 1.23T in 05:43:21 with 0 errors on Wed Jun 10 12:23:21 2026
+"""
+        status = zfs.poll_resilver_status("tank")
+        self.assertIsNotNone(status)
+        self.assertTrue(status["completed"])
+        self.assertEqual(status["done"], 100.0)
+
+    @patch('b2ctl.zfs.run')
+    def test_poll_resilver_status_days_eta(self, mock_run):
+        mock_run.return_value = """  pool: tank
+  scan: resilver in progress since Wed Jun 10 06:40:00 2026
+        1.50% done, 2 days 05:10:00 to go
+"""
+        status = zfs.poll_resilver_status("tank")
+        self.assertIsNotNone(status)
+        self.assertFalse(status["completed"])
+        self.assertEqual(status["done"], 1.5)
+        self.assertEqual(status["eta"], "2 days 05:10:00")
+
+
+# ========================================================================== #
+# Action wrappers (command building, mocked subprocess)
+# ========================================================================== #
+
+class TestZfsActions:
+    """Tests for ZFS action wrappers (all subprocess calls mocked)."""
+
+    @patch("b2ctl.zfs.run_check")
+    def test_add_spare_command(self, mock_rc):
+        mock_rc.return_value = (True, "")
+        ok, _ = zfs.add_spare("tank", "/dev/disk/by-id/wwn-0xABC")
+        mock_rc.assert_called_with(["zpool", "add", "-f", "tank", "spare",
+                                    "/dev/disk/by-id/wwn-0xABC"], dry_run=False)
+        assert ok
+
+    @patch("b2ctl.zfs.run_check")
+    def test_replace_command(self, mock_rc):
+        mock_rc.return_value = (True, "")
+        ok, _ = zfs.replace("tank", "old-dev", "new-dev")
+        mock_rc.assert_called_with(["zpool", "replace", "-f", "tank",
+                                    "old-dev", "new-dev"], dry_run=False)
+
+    @patch("b2ctl.zfs.run_check")
+    def test_create_pool_raidz1(self, mock_rc):
+        mock_rc.return_value = (True, "")
+        ok, _ = zfs.create_pool("backup", "raidz1", ["/dev/sda", "/dev/sdb", "/dev/sdc"])
+        args = mock_rc.call_args[0][0]
+        assert "zpool" in args
+        assert "create" in args
+        assert "raidz1" in args
+        assert "/dev/sda" in args
+
+    @patch("b2ctl.zfs.run_check")
+    def test_create_pool_stripe_no_raid_keyword(self, mock_rc):
+        mock_rc.return_value = (True, "")
+        zfs.create_pool("fast", "stripe", ["/dev/sda"])
+        args = mock_rc.call_args[0][0]
+        assert "stripe" not in args
+        assert "/dev/sda" in args
+
+    @patch("b2ctl.zfs.run_check")
+    def test_demote_to_spare_calls_detach_then_add(self, mock_rc):
+        mock_rc.return_value = (True, "")
+        ok, _ = zfs.demote_to_spare("rpool", "/dev/disk/by-id/wwn-0xBBB-part3")
+        assert mock_rc.call_count == 2
+        first_call = mock_rc.call_args_list[0][0][0]
+        second_call = mock_rc.call_args_list[1][0][0]
+        assert "detach" in first_call
+        assert "spare" in second_call
+
+    def test_min_disks_constants(self):
+        assert zfs.MIN_DISKS["stripe"] == 1
+        assert zfs.MIN_DISKS["mirror"] == 2
+        assert zfs.MIN_DISKS["raidz1"] == 3
+        assert zfs.MIN_DISKS["raidz2"] == 4
+
+
+# ========================================================================== #
+# create_pool full command assertions
+# ========================================================================== #
+
+class TestZfsCreatePool(unittest.TestCase):
+
+    @patch('b2ctl.zfs.run_check')
+    def test_create_pool_mirror(self, mock_run_check):
+        mock_run_check.return_value = (True, "")
+        ok, out = zfs.create_pool("tank", "mirror", ["/dev/sda", "/dev/sdb"])
+        self.assertTrue(ok)
+        mock_run_check.assert_called_once_with([
+            "zpool", "create", "-f", "-o", "ashift=12", "-O", "compression=lz4",
+            "-O", "atime=off", "-O", "xattr=sa", "-o", "autotrim=on", "tank",
+            "mirror", "/dev/sda", "/dev/sdb"
+        ], dry_run=False)
+
+    @patch('b2ctl.zfs.run_check')
+    def test_create_pool_stripe(self, mock_run_check):
+        mock_run_check.return_value = (True, "")
+        ok, out = zfs.create_pool("tank", "stripe", ["/dev/sda", "/dev/sdb"])
+        self.assertTrue(ok)
+        mock_run_check.assert_called_once_with([
+            "zpool", "create", "-f", "-o", "ashift=12", "-O", "compression=lz4",
+            "-O", "atime=off", "-O", "xattr=sa", "-o", "autotrim=on", "tank",
+            "/dev/sda", "/dev/sdb"
+        ], dry_run=False)
+
+
+# ========================================================================== #
+# can_detach guard + demote_to_spare orchestration
+# ========================================================================== #
+
+class TestZfsCanDetachDemote(unittest.TestCase):
+
+    @patch('b2ctl.zfs.topology')
+    def test_can_detach_raidz(self, mock_topo):
+        mock_topo.return_value = {
+            "dev1": {"pool": "tank", "vdev": "raidz1-0", "state": "ONLINE", "token": "dev1"},
+            "dev2": {"pool": "tank", "vdev": "raidz1-0", "state": "ONLINE", "token": "dev2"},
+        }
+        self.assertFalse(zfs.can_detach("tank", "dev1"))
+
+    @patch('b2ctl.zfs.topology')
+    def test_can_detach_mirror_safe(self, mock_topo):
+        mock_topo.return_value = {
+            "dev1": {"pool": "tank", "vdev": "mirror-0", "state": "ONLINE", "token": "dev1"},
+            "dev2": {"pool": "tank", "vdev": "mirror-0", "state": "ONLINE", "token": "dev2"},
+        }
+        self.assertTrue(zfs.can_detach("tank", "dev1"))
+
+    @patch('b2ctl.zfs.topology')
+    def test_can_detach_mirror_unsafe(self, mock_topo):
+        mock_topo.return_value = {
+            "dev1": {"pool": "tank", "vdev": "mirror-0", "state": "ONLINE", "token": "dev1"},
+            "dev2": {"pool": "tank", "vdev": "mirror-0", "state": "OFFLINE", "token": "dev2"},
+        }
+        self.assertFalse(zfs.can_detach("tank", "dev1"))
+
+    @patch('b2ctl.zfs.detach')
+    @patch('b2ctl.zfs.add_spare')
+    def test_demote_to_spare(self, mock_add_spare, mock_detach):
+        mock_detach.return_value = (True, "")
+        mock_add_spare.return_value = (True, "")
+
+        ok, out = zfs.demote_to_spare("tank", "dev1")
+
+        self.assertTrue(ok)
+        mock_detach.assert_called_once_with("tank", "dev1", dry_run=False)
+        mock_add_spare.assert_called_once_with("tank", "dev1", dry_run=False)
+
+    @patch('b2ctl.zfs.detach')
+    @patch('b2ctl.zfs.add_spare')
+    def test_demote_to_spare_detach_fails(self, mock_add_spare, mock_detach):
+        mock_detach.return_value = (False, "error")
+
+        ok, out = zfs.demote_to_spare("tank", "dev1")
+
+        self.assertFalse(ok)
+        self.assertEqual(out, "error")
+        mock_detach.assert_called_once_with("tank", "dev1", dry_run=False)
+        mock_add_spare.assert_not_called()
+
+
+# ========================================================================== #
+# pool_token: attach_membership maps whole-disk by_id to the -part leaf token
+# ========================================================================== #
+
+class TestFeatureFixPoolToken(unittest.TestCase):
+    def test_pool_token_assigned_and_used(self):
+        # 1. Build a topo whose member token is part1
+        topo = {
+            "/dev/disk/by-id/wwn-0xABC-part1": {
+                "pool": "tank",
+                "vdev": "raidz1-0",
+                "state": "ONLINE",
+                "token": "/dev/disk/by-id/wwn-0xABC-part1"
+            }
+        }
+
+        # 2. Disk whose by_id is the whole-disk
+        d = Disk(dev="/dev/sdb", by_id="/dev/disk/by-id/wwn-0xABC", serial="12345")
+
+        # 3. Assert attach_membership sets pool_token
+        zfs.attach_membership([d], topo)
+        self.assertEqual(d.pool_token, "/dev/disk/by-id/wwn-0xABC-part1")
+        self.assertEqual(d.pool, "tank")
+
+        with patch("b2ctl.zfs.detach") as mock_detach, \
+             patch("b2ctl.zfs.poll_resilver_status") as mock_poll, \
+             patch("b2ctl.zfs.topology") as mock_topo, \
+             patch("b2ctl.core.scan") as mock_scan, \
+             patch("b2ctl.watch._confirm_op", return_value=True), \
+             patch("b2ctl.watch.run_check") as mock_run_check, \
+             patch("b2ctl.safety.begin_op", return_value="test-op-id"), \
+             patch("b2ctl.safety.end_op"), \
+             patch("b2ctl.watch._ask", return_value="1"), \
+             patch("b2ctl.locate.blink"):
+
+            spare_disk = Disk(dev="/dev/sdc", by_id="/dev/disk/by-id/wwn-SPARE", serial="67890", pool="tank", vdev="spares", vdev_state="AVAIL")
+            mock_scan.return_value = [d, spare_disk]
+            mock_run_check.return_value = (True, "")
+            mock_detach.return_value = (True, "")
+            mock_poll.return_value = {"completed": True, "done": 100.0, "eta": ""}
+            mock_topo.return_value = topo
+
+            # mock sys.stdout.write and flush
+            with patch("sys.stdout.write"), patch("sys.stdout.flush"), patch("builtins.print"):
+                watch._cmd_replace(None)
+
+            mock_run_check.assert_called_with(
+                ["zpool", "replace", "tank", "/dev/disk/by-id/wwn-0xABC-part1", "/dev/disk/by-id/wwn-SPARE"],
+                dry_run=False
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

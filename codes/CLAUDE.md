@@ -148,6 +148,11 @@ parsers and the membership-by-serial fallback. For Task B, mock a sequence of
 errors" and assert the bar/ETA/countdown and the detach+replenish steps fire in
 order. Run `python3 -m py_compile b2ctl/*.py` before finishing.
 
+Test layout: **one test file per source module** — `tests/test_<module>.py`
+(e.g. `test_zfs.py`, `test_watch.py`). Shared `_disk()` factory and sample
+command outputs live in `tests/helpers.py` (`tests/conftest.py` puts that on
+the path). Run the suite with `cd codes && python3 -m pytest tests/ -q`.
+
 ## 9. Safety rules (non-negotiable)
 
 - Read path (`status`, `top`) is side-effect-free.

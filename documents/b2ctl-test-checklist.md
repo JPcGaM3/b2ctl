@@ -17,12 +17,12 @@
 
 ### Legend (Status)
 
-| สัญลักษณ์ | ความหมาย |
-|---------|----------|
-| `☐` | ยังไม่เทส |
-| `✅` | PASS — ตรง Expected |
-| `❌` | FAIL — ไม่ตรง Expected (กรอก Comment ด้วย) |
-| `⏭` | SKIP — ข้าม (กรอกเหตุผลใน Comment) |
+| สัญลักษณ์ | ความหมาย                                   |
+| --------- | ------------------------------------------ |
+| `☐`       | ยังไม่เทส                                  |
+| `✅`       | PASS — ตรง Expected                        |
+| `❌`       | FAIL — ไม่ตรง Expected (กรอก Comment ด้วย) |
+| `⏭`       | SKIP — ข้าม (กรอกเหตุผลใน Comment)         |
 
 ---
 
@@ -47,12 +47,12 @@ zpool status tank   > /tmp/zpool-before.txt
 zpool status rpool >> /tmp/zpool-before.txt
 ```
 
-| ตรวจ | Expected | Status | Actual |
-|------|----------|:------:|--------|
-| `b2ctl version` | `b2ctl 0.5.0-itmode` | ☐ | |
-| `b2ctl check` รันได้ ไม่ crash | แสดง root, tools, backend mode, config path | ☐ | |
-| `/tmp/before.json` valid JSON | `python3 -m json.tool /tmp/before.json` ผ่าน | ☐ | |
-| baseline zpool เก็บแล้ว | ไฟล์ `/tmp/zpool-before.txt` มีเนื้อหา | ☐ | |
+| ตรวจ                           | Expected                                     | Status | Actual |
+| ------------------------------ | -------------------------------------------- | :----: | ------ |
+| `b2ctl version`                | `b2ctl 0.5.0-itmode`                         |   ☐    |        |
+| `b2ctl check` รันได้ ไม่ crash | แสดง root, tools, backend mode, config path  |   ☐    |        |
+| `/tmp/before.json` valid JSON  | `python3 -m json.tool /tmp/before.json` ผ่าน |   ☐    |        |
+| baseline zpool เก็บแล้ว        | ไฟล์ `/tmp/zpool-before.txt` มีเนื้อหา       |   ☐    |        |
 
 ---
 
@@ -133,33 +133,34 @@ zpool status rpool >> /tmp/zpool-before.txt
 cd codes && python3 -m pytest tests/ -q
 ```
 
-**ผลรอบนี้ (2026-06-22, dev machine):** `115 passed, 9 failed` (124 total)
+**ผลรอบนี้ (2026-06-22, dev machine):** `124 passed, 0 failed` (124 total) ✅
 
 | ID | Scenario | Expected | Status | Actual | Comment |
 |----|----------|----------|:------:|--------|---------|
 | E1 | Test suite รันได้ | suite รันจบ ไม่ error การ import | ✅ | 124 tests collected, รันจบ | OK |
-| E2 | Pass rate | tests ผ่านทั้งหมด | ❌ | 115 passed / **9 failed** | 9 failures เป็น **pre-existing** ไม่ใช่ regression — ดูด้านล่าง |
+| E2 | Pass rate | tests ผ่านทั้งหมด | ✅ | **124 passed / 0 failed** | 9 เทสที่เคย fail แก้แล้ว (ดูด้านล่าง) |
 
-**รายชื่อ 9 เทสที่ fail (pre-existing — mock signature mismatch):**
+**โครงสร้าง test ใหม่ — 1 ไฟล์ต่อ 1 module (หาง่าย):**
 
 ```
-tests/test_b2ctl.py::TestWatchSwap::test_swap_readds_as_spare_on_success
-tests/test_b2ctl.py::TestZfsActions::test_add_spare_command
-tests/test_b2ctl.py::TestZfsActions::test_replace_command
-tests/test_feature_1b.py::TestFeature1b::test_cmd_demote_success
-tests/test_feature_1b.py::TestFeature1b::test_cmd_swap_success
-tests/test_feature_1b.py::TestFeature1b::test_demote_to_spare
-tests/test_feature_1b.py::TestFeature1b::test_demote_to_spare_detach_fails
-tests/test_feature_create_pool.py::TestZfsCreatePool::test_create_pool_mirror
-tests/test_feature_create_pool.py::TestZfsCreatePool::test_create_pool_stripe
+tests/
+  conftest.py + helpers.py     # shared _disk() factory + sample outputs
+  test_common.py (17)   test_zfs.py (28)    test_watch.py (23)
+  test_ui.py (14)       test_config.py (8)  test_backend.py (7)
+  test_hba.py (7)       test_smart.py (5)   test_spec.py (5)
+  test_core.py (4)      test_safety.py (4)  test_cli.py (2)
 ```
 
-**สาเหตุ:** test mock คาด `run_check(['zpool', ...])` แต่ code เรียก
-`run_check(['zpool', ...], dry_run=False)` — production code ถูก (มี `dry_run` kwarg
-จากฟีเจอร์ dry-run); test assertion ยังเขียนแบบเก่า. **เป็นปัญหาที่ test ไม่ใช่ที่ code.**
+**9 เทสที่เคย fail — แก้แล้ว:**
+- 7 ตัว (add_spare/replace/create_pool×2/demote_to_spare×2/swap_readds): mock assertion
+  เก่าคาด `run_check([...])` แต่ code เรียก `run_check([...], dry_run=False)` (production
+  ถูก — มี `dry_run` kwarg จากฟีเจอร์ dry-run). แก้ assertion ให้รับ `dry_run=False`
+- 2 ตัว (test_cmd_swap_success / test_cmd_demote_success ใน feature_1b เดิม): **stale** —
+  เขียนไว้สำหรับ `_cmd_swap` เวอร์ชันเก่า (ใช้ `zfs.spares()`, ไม่มี topology-linger detach).
+  เขียนใหม่ใน `test_watch.py::TestWatchSwapDemoteFlow` ให้ตรง implementation ปัจจุบัน
+  (รักษา coverage: resilver poll loop 2 รอบ + detach เมื่อ old token ยัง linger)
 
-**Comment / action:** ควร fix mock assertion ให้รับ `dry_run=False` (แยกรอบ refactor test) —
-ไม่บล็อกการใช้งานจริง. รอ user ตัดสินว่าจะแก้รอบนี้หรือรอบหน้า.
+**Source code ไม่ถูกแตะ** — แก้เฉพาะ test (โครงสร้าง + assertion).
 
 ---
 

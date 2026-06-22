@@ -1,0 +1,83 @@
+"""Unit tests for b2ctl.config — tool path resolution, defaults, mode/index."""
+from __future__ import annotations
+
+from unittest.mock import patch
+
+
+class TestConfig:
+    """Tests for config.py — tool resolution, missing file defaults."""
+
+    def setup_method(self):
+        import b2ctl.config as cfg_mod
+        cfg_mod._cache = None
+
+    def test_tool_returns_config_override_when_set(self):
+        import b2ctl.config as cfg_mod
+        cfg_mod._cache = {
+            "tool_paths": {"sas2ircu": "/custom/sas2ircu"},
+            "controller": {"mode": "auto", "index": "all"},
+            "bay_map_path": "",
+        }
+        assert cfg_mod.tool("sas2ircu") == "/custom/sas2ircu"
+
+    def test_tool_fallback_to_which_when_empty(self):
+        import b2ctl.config as cfg_mod
+        cfg_mod._cache = {
+            "tool_paths": {"smartctl": ""},
+            "controller": {"mode": "auto", "index": "all"},
+            "bay_map_path": "",
+        }
+        with patch("b2ctl.config.shutil.which", return_value="/usr/sbin/smartctl"):
+            result = cfg_mod.tool("smartctl")
+        assert result == "/usr/sbin/smartctl"
+
+    def test_tool_falls_back_to_bare_name_when_not_in_path(self):
+        import b2ctl.config as cfg_mod
+        cfg_mod._cache = {
+            "tool_paths": {"sas2ircu": ""},
+            "controller": {"mode": "auto", "index": "all"},
+            "bay_map_path": "",
+        }
+        with patch("b2ctl.config.shutil.which", return_value=None):
+            result = cfg_mod.tool("sas2ircu")
+        assert result == "sas2ircu"
+
+    def test_bay_map_path_returns_config_override(self):
+        import b2ctl.config as cfg_mod
+        cfg_mod._cache = {
+            "tool_paths": {},
+            "controller": {"mode": "auto", "index": "all"},
+            "bay_map_path": "/srv/bay_map.json",
+        }
+        assert cfg_mod.bay_map_path() == "/srv/bay_map.json"
+
+    def test_bay_map_path_returns_bundled_when_empty(self):
+        import b2ctl.config as cfg_mod
+        cfg_mod._cache = {
+            "tool_paths": {},
+            "controller": {"mode": "auto", "index": "all"},
+            "bay_map_path": "",
+        }
+        p = cfg_mod.bay_map_path()
+        assert p.endswith("bay_map.json")
+
+    def test_load_returns_defaults_when_no_file(self):
+        import b2ctl.config as cfg_mod
+        with patch("b2ctl.config.os.path.exists", return_value=False):
+            cfg = cfg_mod.load()
+        assert cfg["controller"]["mode"] == "auto"
+        assert cfg["controller"]["index"] == "all"
+        assert cfg["tool_paths"]["sas2ircu"] == ""
+        assert cfg["bay_map_path"] == ""
+
+    def test_controller_mode_returns_auto_by_default(self):
+        import b2ctl.config as cfg_mod
+        cfg_mod._cache = None
+        with patch("b2ctl.config.os.path.exists", return_value=False):
+            assert cfg_mod.controller_mode() == "auto"
+
+    def test_controller_index_setting_returns_all_by_default(self):
+        import b2ctl.config as cfg_mod
+        cfg_mod._cache = None
+        with patch("b2ctl.config.os.path.exists", return_value=False):
+            assert cfg_mod.controller_index_setting() == "all"

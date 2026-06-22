@@ -17,6 +17,7 @@ import sys
 
 from . import core, watch, zfs, spec, locate as locatemod
 from . import backend as _backend_mod, config as _cfg_mod
+from . import installer as _installer_mod
 from .common import need_root, run, R, Y, G, C, N
 from . import ui
 
@@ -160,6 +161,58 @@ def _check(_args) -> int:
     else:
         print(f"  {warn_mark} Config: {cfg_path} (missing — using defaults, run 'b2ctl config init' to create)")
 
+    return 0
+
+
+def _install(args) -> int:
+    """Download and install tool binaries from Google Drive."""
+    if os.geteuid() != 0:
+        print(f"{R}[-] b2ctl install requires root{N}")
+        return 1
+    tools = [args.tool] if getattr(args, "tool", None) else None
+    print()
+    print(f"{C}[b2ctl install]{N}")
+    _installer_mod.install_tools(tools)
+    print()
+    return 0
+
+
+def _update(args) -> int:
+    """Validate config and report tool/bay_map status."""
+    export = getattr(args, "export_bay_map", False)
+    if export and os.geteuid() != 0:
+        print(f"{R}[-] b2ctl update --export-bay-map requires root{N}")
+        return 1
+
+    print(f"\n{C}[b2ctl update]{N}")
+    results = _cfg_mod.validate()
+    _STATUS_COLOR = {"ok": G, "warn": Y, "error": R}
+    _STATUS_ICON  = {"ok": "[✔]", "warn": "[i]", "error": "[✗]"}
+    for field, status, msg in results:
+        color = _STATUS_COLOR.get(status, N)
+        icon  = _STATUS_ICON.get(status, "[?]")
+        print(f"  {color}{icon}{N} {field:<12} {msg}")
+
+    if export:
+        import shutil as _shutil
+        import json as _json
+        src = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "bay_map.json"))
+        dest = "/etc/b2ctl/bay_map.json"
+        os.makedirs("/etc/b2ctl", exist_ok=True)
+        _shutil.copy2(src, dest)
+        cfg_path = _cfg_mod.CONFIG_PATH
+        try:
+            with open(cfg_path) as f:
+                cfg = _json.load(f)
+        except (OSError, _json.JSONDecodeError):
+            cfg = _cfg_mod.load()
+        cfg["bay_map_path"] = dest
+        with open(cfg_path, "w") as f:
+            _json.dump(cfg, f, indent=2)
+        print(f"\n{G}[✔] bay_map exported to {dest}{N}")
+        print(f"    config updated: bay_map_path = \"{dest}\"")
+        print(f"    Edit {dest} freely — install.sh won't overwrite it.")
+    print()
     return 0
 
 
@@ -307,6 +360,19 @@ def build_parser() -> argparse.ArgumentParser:
     rb_p.add_argument("op_id", help="op_id from b2ctl log output")
     rb_p.set_defaults(func=lambda a: _rollback_cmd(a.op_id))
 
+    # install
+    inst_p = sub.add_parser("install",
+                            help="download and install tool binaries (sas2ircu/storcli/perccli)")
+    inst_p.add_argument("--tool", choices=["sas2ircu", "storcli", "perccli"],
+                        metavar="TOOL", help="install only this tool (default: all missing)")
+    inst_p.set_defaults(func=_install)
+
+    # update
+    upd_p = sub.add_parser("update", help="validate config and report tool status")
+    upd_p.add_argument("--export-bay-map", action="store_true",
+                       help="copy bundled bay_map.json to /etc/b2ctl/ and update config")
+    upd_p.set_defaults(func=_update)
+
     return p
 
 
@@ -318,7 +384,7 @@ def main(argv=None) -> int:
         _watch._DRY_RUN = True
     if not getattr(args, "cmd", None):
         args = parser.parse_args(["status"])
-    if args.cmd not in ("version", "check", "config", "log", "rollback"):
+    if args.cmd not in ("version", "check", "config", "log", "rollback", "install", "update"):
         need_root()
     return args.func(args)
 

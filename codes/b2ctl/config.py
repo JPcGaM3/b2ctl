@@ -101,3 +101,45 @@ def controller_index_setting() -> str:
 def as_json() -> str:
     """Return current config as formatted JSON string (for `b2ctl config show`)."""
     return json.dumps(_get(), indent=2)
+
+
+def validate() -> list[tuple[str, str, str]]:
+    """Validate current config. Returns list of (field, status, message).
+    status: 'ok' | 'warn' | 'error'
+    """
+    results: list[tuple[str, str, str]] = []
+
+    # config file
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH) as f:
+                json.load(f)
+            results.append(("config", "ok", CONFIG_PATH))
+        except json.JSONDecodeError as exc:
+            results.append(("config", "error", f"{CONFIG_PATH}: JSON parse error: {exc}"))
+    else:
+        results.append(("config", "warn", f"{CONFIG_PATH} missing — using defaults"))
+
+    # tool paths
+    for name in ("sas2ircu", "storcli", "perccli", "smartctl", "zpool"):
+        path = tool(name)
+        found = shutil.which(path) or (os.path.isfile(path) and os.access(path, os.X_OK))
+        if found:
+            results.append((name, "ok", path))
+        else:
+            hint = (f"run: b2ctl install --tool {name}"
+                    if name in ("sas2ircu", "storcli", "perccli") else "install via apt")
+            results.append((name, "warn", f"not found  →  {hint}"))
+
+    # bay_map
+    bmp = bay_map_path()
+    if os.path.exists(bmp):
+        if _get()["bay_map_path"]:
+            results.append(("bay_map", "ok", bmp))
+        else:
+            results.append(("bay_map", "warn",
+                            f"bundled ({bmp})  →  b2ctl update --export-bay-map to customize"))
+    else:
+        results.append(("bay_map", "error", f"{bmp} not found"))
+
+    return results

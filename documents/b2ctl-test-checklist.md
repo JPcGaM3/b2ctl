@@ -181,6 +181,35 @@ Watch mode ให้กด `t` เพื่อ toggle dry-run — ทุก acti
 
 ---
 
+## 📸 Snapshot audit (`/var/log/b2ctl/snapshots/`)
+
+ทุก mutating op (replace/offline/add_spare) `safety.begin_op()` จะถ่าย **pre-op snapshot**
+ไว้ก่อน เผื่อ rollback/สืบสวน. ตรวจแล้วบนทั้ง 2 เครื่อง:
+
+| ตรวจ | ผล |
+|------|-----|
+| โครงสร้างไฟล์ | ✅ ครบ 4 section: `zpool status <pool>` · `zpool list -v` · `zfs list` · `smartctl -a <dev>` |
+| content จริง | ✅ 201: tank `state: ONLINE`, smartctl `PASSED`; ไฟล์ ~7.5KB / ~144 บรรทัด |
+| ทั้ง 2 เครื่อง | ✅ 201 มี 4 ไฟล์, 203 มี 1 ไฟล์ — header + ทุก section ครบ |
+
+```
+# ตัวอย่าง section headers ของ 1 snapshot (201)
+=== b2ctl pre-op snapshot: 20260622-161350-348683-replace ===
+--- zpool status tank ---
+--- zpool list -v ---
+--- zfs list ---
+--- smartctl -a /dev/disk/by-id/wwn-0x...-part1 ---
+=== START OF INFORMATION SECTION ===
+=== START OF READ SMART DATA SECTION ===
+```
+
+**ข้อสังเกต (benign):** `--dry-run` ก็สร้าง snapshot file ด้วย (`begin_op` รันก่อน `run_check`
+จึงไม่รู้ว่าเป็น dry-run). เป็นแค่ read-only capture → ไฟล์รกใน `/var/log/b2ctl/snapshots/`
+แต่ไม่กระทบข้อมูล. ถ้าอยากให้ dry-run pure 100% → plumb `dry_run` เข้า `begin_op` แล้วข้าม
+snapshot (optional cleanup, ยังไม่แก้).
+
+---
+
 ## Section C — Physical hotplug (ต้องอยู่หน้าเครื่อง)
 
 > ต้องดึง/เสียบดิสก์จริง. ทำบน **tank** เท่านั้น. เปิด `b2ctl watch` ค้างไว้ระหว่างเทส.

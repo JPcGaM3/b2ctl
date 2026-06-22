@@ -39,6 +39,8 @@ def begin_op(
     pool: str,
     vdev: str,
     cmds: list[list[str]],
+    *,
+    dry_run: bool = False,
 ) -> str:
     """Write pending audit entry + snapshot. Return op_id."""
     try:
@@ -66,7 +68,8 @@ def begin_op(
         "rollback_hint": None,
         "snapshot_path": None,
     }
-    snap_path = _capture_snapshot(op_id, pool, dev_path)
+    # dry-run is a pure preview — don't write a pre-op snapshot to disk.
+    snap_path = None if dry_run else _capture_snapshot(op_id, pool, dev_path)
     if snap_path:
         entry["snapshot_path"] = snap_path
     _append_jsonl(entry)

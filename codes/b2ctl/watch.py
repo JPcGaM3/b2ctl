@@ -163,7 +163,7 @@ def _assign_free_disk(d, tbw, all_disks=None) -> None:
             print(f"       proxmox-boot-tool init   <new-ESP-partition>")
         vdev = tgt.get("vdev", "unknown")
         cmds = [["zpool", "replace", "-f", pool, tgt["token"], d.by_id or d.dev]]
-        op_id = safety.begin_op("replace", d.serial, d.bay, tgt["token"], pool, vdev, cmds)
+        op_id = safety.begin_op("replace", d.serial, d.bay, tgt["token"], pool, vdev, cmds, dry_run=_DRY_RUN)
         if not _confirm_op("replace", None, d, pool, vdev, cmds):
             safety.end_op(op_id, False, "", "cancelled", 0)
             return
@@ -393,7 +393,7 @@ def _cmd_locate(tbw) -> None:
 def _replace_onto_spare(d, spare) -> bool:
     pool = d.pool
     cmds = [["zpool", "replace", pool, _pool_dev(d), spare.pool_token or spare.by_id]]
-    op_id = safety.begin_op("replace", d.serial, d.bay, _pool_dev(d), pool, d.vdev, cmds)
+    op_id = safety.begin_op("replace", d.serial, d.bay, _pool_dev(d), pool, d.vdev, cmds, dry_run=_DRY_RUN)
     if not _confirm_op("replace", d, spare, pool, d.vdev, cmds):
         safety.end_op(op_id, False, "", "cancelled", 0)
         return False

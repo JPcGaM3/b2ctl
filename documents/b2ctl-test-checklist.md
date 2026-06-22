@@ -203,10 +203,13 @@ Watch mode ให้กด `t` เพื่อ toggle dry-run — ทุก acti
 === START OF READ SMART DATA SECTION ===
 ```
 
-**ข้อสังเกต (benign):** `--dry-run` ก็สร้าง snapshot file ด้วย (`begin_op` รันก่อน `run_check`
-จึงไม่รู้ว่าเป็น dry-run). เป็นแค่ read-only capture → ไฟล์รกใน `/var/log/b2ctl/snapshots/`
-แต่ไม่กระทบข้อมูล. ถ้าอยากให้ dry-run pure 100% → plumb `dry_run` เข้า `begin_op` แล้วข้าม
-snapshot (optional cleanup, ยังไม่แก้).
+**แก้แล้ว (Optional 1):** เดิม `--dry-run` ก็สร้าง snapshot file (`begin_op` รันก่อน `run_check`
+จึงไม่รู้ว่า dry-run). แก้ `begin_op` รับ `dry_run=` แล้ว **ข้าม `_capture_snapshot` ตอน dry-run**
+→ dry-run = preview ล้วน ไม่เขียนไฟล์. (มีผลบน server **หลัง redeploy `install.sh`**)
+
+**เก็บกวาดแล้ว (Optional 2):** ลบ snapshot ที่งอกจากการเทส dry-run — ลบ **เฉพาะ** op ที่
+`status: "dry_run"` ใน `ops.jsonl` (201: ลบ 2, 203: ลบ 1); snapshot ของ op จริง (status
+`ok`/`fail`) **เก็บไว้** เพื่อ audit. ตรวจ ls หลังลบ: 201 เหลือ 2 (ok+fail), 203 เหลือ 0
 
 ---
 

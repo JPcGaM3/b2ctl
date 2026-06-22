@@ -69,6 +69,19 @@ class TestBeginOp(unittest.TestCase):
         snap_path = os.path.join(self.snap_dir, f"{op_id}.txt")
         self.assertTrue(os.path.exists(snap_path))
 
+    def test_dry_run_skips_snapshot(self):
+        safety = self._import_safety()
+        os.makedirs(self.snap_dir, exist_ok=True)
+        cmds = [["zpool", "replace", "tank", "a", "b"]]
+        with patch.object(safety, "_capture_snapshot") as mock_snap:
+            op_id = safety.begin_op("replace", "S1", 3, "/dev/disk/by-id/x",
+                                    "tank", "raidz1-0", cmds, dry_run=True)
+        mock_snap.assert_not_called()                       # no capture on dry-run
+        self.assertFalse(os.path.exists(os.path.join(self.snap_dir, f"{op_id}.txt")))
+        with open(self.log_file) as f:
+            entry = json.loads(f.readline())
+        self.assertIsNone(entry["snapshot_path"])
+
 
 class TestEndOpDryRun(unittest.TestCase):
     """dry-run end_op must not render an error icon, suggest a rollback, or

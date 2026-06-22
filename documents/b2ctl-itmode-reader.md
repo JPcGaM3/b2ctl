@@ -76,7 +76,7 @@ Requires `curl` or `wget` (both available by default on Proxmox VE).
 | `smartctl` (smartmontools) | read disk SMART health | required |
 | `zpool` (zfsutils-linux) | ZFS pool management | required |
 | `lsblk` | disk enumeration | required |
-| `sas2ircu` | bay numbers (enclosure:slot mapping) | optional — bays show `-` without it |
+| `sas2ircu` | bay numbers (enclosure:slot mapping) | optional — bays show `-` without it. sas2ircu is a 32-bit binary; if installed but bays still `-`, run `apt-get install -y libc6-i386` |
 | `ledctl` (ledmon) | activity LED locate | optional — falls back to dd |
 | `wipefs`, `sgdisk` | disk wipe action | optional — needed for wipe only |
 

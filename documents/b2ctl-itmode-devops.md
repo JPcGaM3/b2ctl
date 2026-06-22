@@ -430,7 +430,8 @@ sudo b2ctl update --export-bay-map  # copy bundled bay_map.json to /etc/b2ctl/
 | symptom | cause / fix |
 |---------|-------------|
 | table empty, pools show | `lsblk` not in `-P` mode or MODEL spaces — confirm `enumerate_disks` uses `-P`; check `lsblk -dnb -P -o NAME,...` by hand |
-| BAY all `-` | `sas2ircu` missing/empty; bays optional (locate still works by serial/dev) |
+| BAY all `-` | `sas2ircu` missing or can't execute; bays are optional (locate still works by serial/dev). If `b2ctl check` shows "binary exists but won't execute", run `apt-get install -y libc6-i386` — sas2ircu is a 32-bit ELF |
+| BAY all `-` (RAID-mode detected despite IT HBA) | crossflashed PERC H710 responds to storcli's management plane; auto-detect sees storcli and picks RaidBackend. Fix: `apt-get install libc6-i386` so sas2ircu executes, or set `controller.mode = "it"` in `/etc/b2ctl/config.json` |
 | BAY numbers wrong | edit `bay_map.json` (reverse rule or explicit map); recalibrate with `b2ctl locate <serial>` |
 | locate lights many bays | you're on old sas2ircu-slot locate; this build uses device-based locate — rebuild/redeploy |
 | POOL `-` for in-pool disk | by-id/dev mismatch — verify `zpool status -P` leaf paths resolve (`realpath`) to the same `/dev/sdX` lsblk reports |
@@ -458,11 +459,12 @@ sudo b2ctl update --export-bay-map  # copy bundled bay_map.json to /etc/b2ctl/
 **Auto-detection probe order:**
 
 1. `sas2ircu list` — if stdout is non-empty → `ITBackend`.
-2. `storcli64 show ctrlcount` → non-empty → `RaidBackend`.
-3. `storcli show ctrlcount` → non-empty → `RaidBackend`.
-4. `perccli64 show ctrlcount` → non-empty → `RaidBackend`.
-5. `perccli show ctrlcount` → non-empty → `RaidBackend`.
-6. None found → `die()` with an install hint.
+2. sas2ircu binary exists but failed to execute → warn stderr ("apt-get install -y libc6-i386") and **force `ITBackend`** (prevents false RAID detection on crossflashed H710).
+3. `storcli64 show ctrlcount` → non-empty → `RaidBackend`.
+4. `storcli show ctrlcount` → non-empty → `RaidBackend`.
+5. `perccli64 show ctrlcount` → non-empty → `RaidBackend`.
+6. `perccli show ctrlcount` → non-empty → `RaidBackend`.
+7. None found → `die()` with an install hint.
 
 `_backend_cache` stores the result; `setup_method` in tests clears it via
 `bk_mod._backend_cache = None` to keep tests isolated.

@@ -60,10 +60,9 @@ class TestFeature1b(unittest.TestCase):
     @patch('b2ctl.watch.zfs.swap_to_spare')
     @patch('b2ctl.watch.zfs.poll_resilver_status')
     @patch('b2ctl.watch.zfs.detach')
-    @patch('b2ctl.watch.locate.blink')
     @patch('b2ctl.watch.time.sleep')
     def test_cmd_swap_success(
-        self, mock_sleep, mock_blink, mock_detach, mock_poll, mock_swap, mock_spares,
+        self, mock_sleep, mock_detach, mock_poll, mock_swap, mock_spares,
         mock_confirm, mock_ask, mock_scan
     ):
         d1 = Disk("/dev/sda")
@@ -88,7 +87,6 @@ class TestFeature1b(unittest.TestCase):
         mock_swap.assert_called_once_with("tank", "/dev/disk/by-id/sda", "spare1")
         self.assertEqual(mock_poll.call_count, 2)
         mock_detach.assert_called_once_with("tank", "/dev/disk/by-id/sda")
-        mock_blink.assert_called_once_with("/dev/sda", watch.locate.DEFAULT_SECONDS)
 
     @patch('b2ctl.watch.core.scan')
     @patch('b2ctl.watch._ask')

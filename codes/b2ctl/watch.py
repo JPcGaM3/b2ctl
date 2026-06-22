@@ -157,6 +157,10 @@ def _assign_free_disk(d, tbw, all_disks=None) -> None:
         except (ValueError, IndexError):
             print(f"{Y}  cancelled{N}"); return
         pool = tgt["pool"]
+        if pool == "rpool":
+            print(f"\n{Y}  ⚠ rpool: after replace completes, run on new disk:{N}")
+            print(f"       proxmox-boot-tool format <new-ESP-partition>")
+            print(f"       proxmox-boot-tool init   <new-ESP-partition>")
         vdev = tgt.get("vdev", "unknown")
         cmds = [["zpool", "replace", "-f", pool, tgt["token"], d.by_id or d.dev]]
         op_id = safety.begin_op("replace", d.serial, d.bay, tgt["token"], pool, vdev, cmds)
@@ -514,14 +518,15 @@ def _cmd_swap(tbw) -> None:
             print(R + f"  ✗ failed: {out}" + N)
             return
         print(G + "  ✔ swap started — resilvering onto spare" + N)
-        while True:
-            time.sleep(2)
-            st = zfs.poll_resilver_status(d.pool)
-            if st["completed"]:
-                sys.stdout.write(f"\r{G}  ✔ resilver completed 100%{N}                 \n")
-                break
-            sys.stdout.write(f"\r{Y}  resilvering... {st['done']}% done, ETA {st['eta']}{N}")
-            sys.stdout.flush()
+        if not _DRY_RUN:
+            while True:
+                time.sleep(2)
+                st = zfs.poll_resilver_status(d.pool)
+                if st["completed"]:
+                    sys.stdout.write(f"\r{G}  ✔ resilver completed 100%{N}                 \n")
+                    break
+                sys.stdout.write(f"\r{Y}  resilvering... {st['done']}% done, ETA {st['eta']}{N}")
+                sys.stdout.flush()
 
         topo = zfs.topology()
         old_token = _pool_dev(d)

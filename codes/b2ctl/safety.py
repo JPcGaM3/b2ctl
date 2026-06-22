@@ -19,8 +19,9 @@ _ROLLBACK: dict = {
     "offline":   lambda e: f"zpool online {e['pool']} {e['dev_path']}",
     "add_spare": lambda e: f"zpool remove {e['pool']} {e['dev_path']}",
     "replace":   lambda e: (
-        f"zpool replace {e['pool']} {e['dev_path']} "
-        + (e.get("old_dev_path", e['dev_path']))
+        f"zpool replace {e['pool']} {e['cmds'][0][5]} {e['cmds'][0][4]}"
+        if e.get("cmds") and len(e["cmds"][0]) > 5
+        else f"zpool replace {e['pool']} <new-disk> {e['dev_path']}"
     ),
     "demote":    lambda e: (
         f"zpool attach {e['pool']} <remaining-member> {e['dev_path']}"
@@ -46,7 +47,7 @@ def begin_op(
     except OSError:
         pass
     now = datetime.now()
-    op_id = now.strftime("%Y%m%d-%H%M%S") + f"-{op}"
+    op_id = now.strftime("%Y%m%d-%H%M%S") + f"-{now.microsecond:06d}-{op}"
     entry = {
         "op_id":       op_id,
         "op":          op,
@@ -221,6 +222,8 @@ def load_log(last: int = 20) -> list[dict]:
                     entries.append(json.loads(line))
                 except json.JSONDecodeError:
                     pass
+    except PermissionError:
+        print("  [!] cannot read log — run as root")
     except OSError:
         pass
     return entries[-last:]

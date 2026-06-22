@@ -64,7 +64,6 @@ install_tools() {
     local _tools="$1"
     local _tmp
     _tmp=$(mktemp -d)
-    trap "rm -rf '${_tmp}'" EXIT
 
     echo ""
     echo "=== Installing tool binaries ==="
@@ -151,7 +150,7 @@ cp "${SRC_DIR}/ssd_spec.json" "${PREFIX}/"
 echo "[*] writing launcher -> ${LAUNCHER}"
 cat >"${LAUNCHER}" <<EOF
 #!/usr/bin/env bash
-exec env PYTHONPATH="${PREFIX}" python3 -P -m b2ctl "\$@"
+exec env PYTHONPATH="${PREFIX}" python3 -m b2ctl "\$@"
 EOF
 chmod +x "${LAUNCHER}"
 
@@ -168,10 +167,10 @@ echo "[+] done. try:  sudo b2ctl status   |   sudo b2ctl watch"
 
 if [ "${WITH_TOOLS}" = "1" ]; then
     _DL_TMP=$(mktemp -d)
-    trap "rm -rf '${_DL_TMP}'" EXIT
     if download_tools "${_DL_TMP}"; then
         install_tools "${_DL_TMP}"
     else
         echo "  [✗] download failed — aborting tool install" >&2
     fi
+    rm -rf "${_DL_TMP}"
 fi

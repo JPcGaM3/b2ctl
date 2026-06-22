@@ -53,7 +53,7 @@ def install_sas2ircu(archive: str) -> tuple[bool, str]:
                     break
         if not sas:
             return False, "binary not found in archive"
-        dest = "/usr/local/bin/sas2ircu"
+        dest = "/usr/local/sbin/sas2ircu"
         shutil.copy2(sas, dest)
         os.chmod(dest, 0o755)
         return True, dest

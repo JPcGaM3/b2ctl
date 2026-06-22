@@ -264,9 +264,10 @@ def resilver_status(pool: str) -> str | None:
 def poll_resilver_status(pool: str) -> dict:
     out = run(["zpool", "status", pool])
     res = {"done": 0.0, "eta": "", "completed": False}
-    if "resilvered" in out and "with 0 errors" in out:
+    if "resilvered" in out and "to go" not in out:
         res["completed"] = True
         res["done"] = 100.0
+        res["has_errors"] = "with 0 errors" not in out
         return res
     m_done = re.search(r'(\d+\.\d+)%\s*done', out)
     if m_done:
@@ -312,7 +313,7 @@ def wipe(dev: str, *, dry_run: bool = False):
     return run_check(["sgdisk", "--zap-all", dev], dry_run=dry_run)
 
 
-MIN_DISKS = {"stripe": 1, "mirror": 2, "raidz1": 2, "raidz2": 4}
+MIN_DISKS = {"stripe": 1, "mirror": 2, "raidz1": 3, "raidz2": 4}
 
 def has_zfs_label(dev: str) -> bool:
     """True if `dev` already carries a ZFS label / known signature."""

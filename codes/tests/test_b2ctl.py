@@ -792,7 +792,7 @@ class TestZfsActions:
     def test_min_disks_constants(self):
         assert zfs.MIN_DISKS["stripe"] == 1
         assert zfs.MIN_DISKS["mirror"] == 2
-        assert zfs.MIN_DISKS["raidz1"] == 2
+        assert zfs.MIN_DISKS["raidz1"] == 3
         assert zfs.MIN_DISKS["raidz2"] == 4
 
 

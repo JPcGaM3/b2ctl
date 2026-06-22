@@ -137,7 +137,11 @@ def _check(_args) -> int:
         else:
             hint = ""
             if tname in ("sas2ircu",):
-                hint = " (needed for IT/HBA mode)"
+                _p = _cfg_mod.tool(tname)
+                if os.path.isfile(_p):
+                    hint = " (binary exists but won't execute — run: apt-get install -y libc6-i386)"
+                else:
+                    hint = " (needed for IT/HBA mode)"
             elif tname in ("storcli64", "storcli", "perccli64", "perccli"):
                 hint = " (needed for RAID mode)"
             print(f"  {fail_mark} {tname:<12} not found{hint}")

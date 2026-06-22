@@ -154,6 +154,10 @@ exec env PYTHONPATH="${PREFIX}" python3 -m b2ctl "\$@"
 EOF
 chmod +x "${LAUNCHER}"
 
+echo "[*] installing sas2ircu runtime dependency (32-bit ELF needs libc6-i386)"
+apt-get install -y libc6-i386 >/dev/null 2>&1 || \
+    echo "  [!] libc6-i386 install failed — sas2ircu will not execute"
+
 echo "[*] checking dependencies"
 for bin in smartctl zpool lsblk; do
     command -v "$bin" >/dev/null 2>&1 || echo "  [!] missing: $bin"

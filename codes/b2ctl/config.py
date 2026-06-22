@@ -120,12 +120,22 @@ def validate() -> list[tuple[str, str, str]]:
     else:
         results.append(("config", "warn", f"{CONFIG_PATH} missing — using defaults"))
 
-    # tool paths
+    # tool paths — test-run each binary (file-existence alone misses 32-bit
+    # binaries that exist with +x but can't execute without libc6-i386)
+    import subprocess as _sp
     for name in ("sas2ircu", "storcli", "perccli", "smartctl", "zpool"):
         path = tool(name)
-        found = shutil.which(path) or (os.path.isfile(path) and os.access(path, os.X_OK))
-        if found:
+        try:
+            _sp.run([path], capture_output=True, timeout=5)
+            can_run = True
+        except (FileNotFoundError, PermissionError, OSError):
+            can_run = False
+        if can_run:
             results.append((name, "ok", path))
+        elif shutil.which(path) or (os.path.isfile(path) and os.access(path, os.X_OK)):
+            hint = ("apt-get install -y libc6-i386" if name == "sas2ircu"
+                    else "check binary compatibility")
+            results.append((name, "warn", f"found but won't execute  →  {hint}"))
         else:
             hint = (f"run: b2ctl install --tool {name}"
                     if name in ("sas2ircu", "storcli", "perccli") else "install via apt")

@@ -36,3 +36,6 @@ trace.txt
 
 # Tool binary archives (downloaded by b2ctl install)
 tools/
+
+.agents
+codes/sim/state.json

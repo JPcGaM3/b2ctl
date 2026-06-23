@@ -1,0 +1,45 @@
+#!/usr/bin/env python3
+"""Fake `smartctl -a /dev/sdX` — emits ATA-format SMART from sim state."""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _simstate as S  # noqa: E402
+
+
+def main():
+    argv = sys.argv[1:]
+    if "--version" in argv:
+        print("smartctl 7.5 2025-04-30 r5714 [x86_64-linux-sim] (local build)")
+        return 0
+    dev = next((a for a in argv if a.startswith("/dev/")), None)
+    if not dev:
+        return 1
+    state = S.load()
+    d = S.disk_by_name(state, dev)
+    if not d or not d.get("present"):
+        return 2  # no such device → b2ctl marks NOREAD
+
+    print("smartctl 7.5 2025-04-30 r5714 [x86_64-linux-sim] (local build)")
+    print("")
+    print("=== START OF INFORMATION SECTION ===")
+    print(f"Device Model:     {d['model']}")
+    print(f"Serial Number:    {d['serial']}")
+    print(f"User Capacity:    {d['size']} bytes")
+    print("Rotation Rate:    Solid State Device")
+    print("")
+    print("=== START OF READ SMART DATA SECTION ===")
+    print("SMART overall-health self-assessment test result: PASSED")
+    print("")
+    print("Vendor Specific SMART Attributes with Thresholds:")
+    print("ID# ATTRIBUTE_NAME          FLAG     VALUE WORST THRESH TYPE      UPDATED  WHEN_FAILED RAW_VALUE")
+    print(f"  5 Reallocated_Sector_Ct   0x0033   100   100   010    Pre-fail  Always       -       {d['realloc']}")
+    print(f"  9 Power_On_Hours          0x0032   099   099   000    Old_age   Always       -       {d['poh']}")
+    print(f"177 Wear_Leveling_Count     0x0013   {d['wear']:03d}   {d['wear']:03d}   005    Pre-fail  Always       -       1")
+    print(f"197 Current_Pending_Sector  0x0012   100   100   000    Old_age   Always       -       {d['pending']}")
+    print(f"241 Total_LBAs_Written      0x0032   099   099   000    Old_age   Always       -       {d['lba_written']}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

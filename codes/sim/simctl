@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""simctl — drive the b2ctl simulation state.
+
+  simctl init|reset        write the default 6-disk state
+  simctl mode it|raid      switch backend (IT-mode sas2ircu / RAID-mode storcli)
+  simctl pull <bay|dev>    remove a disk (auto-resilver onto spare if available)
+  simctl insert <bay|dev>  re-insert a disk
+  simctl dirty <bay|dev>   mark a disk as containing old data/labels
+  simctl show              print disks + pools + mode
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _simstate as S  # noqa: E402
+
+
+def _find(state, ident):
+    return S.disk_by_bay(state, ident) if ":" in ident else S.disk_by_name(state, ident)
+
+
+def cmd_init(_):
+    S.save(S.default_state())
+    print(f"[sim] wrote default state -> {S.STATE_PATH}")
+
+
+def cmd_mode(args):
+    if not args or args[0] not in ("it", "raid"):
+        print("usage: simctl mode it|raid", file=sys.stderr); return 1
+    state = S.load()
+    state["mode"] = args[0]
+    S.save(state)
+    print(f"[sim] backend mode = {args[0]}")
+
+
+def cmd_pull(args):
+    state = S.load()
+    d = _find(state, args[0])
+    if not d:
+        print(f"[sim] no such disk: {args[0]}", file=sys.stderr); return 1
+    d["present"] = False
+    pool = S.pool_of(state, d["name"])
+    note = ""
+    if pool and d["name"] in pool["members"]:
+        avail = [s for s in pool["spares"]
+                 if s not in {r["spare"] for r in pool.get("replacements", [])}]
+        if avail:
+            pool.setdefault("replacements", []).append(
+                {"removed": d["name"], "spare": avail[0]})
+            pool["resilver"] = {"pct": 0}
+            note = f" → spare {avail[0]} kicking in (resilver)"
+    S.save(state)
+    print(f"[sim] pulled {d['name']} (bay {d['enc']}:{d['slot']}){note}")
+
+
+def cmd_insert(args):
+    state = S.load()
+    d = _find(state, args[0])
+    if not d:
+        print(f"[sim] no such disk: {args[0]}", file=sys.stderr); return 1
+    d["present"] = True
+    S.save(state)
+    print(f"[sim] inserted {d['name']} (bay {d['enc']}:{d['slot']})")
+
+
+def cmd_dirty(args):
+    state = S.load()
+    d = _find(state, args[0])
+    if not d:
+        return 1
+    d["dirty"] = True
+    S.save(state)
+    print(f"[sim] marked {d['name']} dirty (has old data/labels)")
+
+
+def cmd_show(_):
+    state = S.load()
+    print(f"mode: {state.get('mode')}    state file: {S.STATE_PATH}")
+    print("disks:")
+    for d in state["disks"]:
+        flag = "" if d["present"] else "  [PULLED]"
+        dirty = "  (dirty)" if d.get("dirty") else ""
+        print(f"  {d['enc']}:{d['slot']}  {d['name']:<4} {d['serial']:<16} {d['model']}{flag}{dirty}")
+    print("pools:")
+    for p in state["pools"]:
+        repl = "".join(f"  repl[{r['removed']}->{r['spare']}]" for r in p.get("replacements", []))
+        res = f"  resilver={p['resilver']['pct']}%" if p.get("resilver") else ""
+        print(f"  {p['name']:<8} {p['type']:<7} members={p['members']} spares={p['spares']}{repl}{res}")
+
+
+def main():
+    argv = sys.argv[1:]
+    if not argv:
+        print(__doc__); return 0
+    table = {"init": cmd_init, "reset": cmd_init, "mode": cmd_mode,
+             "pull": cmd_pull, "insert": cmd_insert, "dirty": cmd_dirty,
+             "show": cmd_show}
+    fn = table.get(argv[0])
+    if not fn:
+        print(__doc__); return 1
+    return fn(argv[1:]) or 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

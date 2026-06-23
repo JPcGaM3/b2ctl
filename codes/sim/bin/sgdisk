@@ -1,0 +1,7 @@
+#!/usr/bin/env python3
+"""Fake no-op tool for the b2ctl sim (dd / sgdisk / udevadm)."""
+import sys
+a = sys.argv[1:]
+if "--version" in a:
+    print("sim 1.0")
+sys.exit(0)

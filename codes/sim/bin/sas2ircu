@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+"""Fake `sas2ircu` (IT-mode bay tool). Active only when state.mode == 'it'."""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _simstate as S  # noqa: E402
+
+
+def main():
+    argv = sys.argv[1:]
+    state = S.load()
+    if state.get("mode") != "it":
+        # not IT-mode → behave as if no IT controller (auto-detect skips IT)
+        return 1
+    if argv and argv[0] == "list":
+        print("LSI Corporation SAS2 IR Configuration Utility.")
+        print("         Adapter      Vendor  Device       Pci Address")
+        print(" Index    Type          ID      ID    Bus     Device     Function")
+        print("   0     SAS2308_2     1000h    87h    02h      00h        00h")
+        return 0
+    if len(argv) >= 2 and argv[1] == "DISPLAY":
+        print("LSI Corporation SAS2 IR Configuration Utility.")
+        print("------------------------------------------------------------------------")
+        print("Physical device information")
+        print("------------------------------------------------------------------------")
+        for d in state["disks"]:
+            if not d.get("present"):
+                continue
+            print("Device is a Hard disk")
+            print(f"  Enclosure #                             : {d['enc']}")
+            print(f"  Slot #                                  : {d['slot']}")
+            print(f"  Manufacturer                            : ATA")
+            print(f"  Model Number                            : {d['model'][:15]}")
+            print(f"  Serial No                               : {d['serial']}")
+            print(f"  Protocol                                : SATA")
+            print(f"  Drive Type                              : SATA_SSD")
+        return 0
+    if len(argv) >= 2 and argv[1] == "LOCATE":
+        print("SAS2IRCU: locate command issued")
+        return 0
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

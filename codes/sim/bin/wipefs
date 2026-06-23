@@ -1,0 +1,25 @@
+#!/usr/bin/env python3
+"""Fake `wipefs` — `-n` reports a signature only if the disk is marked dirty."""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _simstate as S  # noqa: E402
+
+
+def main():
+    argv = sys.argv[1:]
+    if "--version" in argv:
+        print("wipefs from util-linux 2.41 (sim)")
+        return 0
+    dev = next((a for a in argv if a.startswith("/dev/")), None)
+    if "-n" in argv and dev:
+        d = S.disk_by_token(S.load(), dev.replace("/dev/", ""))
+        if d and d.get("dirty"):
+            print("DEVICE OFFSET TYPE       UUID LABEL")
+            print(f"{dev.replace('/dev/', '')}   0x438  zfs_member  -    -")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

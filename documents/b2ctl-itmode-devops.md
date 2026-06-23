@@ -533,3 +533,37 @@ no boot pool*. IT mode invalidates that:
   where the controller handled inserts itself).
 
 Update ADR-001 accordingly when this build supersedes the RAID-mode one.
+
+---
+
+## 12. Simulation harness (`codes/sim/`)
+
+b2ctl talks to hardware **only** through `run()`/`run_check()` (subprocess). That
+seam lets you run the *real, unmodified* b2ctl against a simulated 6-disk server
+on a laptop — no hardware, SSH, or root. `sim/bin/` holds fake
+`zpool`/`lsblk`/`sas2ircu`/`storcli`/`perccli`/`smartctl`/… that read and mutate
+`sim/state.json`; `sim/run` is a launcher that sets `PATH`, points `B2CTL_STATE`
+at the state, fakes root (`os.geteuid → 0`), uses an identity bay map, selects
+the backend from `state.mode`, and redirects the audit trail to `sim/var/`.
+
+```bash
+cd codes
+python3 sim/simctl init           # default: rpool mirror + tank raidz1 + 1 spare
+python3 sim/run status            # real b2ctl, fake disks
+python3 sim/run watch             # swap/replace/offload/create — state.json mutates
+python3 sim/simctl pull 1:5       # remove a disk (spare auto-resilvers if present)
+python3 sim/simctl insert 1:5     # re-insert → watch sees NEW DISK DETECTED
+python3 sim/simctl dirty 1:5      # mark old data/labels (create wipe-warning path)
+python3 sim/simctl mode it|raid   # switch backend (sas2ircu ↔ storcli/perccli)
+python3 sim/simctl show           # disks + pools + mode
+```
+
+| aspect | note |
+|--------|------|
+| backends | both — `simctl mode it` (sas2ircu) / `mode raid` (storcli/perccli) |
+| audit isolation | sim writes `sim/var/ops.jsonl` + `sim/var/snapshots/`, **never** `/var/log/b2ctl/` → impossible to confuse with real ops; `b2ctl log`/`rollback` work in the sim |
+| limitations | `by_id=""` (uses `/dev/sdX` tokens, not `ata-`/`wwn-`), LED locate = message only, models b2ctl logic/flow — **not** real ZFS (no checksum/scrub/real resilver timing) |
+| smoke test | `tests/test_sim_smoke.py` drives `sim/run` via subprocess |
+
+b2ctl source (`b2ctl/*.py`) is **unchanged** — everything sim-specific lives in
+`sim/` (fake binaries + launcher). Full detail: `codes/sim/README.md`.

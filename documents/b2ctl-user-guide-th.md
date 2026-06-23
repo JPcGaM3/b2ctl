@@ -2,6 +2,7 @@
 
 > 📖 อยากได้แบบทำตามทีละขั้น (กดอะไร → เห็นอะไร → แปลว่าอะไร) พร้อม output จริง →
 > ดู [`b2ctl-walkthrough.md`](b2ctl-walkthrough.md)
+> 🧪 อยากฝึก/ทดสอบทุก flow โดยไม่มี hardware จริง → simulation harness ที่ `codes/sim/` (ดู `codes/sim/README.md`)
 
 ---
 

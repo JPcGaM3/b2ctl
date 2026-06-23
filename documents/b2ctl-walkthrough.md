@@ -33,6 +33,8 @@ b2ctl check
 
 **เห็น output:**
 
+<details><summary>📋 ดูตัวอย่าง Output จริง</summary>
+
 ```
 [b2ctl environment check]
   [✔] Running as root
@@ -52,12 +54,14 @@ b2ctl check
   [!] Config: /etc/b2ctl/config.json (missing — using defaults, run 'b2ctl config init' to create)
 ```
 
-**แปลว่า:** tool ครบ, backend = **IT-mode** (HBA — ถูกสำหรับเครื่อง crossflash).
-**user ดู:**
-- `sas2ircu [✔]` สำคัญสุด — ถ้าขึ้น `[✗]` หรือ "found but won't execute" → bay column จะเป็น `-` ทั้งหมด; แก้ด้วย `apt-get install -y libc6-i386` (sas2ircu เป็น binary 32-bit)
-- `storcli64 not found` ตรงนี้ **ปกติ** สำหรับ IT-mode (ใช้ใน RAID-mode เท่านั้น)
-- `Controllers found: 6 (6 disks in bay map)` — เลข disk > 0 = bay mapping ทำงาน
-- `Config ... missing — using defaults` ไม่ใช่ error — b2ctl ใช้ค่า default ได้เลย (จะสร้าง config ก็ต่อเมื่ออยาก override path/mode)
+</details>
+
+- **แปลว่า:** tool ครบ, backend = **IT-mode** (HBA — ถูกสำหรับเครื่อง crossflash).
+- **user ดู:**
+  - `sas2ircu [✔]` สำคัญสุด — ถ้าขึ้น `[✗]` หรือ "found but won't execute" → bay column จะเป็น `-` ทั้งหมด; แก้ด้วย `apt-get install -y libc6-i386` (sas2ircu เป็น binary 32-bit)
+  - `storcli64 not found` ตรงนี้ **ปกติ** สำหรับ IT-mode (ใช้ใน RAID-mode เท่านั้น)
+  - `Controllers found: 6 (6 disks in bay map)` — เลข disk > 0 = bay mapping ทำงาน
+  - `Config ... missing — using defaults` ไม่ใช่ error — b2ctl ใช้ค่า default ได้เลย (จะสร้าง config ก็ต่อเมื่ออยาก override path/mode)
 
 ---
 
@@ -73,6 +77,8 @@ b2ctl update
 
 **เห็น output:**
 
+<details><summary>📋 ดูตัวอย่าง Output จริง</summary>
+
 ```
 [b2ctl update]
   [i] config       /etc/b2ctl/config.json missing — using defaults
@@ -84,10 +90,13 @@ b2ctl update
   [i] bay_map      bundled (/opt/b2ctl/bay_map.json)  →  b2ctl update --export-bay-map to customize
 ```
 
-**แปลว่า:** ทุก tool ที่จำเป็นรันได้ (`[✔]`). **user ดู:**
-- `[i]` = info เฉยๆ ไม่ใช่ error. `[✔]` = binary นั้น execute ได้จริง (ไม่ใช่แค่มีไฟล์)
-- ถ้า sas2ircu ขึ้น `[i] found but won't execute → apt-get install libc6-i386` ให้ทำตาม
-- `bay_map bundled` = ใช้ไฟล์ bay map ที่มากับ package; ถ้าอยากแก้เอง รัน `b2ctl update --export-bay-map` (copy ไป `/etc/b2ctl/bay_map.json` แก้ได้อิสระ install.sh ไม่ทับ)
+</details>
+
+- **แปลว่า:** ทุก tool ที่จำเป็นรันได้ (`[✔]`).
+- **user ดู:**
+  - `[i]` = info เฉยๆ ไม่ใช่ error. `[✔]` = binary นั้น execute ได้จริง (ไม่ใช่แค่มีไฟล์)
+  - ถ้า sas2ircu ขึ้น `[i] found but won't execute → apt-get install libc6-i386` ให้ทำตาม
+  - `bay_map bundled` = ใช้ไฟล์ bay map ที่มากับ package; ถ้าอยากแก้เอง รัน `b2ctl update --export-bay-map` (copy ไป `/etc/b2ctl/bay_map.json` แก้ได้อิสระ install.sh ไม่ทับ)
 
 **Step 2:** ดูค่า config ปัจจุบัน (อ่านอย่างเดียว)
 
@@ -96,6 +105,8 @@ b2ctl config show
 ```
 
 **เห็น output:**
+
+<details><summary>📋 ดูตัวอย่าง Output จริง</summary>
 
 ```json
 {
@@ -108,9 +119,10 @@ b2ctl config show
 }
 ```
 
-**แปลว่า:** ค่าว่าง `""` = ใช้ default (b2ctl หา binary จาก PATH เอง). `controller.mode: "auto"`
-= auto-detect IT vs RAID. **user ดู:** ถ้าจะ force ให้เป็น IT-mode (กัน auto-detect พลาด)
-→ `b2ctl config init` แล้วแก้ `"mode": "it"` ในไฟล์ `/etc/b2ctl/config.json`
+</details>
+
+- **แปลว่า:** ค่าว่าง `""` = ใช้ default (b2ctl หา binary จาก PATH เอง). `controller.mode: "auto"` = auto-detect IT vs RAID.
+- **user ดู:** ถ้าจะ force ให้เป็น IT-mode (กัน auto-detect พลาด) → `b2ctl config init` แล้วแก้ `"mode": "it"` ในไฟล์ `/etc/b2ctl/config.json`
 
 ---
 ## Section 2 — อ่านตาราง disk health (`b2ctl status`, `b2ctl status --json`)
@@ -124,6 +136,8 @@ b2ctl status
 ```
 
 **เห็น output:**
+
+<details><summary>📋 ดูตัวอย่าง Output จริง</summary>
 
 ```
 BAY   DEV  IF   MODEL                   SERIAL            POWER_ON       WEAR  END    WRITTEN           BAD  HEALTH  POOL           STATUS   LEVEL
@@ -139,13 +153,16 @@ Pools:
 [OK] all disks healthy and assigned
 ```
 
-**แปลว่า:** ทุกดิสก์ ONLINE, HEALTH = PASSED, pool ทั้งสองเป็น ONLINE. **user ดู:**
-- **BAY** = `enclosure:slot` เช่น `1:4` คือช่อง slot 4 ของ controller 1 — ใช้จับคู่ disk กับตำแหน่งจริงในแร็ค
-- **WEAR** = % อายุการใช้งานที่ใช้ไปแล้ว (1% = ยังใหม่มาก)
-- **END** = % endurance ที่เหลืออยู่ (99.8% = ยังเหลืออีกนาน)
-- **WRITTEN** = `xx.xxTB/xxxxTBW` — เขียนจริงไปแล้ว (TB) / ความทนทานตลอดอายุ (TBW รวม); เช่น `10.06TB/1200TBW` = ใช้ไป 10TB จากขีดจำกัด 1200TB
-- **POOL / STATUS / LEVEL** — pool ที่ disk ถูก assign, สถานะ ZFS vdev, บทบาทใน pool (NORMAL, SPARE ฯลฯ)
-- บรรทัด `[OK] all disks healthy and assigned` แสดงเมื่อทุก pool ONLINE; ถ้า pool ใด degraded จะเปลี่ยนเป็น `[!] disks readable but a pool is not ONLINE` พร้อม block `===== pools needing attention =====`
+</details>
+
+- **แปลว่า:** ทุกดิสก์ ONLINE, HEALTH = PASSED, pool ทั้งสองเป็น ONLINE.
+- **user ดู:**
+  - **BAY** = `enclosure:slot` เช่น `1:4` คือช่อง slot 4 ของ controller 1 — ใช้จับคู่ disk กับตำแหน่งจริงในแร็ค
+  - **WEAR** = % อายุการใช้งานที่ใช้ไปแล้ว (1% = ยังใหม่มาก)
+  - **END** = % endurance ที่เหลืออยู่ (99.8% = ยังเหลืออีกนาน)
+  - **WRITTEN** = `xx.xxTB/xxxxTBW` — เขียนจริงไปแล้ว (TB) / ความทนทานตลอดอายุ (TBW รวม); เช่น `10.06TB/1200TBW` = ใช้ไป 10TB จากขีดจำกัด 1200TB
+  - **POOL / STATUS / LEVEL** — pool ที่ disk ถูก assign, สถานะ ZFS vdev, บทบาทใน pool (NORMAL, SPARE ฯลฯ)
+  - บรรทัด `[OK] all disks healthy and assigned` แสดงเมื่อทุก pool ONLINE; ถ้า pool ใด degraded จะเปลี่ยนเป็น `[!] disks readable but a pool is not ONLINE` พร้อม block `===== pools needing attention =====`
 
 **Step 2:** ดูข้อมูล JSON (สำหรับ scripting หรือ audit)
 
@@ -154,6 +171,8 @@ b2ctl status --json | python3 -m json.tool
 ```
 
 **เห็น output:**
+
+<details><summary>📋 ดูตัวอย่าง Output จริง</summary>
 
 ```
 [
@@ -170,7 +189,10 @@ b2ctl status --json | python3 -m json.tool
 ]
 ```
 
-**แปลว่า:** `--json` dump array ของ disk objects ทุกตัว — fields ครบ (dev, bay, model, serial, pool, vdev_state ฯลฯ). **user ดู:** pipe เข้า `python3 -m json.tool` เพื่อ validate และ pretty-print; ถ้า output ผ่านโดยไม่ error = JSON ถูกต้อง; ใช้ `jq` หรือ script อื่นต่อยอดได้เลย
+</details>
+
+- **แปลว่า:** `--json` dump array ของ disk objects ทุกตัว — fields ครบ (dev, bay, model, serial, pool, vdev_state ฯลฯ).
+- **user ดู:** pipe เข้า `python3 -m json.tool` เพื่อ validate และ pretty-print; ถ้า output ผ่านโดยไม่ error = JSON ถูกต้อง; ใช้ `jq` หรือ script อื่นต่อยอดได้เลย
 
 ---
 
@@ -188,6 +210,8 @@ b2ctl --dry-run swap
 
 **เห็น output:**
 
+<details><summary>📋 ดูตัวอย่าง Output จริง</summary>
+
 ```
 [1] (1:0) Samsung SSD 860 PRO 1TB (S5G8NE0MA10474H) in rpool
 [2] (1:1) Samsung SSD 860 PRO 1TB (S5G8NE0MA10478T) in rpool
@@ -204,7 +228,10 @@ swap which #> swap (1:4) ... onto spare (1:7) ...? [y/N]>
   ✔ (1:4) Samsung SSD 870 EVO 1TB is now a hot spare in 'tank'
 ```
 
-**แปลว่า:** dry-run print คำสั่ง `zpool replace`, `zpool detach`, `zpool add spare` พร้อม prefix `[DRY-RUN] would run:` — ไม่มีการเปลี่ยนแปลงจริงเกิดขึ้น. **user ดู:** copy คำสั่งใน `[DRY-RUN] would run:` ไปตรวจ path ว่าถูกต้องก่อน run จริง
+</details>
+
+- **แปลว่า:** dry-run print คำสั่ง `zpool replace`, `zpool detach`, `zpool add spare` พร้อม prefix `[DRY-RUN] would run:` — ไม่มีการเปลี่ยนแปลงจริงเกิดขึ้น.
+- **user ดู:** copy คำสั่งใน `[DRY-RUN] would run:` ไปตรวจ path ว่าถูกต้องก่อน run จริง
 
 **Step 2:** dry-run replace — ดู confirm box + preview
 
@@ -216,12 +243,17 @@ b2ctl --dry-run replace
 
 **เห็น output:**
 
+<details><summary>📋 ดูตัวอย่าง Output จริง</summary>
+
 ```
 [DRY-RUN] would run: zpool replace tank /dev/disk/by-id/wwn-0x5002538f3351d0f6 /dev/disk/by-id/wwn-0x5002538f3354e3cb-part1
 • replace dry-run preview — nothing changed
 ```
 
-**แปลว่า:** replace dry-run แสดง zpool command ที่จะรัน แล้วจบด้วย `• replace dry-run preview — nothing changed` (neutral) — ไม่มี resilver, ไม่จุด LED. **user ดู:** บรรทัดจบต้องเป็น `nothing changed` เสมอ ถ้าเห็น `✗ replace complete` (แดง) แสดงว่า version ยังไม่อัพเดต
+</details>
+
+- **แปลว่า:** replace dry-run แสดง zpool command ที่จะรัน แล้วจบด้วย `• replace dry-run preview — nothing changed` (neutral) — ไม่มี resilver, ไม่จุด LED.
+- **user ดู:** บรรทัดจบต้องเป็น `nothing changed` เสมอ ถ้าเห็น `✗ replace complete` (แดง) แสดงว่า version ยังไม่อัพเดต
 
 **Step 3:** dry-run ops อื่น — demote, create, offload มีรูปแบบเดียวกัน
 
@@ -239,6 +271,8 @@ b2ctl watch
 
 **เห็น output:**
 
+<details><summary>📋 ดูตัวอย่าง Output จริง</summary>
+
 ```
 [r]efresh [a]ssign [o]ffload [s]wap [d]emote [t]oggle-dryrun [n]ew-pool [l]ocate [q]uit
 b2ctl> [DRY-RUN MODE: ON]
@@ -246,7 +280,10 @@ b2ctl> [DRY-RUN MODE: ON]
 b2ctl>
 ```
 
-**แปลว่า:** กด `t` → `[DRY-RUN MODE: ON]` ปรากฏ — ทุก action ใน watch หลังจากนี้จะ print-only ไม่รันจริง กด `t` อีกครั้งเพื่อ toggle กลับ. **user ดู:** ใช้ `t` เพื่อ "ฝึกซ้อม" ก่อน production โดยไม่ต้องออกจาก watch
+</details>
+
+- **แปลว่า:** กด `t` → `[DRY-RUN MODE: ON]` ปรากฏ — ทุก action ใน watch หลังจากนี้จะ print-only ไม่รันจริง กด `t` อีกครั้งเพื่อ toggle กลับ.
+- **user ดู:** ใช้ `t` เพื่อ "ฝึกซ้อม" ก่อน production โดยไม่ต้องออกจาก watch
 
 ---
 
@@ -261,6 +298,8 @@ b2ctl watch
 ```
 
 **เห็น output:**
+
+<details><summary>📋 ดูตัวอย่าง Output จริง</summary>
 
 ```
 ==================================================================================================================================================================================
@@ -282,11 +321,16 @@ b2ctl>
 
 ```
 
-**แปลว่า:** watch polling อยู่ รอ event. **user ดู:** ปล่อย terminal นี้ค้างไว้ระหว่างดึง/เสียบดิสก์
+</details>
+
+- **แปลว่า:** watch polling อยู่ รอ event.
+- **user ดู:** ปล่อย terminal นี้ค้างไว้ระหว่างดึง/เสียบดิสก์
 
 **Step 2:** ดึงดิสก์ tank ออก 1 ตัว (เช่น sdc/bay 1:5)
 
 **เห็น output:**
+
+<details><summary>📋 ดูตัวอย่าง Output จริง</summary>
 
 ```
 ■ disk removed: /dev/sdc
@@ -295,7 +339,10 @@ Pools:
   tank      2.72T   1.71G   free=2.72T   DEGRADED  cap=0%  <-- not ONLINE
 ```
 
-**แปลว่า:** watch ตรวจพบ disk หายทันทีและ print `■ disk removed` พร้อมสถานะ pool. **user ดู:** `DEGRADED` = raidz1 เสีย 1 ตัว ยังอ่าน/เขียนได้ปกติ — ไม่ต้องตกใจ แต่อย่าดึงตัวที่ 2. ถ้า pool health ยังแสดง `ONLINE` อยู่ให้กด `r` เพื่อ refresh (timing race ระหว่าง b2ctl กับ ZFS update)
+</details>
+
+- **แปลว่า:** watch ตรวจพบ disk หายทันทีและ print `■ disk removed` พร้อมสถานะ pool.
+- **user ดู:** `DEGRADED` = raidz1 เสีย 1 ตัว ยังอ่าน/เขียนได้ปกติ — ไม่ต้องตกใจ แต่อย่าดึงตัวที่ 2. ถ้า pool health ยังแสดง `ONLINE` อยู่ให้กด `r` เพื่อ refresh (timing race ระหว่าง b2ctl กับ ZFS update)
 
 **Step 3:** ZFS auto-resilver onto hot spare (อัตโนมัติ ไม่ต้องสั่ง)
 
@@ -304,6 +351,8 @@ zpool status tank
 ```
 
 **เห็น output:**
+
+<details><summary>📋 ดูตัวอย่าง Output จริง</summary>
 
 ```
         spare-1                       DEGRADED
@@ -314,11 +363,16 @@ zpool status tank
   scan: resilvered 599M in 00:00:02 with 0 errors
 ```
 
-**แปลว่า:** ZFS เริ่ม resilver ลง spare อัตโนมัติ — spare status เปลี่ยนเป็น `INUSE`, resilvered 599M ใน 2 วินาที. **user ดู:** ไม่ต้องสั่ง `zpool replace` เอง — hot spare ทำงานเอง ถ้าไม่มี spare pool จะ degraded ค้างไว้รอ replace จาก admin
+</details>
+
+- **แปลว่า:** ZFS เริ่ม resilver ลง spare อัตโนมัติ — spare status เปลี่ยนเป็น `INUSE`, resilvered 599M ใน 2 วินาที.
+- **user ดู:** ไม่ต้องสั่ง `zpool replace` เอง — hot spare ทำงานเอง ถ้าไม่มี spare pool จะ degraded ค้างไว้รอ replace จาก admin
 
 **Step 4:** เสียบดิสก์กลับ bay เดิม
 
 **เห็น output:**
+
+<details><summary>📋 ดูตัวอย่าง Output จริง</summary>
 
 ```
 ╔══ NEW DISK DETECTED: /dev/sdd ═══════════════════════
@@ -339,14 +393,17 @@ zpool status tank
   action>
 ```
 
-**แปลว่า:** watch ตรวจพบ disk ใหม่ แสดง panel model/SN/bay/health + เมนูให้เลือกทำอะไรกับ disk. **user ดู:**
-- `[1]` Blink LED — กระพริบไฟเพื่อยืนยันตำแหน่งก่อนตัดสินใจ
-- `[2]` Add as spare — เพิ่มเป็น hot spare ใน pool
-- `[3]` Replace — แทน disk ที่ degraded/faulted (เริ่ม resilver)
-- `[4]` Attach — ขยาย mirror (เพิ่ม leg ใหม่)
-- `[5]` Add single — สร้าง single-disk pool ใหม่
-- `[6]` Wipe — ล้าง partition/label ออกก่อน (ใช้กับ disk มือสองที่มี data เก่า)
-- `[s]` Skip — ไม่ทำอะไร ออกจาก panel
+</details>
+
+- **แปลว่า:** watch ตรวจพบ disk ใหม่ แสดง panel model/SN/bay/health + เมนูให้เลือกทำอะไรกับ disk.
+- **user ดู:**
+  - `[1]` Blink LED — กระพริบไฟเพื่อยืนยันตำแหน่งก่อนตัดสินใจ
+  - `[2]` Add as spare — เพิ่มเป็น hot spare ใน pool
+  - `[3]` Replace — แทน disk ที่ degraded/faulted (เริ่ม resilver)
+  - `[4]` Attach — ขยาย mirror (เพิ่ม leg ใหม่)
+  - `[5]` Add single — สร้าง single-disk pool ใหม่
+  - `[6]` Wipe — ล้าง partition/label ออกก่อน (ใช้กับ disk มือสองที่มี data เก่า)
+  - `[s]` Skip — ไม่ทำอะไร ออกจาก panel
 
 ---
 
@@ -364,13 +421,18 @@ b2ctl watch
 
 **เห็น output:**
 
+<details><summary>📋 ดูตัวอย่าง Output จริง</summary>
+
 ```
   locate which (bay/serial/sdX)> 1:4
   blinking /dev/sdb for 5s ...
   ✔ done (via dd)
 ```
 
-**แปลว่า:** จุดไฟกระพริบที่ disk ใน bay 1:4 เป็นเวลา 5 วินาที แล้วดับเอง. **user ดู:** watch `l` fix 5 วินาที เหมาะสำหรับ spot-check ว่า bay ไหนคือตัวไหน; `via dd` = ใช้ dd ส่ง SCSI locate command ผ่าน SAS HBA
+</details>
+
+- **แปลว่า:** จุดไฟกระพริบที่ disk ใน bay 1:4 เป็นเวลา 5 วินาที แล้วดับเอง.
+- **user ดู:** watch `l` fix 5 วินาที เหมาะสำหรับ spot-check ว่า bay ไหนคือตัวไหน; `via dd` = ใช้ dd ส่ง SCSI locate command ผ่าน SAS HBA
 
 **Step 2:** locate standalone พร้อม custom duration
 
@@ -380,11 +442,16 @@ b2ctl locate 1:4 30
 
 **เห็น output:**
 
+<details><summary>📋 ดูตัวอย่าง Output จริง</summary>
+
 ```
 blinking /dev/sdb for 30s ... ✔ done (via dd)
 ```
 
-**แปลว่า:** กระพริบ 30 วินาที — ให้เวลาเดินไปหาในแร็คได้สบาย. **user ดู:** `b2ctl locate <bay> <seconds>` รับ custom duration; ใช้เวลาที่นานพอ (10-30 วิ) ถ้าแร็คอยู่ห้องอื่น
+</details>
+
+- **แปลว่า:** กระพริบ 30 วินาที — ให้เวลาเดินไปหาในแร็คได้สบาย.
+- **user ดู:** `b2ctl locate <bay> <seconds>` รับ custom duration; ใช้เวลาที่นานพอ (10-30 วิ) ถ้าแร็คอยู่ห้องอื่น
 
 > ⚠️ **คำเตือน:** อย่าจุด LED บนดิสก์ที่กำลัง resilver อยู่ — LED signal อาจรบกวน และ disk กำลังรับ load อยู่; รอให้ resilver เสร็จก่อน (ดู `scan: resilvered ... with 0 errors`) แล้วค่อย locate
 
@@ -402,6 +469,8 @@ b2ctl log --last 5
 
 **เห็น output:**
 
+<details><summary>📋 ดูตัวอย่าง Output จริง</summary>
+
 ```
 OP_ID                          OP       BAY  SERIAL           POOL  STATUS   STARTED
 ────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -410,10 +479,13 @@ OP_ID                          OP       BAY  SERIAL           POOL  STATUS   STA
 20260622-161350-348683-replace replace  1:4  S74ZNS0W537278Y  tank  dry_run  2026-06-22T16:13:50
 ```
 
-**แปลว่า:** ทุก mutating op ถูกบันทึกพร้อม OP_ID, op type, bay, serial, pool, status, timestamp. **user ดู:**
-- **OP_ID** = `YYYYMMDD-HHMMSS-<micro>-<op>` — unique ID ใช้กับ `b2ctl rollback`
-- **STATUS** มี 3 ค่า: `ok` (รันสำเร็จ), `fail` (error ระหว่าง op), `dry_run` (dry-run เท่านั้น ไม่ทำจริง) — dry_run จะแสดงสีต่างกัน
-- `b2ctl log` ไม่มี flag = แสดงทั้งหมด; `--last N` = แสดงแค่ N รายการล่าสุด
+</details>
+
+- **แปลว่า:** ทุก mutating op ถูกบันทึกพร้อม OP_ID, op type, bay, serial, pool, status, timestamp.
+- **user ดู:**
+  - **OP_ID** = `YYYYMMDD-HHMMSS-<micro>-<op>` — unique ID ใช้กับ `b2ctl rollback`
+  - **STATUS** มี 3 ค่า: `ok` (รันสำเร็จ), `fail` (error ระหว่าง op), `dry_run` (dry-run เท่านั้น ไม่ทำจริง) — dry_run จะแสดงสีต่างกัน
+  - `b2ctl log` ไม่มี flag = แสดงทั้งหมด; `--last N` = แสดงแค่ N รายการล่าสุด
 
 **Step 2:** preview rollback ก่อน execute
 
@@ -425,6 +497,8 @@ b2ctl rollback 20260622-160135-379472-replace
 
 **เห็น output:**
 
+<details><summary>📋 ดูตัวอย่าง Output จริง</summary>
+
 ```
 Op:       replace  (2026-06-22T16:01:35)
 Disk:     bay 1:4 | S74ZNS0W537278Y
@@ -434,9 +508,12 @@ Rollback: zpool replace tank <new-disk> /dev/disk/by-id/wwn-0x5002538f3351ebe2-p
 Execute rollback? [y/N]: Cancelled.
 ```
 
-**แปลว่า:** rollback แสดง Op/Disk/Pool และ **Rollback hint** = คำสั่ง zpool reverse ที่จะรัน แล้วรอ confirm; ตอบ `N` = ยกเลิก ไม่มีอะไรเปลี่ยน. **user ดู:**
-- อ่าน `Rollback:` บรรทัดก่อนตอบ `y` เสมอ — บาง op เช่น wipefs ระบุ "not reversible" เพราะ label ถูกลบแล้ว
-- rollback ไม่ได้ auto-undo ทุกอย่าง — มันแค่รัน zpool command reverse; ต้องเข้าใจผลก่อน confirm
+</details>
+
+- **แปลว่า:** rollback แสดง Op/Disk/Pool และ **Rollback hint** = คำสั่ง zpool reverse ที่จะรัน แล้วรอ confirm; ตอบ `N` = ยกเลิก ไม่มีอะไรเปลี่ยน.
+- **user ดู:**
+  - อ่าน `Rollback:` บรรทัดก่อนตอบ `y` เสมอ — บาง op เช่น wipefs ระบุ "not reversible" เพราะ label ถูกลบแล้ว
+  - rollback ไม่ได้ auto-undo ทุกอย่าง — มันแค่รัน zpool command reverse; ต้องเข้าใจผลก่อน confirm
 
 ---
 
@@ -451,7 +528,7 @@ Execute rollback? [y/N]: Cancelled.
 b2ctl>
 ```
 
-**user ดู:** ที่ prompt `b2ctl>` ให้ **พิมพ์ตัวอักษร** (เช่น `s`) **แล้วกด Enter** — watch อ่านทีละบรรทัด (`readline`) ไม่ใช่ single-keypress. ระหว่างรอ คำสั่ง watch จะคอย detect disk pull/insert เองด้วย (ดู Section 4)
+- **user ดู:** ที่ prompt `b2ctl>` ให้ **พิมพ์ตัวอักษร** (เช่น `s`) **แล้วกด Enter** — watch อ่านทีละบรรทัด (`readline`) ไม่ใช่ single-keypress. ระหว่างรอ คำสั่ง watch จะคอย detect disk pull/insert เองด้วย (ดู Section 4)
 
 | Hotkey | ทำอะไร | mutating? |
 | ------ | ------ | :--: |
@@ -484,7 +561,8 @@ b2ctl> s
   ✔ (1:4) Samsung SSD 870 EVO 1TB (S74ZNS0W582283V) is now a hot spare in 'tank'
 ```
 
-**แปลว่า:** 1:7 (spare) เข้าไปแทน 1:4 ใน raidz1, แล้ว **1:4 กลายเป็น hot spare ตัวใหม่**. **user ดู:** ตั้งใจให้ pool ไม่เสีย spare หลัง swap — เมนูจะแสดงเฉพาะ active member (ไม่โชว์ spare เป็นตัวเลือก)
+- **แปลว่า:** 1:7 (spare) เข้าไปแทน 1:4 ใน raidz1, แล้ว **1:4 กลายเป็น hot spare ตัวใหม่**.
+- **user ดู:** ตั้งใจให้ pool ไม่เสีย spare หลัง swap — เมนูจะแสดงเฉพาะ active member (ไม่โชว์ spare เป็นตัวเลือก)
 
 ### `o` — offload (ถอด spare/disk ออก)
 
@@ -502,7 +580,7 @@ b2ctl> o
   skipped
 ```
 
-**แปลว่า:** ถอด disk ออกจาก pool → กลายเป็น free → เด้งเมนู assign ต่อ (เลือก `s` = ปล่อยไว้ → disk ขึ้น `[CONFIG]` unassigned)
+- **แปลว่า:** ถอด disk ออกจาก pool → กลายเป็น free → เด้งเมนู assign ต่อ (เลือก `s` = ปล่อยไว้ → disk ขึ้น `[CONFIG]` unassigned)
 
 ### `d` — demote (mirror leg → spare) *[dry-run]*
 
@@ -517,7 +595,8 @@ b2ctl> d            # หรือ b2ctl --dry-run demote
   ✔ demoted to spare
 ```
 
-**แปลว่า:** demote = ถอด mirror leg ออก (`zpool detach`) แล้วเพิ่มกลับเป็น spare (`zpool add spare`). **user ดู:** มี guard — ถ้าถอดแล้วทำให้ vdev เหลือ leg เดียว (เสีย redundancy) จะ **refuse**. ใช้ได้เฉพาะ mirror (rpool); raidz member ทำไม่ได้
+- **แปลว่า:** demote = ถอด mirror leg ออก (`zpool detach`) แล้วเพิ่มกลับเป็น spare (`zpool add spare`).
+- **user ดู:** มี guard — ถ้าถอดแล้วทำให้ vdev เหลือ leg เดียว (เสีย redundancy) จะ **refuse**. ใช้ได้เฉพาะ mirror (rpool); raidz member ทำไม่ได้
 
 ### `t` `l` `q`
 
@@ -546,7 +625,8 @@ b2ctl> a
   action>
 ```
 
-**แปลว่า:** `a` ลิสต์เฉพาะ disk ที่ unassigned → เลือกตัว → เด้งเมนูเดียวกับตอน NEW DISK DETECTED (`[1]`–`[6]` + `[s]`). **user ดู:** ต่างจากตอนเสียบ disk ใหม่ตรงที่ `a` เรียกเมนูนี้เองได้ทุกเมื่อ ไม่ต้องรอ hot-plug
+- **แปลว่า:** `a` ลิสต์เฉพาะ disk ที่ unassigned → เลือกตัว → เด้งเมนูเดียวกับตอน NEW DISK DETECTED (`[1]`–`[6]` + `[s]`).
+- **user ดู:** ต่างจากตอนเสียบ disk ใหม่ตรงที่ `a` เรียกเมนูนี้เองได้ทุกเมื่อ ไม่ต้องรอ hot-plug
 
 ### `n` — new-pool (สร้าง pool ใหม่จาก disk ว่าง)
 
@@ -563,7 +643,8 @@ b2ctl> n
   ✔ pool created
 ```
 
-**แปลว่า:** `n` ลิสต์เฉพาะ disk ว่าง → เลือกหลายตัวคั่นด้วยเว้นวรรค → ตั้งชื่อ pool → เลือก raid type → ถ้า disk มี data/label เก่าจะ **เตือน + ขอ confirm wipe** ก่อน → confirm สุดท้าย → `zpool create`. **user ดู:**
-- raid type ต้องมี disk พอ: `mirror`≥2, `raidz1`≥3, `raidz2`≥4 (ไม่พอ → `error: need at least N disks`); พิมพ์ผิด → `invalid raid type`
-- `stripe` = ไม่มี redundancy (disk เดียวก็ได้ แต่เสีย = ข้อมูลหายหมด)
-- ⚠️ ตัวอย่างนี้สร้าง pool ชื่อ `tutorial` บน disk ว่าง (1:7) — ถ้าทดสอบเสร็จลบด้วย `zpool destroy tutorial`
+- **แปลว่า:** `n` ลิสต์เฉพาะ disk ว่าง → เลือกหลายตัวคั่นด้วยเว้นวรรค → ตั้งชื่อ pool → เลือก raid type → ถ้า disk มี data/label เก่าจะ **เตือน + ขอ confirm wipe** ก่อน → confirm สุดท้าย → `zpool create`.
+- **user ดู:**
+  - raid type ต้องมี disk พอ: `mirror`≥2, `raidz1`≥3, `raidz2`≥4 (ไม่พอ → `error: need at least N disks`); พิมพ์ผิด → `invalid raid type`
+  - `stripe` = ไม่มี redundancy (disk เดียวก็ได้ แต่เสีย = ข้อมูลหายหมด)
+  - ⚠️ ตัวอย่างนี้สร้าง pool ชื่อ `tutorial` บน disk ว่าง (1:7) — ถ้าทดสอบเสร็จลบด้วย `zpool destroy tutorial`

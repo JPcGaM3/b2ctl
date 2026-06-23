@@ -5,9 +5,26 @@ runs, how each output is parsed, the scan pipeline, the safety model, and the
 deltas from the RAID-mode build. Audience: whoever maintains or debugs b2ctl on
 the R620s.
 
-> See also: [`b2ctl-walkthrough.md`](b2ctl-walkthrough.md) — step-by-step
+> 📌 Note: See also: [`b2ctl-walkthrough.md`](b2ctl-walkthrough.md) — step-by-step
 > "press X → see Y" walkthrough with real server outputs;
 > [`b2ctl-test-checklist.md`](b2ctl-test-checklist.md) — pass/fail test report.
+
+---
+
+## Table of Contents
+
+1. [Environment assumptions](#1-environment-assumptions)
+2. [Module map](#2-module-map)
+3. [Every subprocess, and how it is parsed](#3-every-subprocess-and-how-it-is-parsed)
+4. [The scan pipeline](#4-the-scan-pipeline-corescan)
+5. [The watch loop](#5-the-watch-loop-watchrun)
+6. [Safety model](#6-safety-model)
+7. [Deployment](#7-deployment)
+8. [Troubleshooting](#8-troubleshooting)
+9. [Backend detection](#9-backend-detection-backendpy)
+10. [Config file](#10-config-file-configpy)
+11. [Deltas from the RAID-mode build](#11-deltas-from-the-raid-mode-build-adr-001)
+12. [Simulation harness](#12-simulation-harness-codessim)
 
 ---
 
@@ -254,6 +271,8 @@ JSONL (one JSON object per line, append-only). Each entry written by
 
 Schema:
 
+<details><summary>📋 View ops.jsonl Schema</summary>
+
 ```json
 {
   "op_id":        "20260617-143022-replace",
@@ -274,6 +293,8 @@ Schema:
   "snapshot_path":"/var/log/b2ctl/snapshots/20260617-143022-replace.txt"
 }
 ```
+
+</details>
 
 `op_id` format: `YYYYMMDD-HHMMSS-<op>` (second-granularity; collision possible
 if two ops fire in the same second, which is safe because ops are sequential).
@@ -308,14 +329,14 @@ Enter). Callers must check the return value and abort if `False`.
 Stored as `rollback_hint` string in each audit entry. Printed by `end_op()` after
 the op completes.
 
-| op | rollback cmd |
-|----|-------------|
-| `offline` | `zpool online <pool> <dev_path>` |
-| `add_spare` | `zpool remove <pool> <dev_path>` |
-| `replace` | `zpool replace <pool> <new_dev> <old_dev>` |
-| `demote` | `zpool attach <pool> <remaining_member> <dev_path>` |
-| `create` | `zpool destroy <pool>` (printed with red warning) |
-| `wipefs` / `wipe` / `sgdisk` | `""` — no rollback (destruction is permanent) |
+| op                          | rollback cmd                                            |
+|-----------------------------|---------------------------------------------------------|
+| `offline`                   | `zpool online <pool> <dev_path>`                        |
+| `add_spare`                 | `zpool remove <pool> <dev_path>`                        |
+| `replace`                   | `zpool replace <pool> <new_dev> <old_dev>`              |
+| `demote`                    | `zpool attach <pool> <remaining_member> <dev_path>`     |
+| `create`                    | `zpool destroy <pool>` (printed with red warning)       |
+| `wipefs` / `wipe` / `sgdisk`| `""` — no rollback (destruction is permanent)           |
 
 `b2ctl rollback <op_id>` reads `ops.jsonl`, finds the entry, confirms with the
 same box dialog, and executes `rollback_hint` via `run_check`. The rollback is
@@ -326,11 +347,11 @@ itself recorded as a new audit entry.
 Runs inside `end_op()` after the subprocess exits. Re-calls `zpool status` on
 the affected pool and checks the expected state was reached:
 
-| op | expected state |
-|----|---------------|
-| `replace` | new disk appears in target vdev |
-| `add_spare` | spare count in pool increased by 1 |
-| `offline` | leaf state shows `OFFLINE` |
+| op          | expected state                          |
+|-------------|------------------------------------------|
+| `replace`   | new disk appears in target vdev          |
+| `add_spare` | spare count in pool increased by 1       |
+| `offline`   | leaf state shows `OFFLINE`               |
 
 If the check fails:
 ```

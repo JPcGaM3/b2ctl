@@ -5,13 +5,9 @@
 เอกสารนี้เป็น **walkthrough** สำหรับคนใช้งานจริง (new-user เปิดแล้วทำตามได้ทีละขั้น).
 ส่วน pass/fail test report อยู่ที่ [`b2ctl-test-checklist.md`](b2ctl-test-checklist.md).
 
-> ⚠️ output เก็บจาก live server จริง (pve/pve2). Scenario 0-3, 5-6 เป็น **read-only**/**`--dry-run`**;
-> Scenario 4 (hot-plug) และ 7 (`s`/`o`/`a`/`n`) เป็น **mutating ops จริง** ที่ทำบน `tank` / spare /
-> disk ว่างเพื่อทดสอบ — **ไม่เคยแตะ `rpool`** (boot pool). dry-run = preview เห็นคำสั่งโดยไม่ทำจริง.
-
 ## สารบัญ
 
-| #   | Scenario                | คำสั่งหลัก                                                       |
+| #   | Section                | คำสั่งหลัก                                                       |
 | --- | ----------------------- | ---------------------------------------------------------------- |
 | 0   | ตรวจสภาพระบบก่อนใช้     | `b2ctl check`                                                    |
 | 1   | ดู/validate config      | `b2ctl update` · `b2ctl config show`                             |
@@ -21,10 +17,11 @@
 | 5   | locate LED (หาตัวดิสก์) | watch `l` · `b2ctl locate <bay> <sec>`                           |
 | 6   | audit log + rollback    | `b2ctl log` · `b2ctl rollback <op_id>`                           |
 | 7   | watch menu (ทุก hotkey) | `b2ctl watch`                                                    |
+|     |                         |                                                                  |
 
 ---
 
-## Scenario 0 — ตรวจสภาพระบบก่อนใช้ (`b2ctl check`)
+## Section 0 — ตรวจสภาพระบบก่อนใช้ (`b2ctl check`)
 
 ใช้ครั้งแรกหลังติดตั้ง หรือเวลาสงสัยว่า tool ครบไหม / backend ถูกไหม / bay mapping ทำงานไหม
 
@@ -64,7 +61,7 @@ b2ctl check
 
 ---
 
-## Scenario 1 — ดู/validate config (`b2ctl update`, `b2ctl config show`)
+## Section 1 — validate config (`b2ctl update`, `b2ctl config show`)
 
 ใช้เช็คว่า tool path + bay_map ที่ b2ctl จะใช้ ถูกต้องครบไหม และดูค่า config ปัจจุบัน
 
@@ -116,7 +113,7 @@ b2ctl config show
 → `b2ctl config init` แล้วแก้ `"mode": "it"` ในไฟล์ `/etc/b2ctl/config.json`
 
 ---
-## Scenario 2 — อ่านตาราง disk health (`b2ctl status`, `b2ctl status --json`)
+## Section 2 — อ่านตาราง disk health (`b2ctl status`, `b2ctl status --json`)
 
 ใช้ดูสถานะดิสก์ทุกตัวพร้อมกัน — health, อายุการใช้งาน, pool ที่ assign อยู่ และสรุป pool health ด้านล่าง
 
@@ -177,7 +174,7 @@ b2ctl status --json | python3 -m json.tool
 
 ---
 
-## Scenario 3 — dry-run (ลองก่อนทำจริง) (`b2ctl --dry-run swap/replace/demote/create/offload` · watch `t`)
+## Section 3 — dry-run (ลองก่อนทำจริง) (`b2ctl --dry-run swap/replace/demote/create/offload` · watch `t`)
 
 ใช้ preview ว่า b2ctl จะรัน `zpool` command อะไร **โดยไม่แตะ disk จริง** — ไม่ resilver, ไม่จุด LED, ไม่เขียน snapshot
 
@@ -253,7 +250,7 @@ b2ctl>
 
 ---
 
-## Scenario 4 — hot-plug lifecycle (`b2ctl watch`)
+## Section 4 — hot-plug lifecycle (`b2ctl watch`)
 
 ใช้ monitor disk ที่ pull/insert แบบ real-time — watch จะแจ้งเหตุการณ์ทันที ไม่ต้อง refresh เอง
 
@@ -353,7 +350,7 @@ zpool status tank
 
 ---
 
-## Scenario 5 — locate LED (หาตัวดิสก์จริงในแร็ค)
+## Section 5 — locate LED (หาตัวดิสก์จริงในแร็ค)
 
 ใช้จุดไฟกระพริบที่ disk ตัวที่ต้องการ เพื่อหาตำแหน่งจริงในแร็คก่อนดึงออก
 
@@ -393,7 +390,7 @@ blinking /dev/sdb for 30s ... ✔ done (via dd)
 
 ---
 
-## Scenario 6 — audit log + rollback (`b2ctl log`, `b2ctl rollback`)
+## Section 6 — audit log + rollback (`b2ctl log`, `b2ctl rollback`)
 
 ใช้ดู history ของทุก op ที่เคยรัน และ preview คำสั่ง reverse ก่อน execute rollback
 
@@ -443,7 +440,7 @@ Execute rollback? [y/N]: Cancelled.
 
 ---
 
-## Scenario 7 — watch menu: ทุก hotkey กดแล้วเจออะไร (`b2ctl watch`)
+## Section 7 — watch menu: ทุก hotkey กดแล้วเจออะไร (`b2ctl watch`)
 
 เปิด watch ครั้งเดียวแล้วสั่งงานทุกอย่างจาก hotkey ได้ — นี่คือ reference ว่ากดแต่ละตัวเจออะไร
 
@@ -454,7 +451,7 @@ Execute rollback? [y/N]: Cancelled.
 b2ctl>
 ```
 
-**new-user ดู:** ที่ prompt `b2ctl>` ให้ **พิมพ์ตัวอักษร** (เช่น `s`) **แล้วกด Enter** — watch อ่านทีละบรรทัด (`readline`) ไม่ใช่ single-keypress. ระหว่างรอ คำสั่ง watch จะคอย detect disk pull/insert เองด้วย (ดู Scenario 4)
+**new-user ดู:** ที่ prompt `b2ctl>` ให้ **พิมพ์ตัวอักษร** (เช่น `s`) **แล้วกด Enter** — watch อ่านทีละบรรทัด (`readline`) ไม่ใช่ single-keypress. ระหว่างรอ คำสั่ง watch จะคอย detect disk pull/insert เองด้วย (ดู Section 4)
 
 | Hotkey | ทำอะไร | mutating? |
 | ------ | ------ | :--: |
@@ -463,9 +460,9 @@ b2ctl>
 | `o` | offload — ถอด disk/spare ออกจาก pool | yes |
 | `s` | swap — ย้าย member ที่ใช้อยู่ไปลง spare (resilver) แล้ว **ตัวเดิมกลายเป็น spare** | yes |
 | `d` | demote — ถอด mirror leg ของ rpool มาเป็น spare (guard กัน break redundancy) | yes |
-| `t` | toggle-dryrun — เปิด/ปิด preview mode (ดู Scenario 3) | no |
+| `t` | toggle-dryrun — เปิด/ปิด preview mode (ดู Section 3) | no |
 | `n` | new-pool — สร้าง pool ใหม่จาก disk ว่าง | yes |
-| `l` | locate — กระพริบ LED หา disk (ดู Scenario 5) | no |
+| `l` | locate — กระพริบ LED หา disk (ดู Section 5) | no |
 | `q` | quit — ออก, print `bye` | no |
 
 ### `r` — refresh
@@ -524,8 +521,8 @@ b2ctl> d            # หรือ b2ctl --dry-run demote
 
 ### `t` `l` `q`
 
-- `t` toggle-dryrun → `[DRY-RUN MODE: ON]` (ดู Scenario 3)
-- `l` locate → กระพริบ LED (ดู Scenario 5)
+- `t` toggle-dryrun → `[DRY-RUN MODE: ON]` (ดู Section 3)
+- `l` locate → กระพริบ LED (ดู Section 5)
 - `q` quit → `bye` แล้วคืน shell
 
 ### `a` — assign (จัดการ disk ที่ unassigned)

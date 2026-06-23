@@ -5,8 +5,9 @@
 เอกสารนี้เป็น **walkthrough** สำหรับคนใช้งานจริง (new-user เปิดแล้วทำตามได้ทีละขั้น).
 ส่วน pass/fail test report อยู่ที่ [`b2ctl-test-checklist.md`](b2ctl-test-checklist.md).
 
-> ⚠️ output ทั้งหมดในไฟล์นี้เก็บจากคำสั่ง **read-only** หรือ **`--dry-run`** บน live server —
-> ไม่มีการแตะ `rpool` หรือรัน mutating จริง. dry-run = preview เห็นคำสั่งที่จะรันโดยไม่ทำจริง.
+> ⚠️ output เก็บจาก live server จริง (pve/pve2). Scenario 0-3, 5-6 เป็น **read-only**/**`--dry-run`**;
+> Scenario 4 (hot-plug) และ 7 (`s`/`o`/`a`/`n`) เป็น **mutating ops จริง** ที่ทำบน `tank` / spare /
+> disk ว่างเพื่อทดสอบ — **ไม่เคยแตะ `rpool`** (boot pool). dry-run = preview เห็นคำสั่งโดยไม่ทำจริง.
 
 ## สารบัญ
 
@@ -527,9 +528,45 @@ b2ctl> d            # หรือ b2ctl --dry-run demote
 - `l` locate → กระพริบ LED (ดู Scenario 5)
 - `q` quit → `bye` แล้วคืน shell
 
-### `a` — assign · `n` — new-pool
+### `a` — assign (จัดการ disk ที่ unassigned)
 
-*(รอ capture output จริง — ดูหมายเหตุท้ายไฟล์)*
+ใช้กับ disk ที่ขึ้น `[CONFIG]` (อยู่ในเครื่องแต่ยังไม่ได้ assign เข้า pool ไหน)
 
-- `a` assign → เปิดเมนูเดียวกับตอน NEW DISK DETECTED (`[1]`–`[6]` + `[s]`) สำหรับ disk ที่ unassigned (`[CONFIG]`)
-- `n` new-pool → เลือก disk ว่าง (space-separated #) → ใส่ชื่อ pool → ใส่ raid type (stripe/mirror/raidz1/raidz2) → confirm → `zpool create`
+```
+b2ctl> a
+    [1] bay 1:7 /dev/sde (Samsung SSD 870 EVO 1TB, SN S74ZNS0W582280E)
+  assign which #> 1
+
+  Disk /dev/disk/by-id/wwn-0x5002538f3354e3cd is free.
+  What do you want to do with it?
+    [1] Prepare for physical removal (Blink LED)
+    [2] Add to a pool as hot SPARE
+    [3] REPLACE a degraded/faulted disk in a pool
+    [4] ATTACH to an existing disk (convert to/expand mirror)
+    [5] ADD single disk to a pool (expand capacity - WARNING: no redundancy)
+    [6] WIPE it blank (for a new pool)
+    [s] skip / decide later
+  action>
+```
+
+**แปลว่า:** `a` ลิสต์เฉพาะ disk ที่ unassigned → เลือกตัว → เด้งเมนูเดียวกับตอน NEW DISK DETECTED (`[1]`–`[6]` + `[s]`). **new-user ดู:** ต่างจากตอนเสียบ disk ใหม่ตรงที่ `a` เรียกเมนูนี้เองได้ทุกเมื่อ ไม่ต้องรอ hot-plug
+
+### `n` — new-pool (สร้าง pool ใหม่จาก disk ว่าง)
+
+```
+b2ctl> n
+    [1] /dev/sde (bay 1:7)
+  pick disks (space-separated #)> 1
+  pool name> tutorial
+  raid type (stripe, mirror, raidz1, raidz2) [mirror]> stripe
+  WARNING: The following disks already contain data/labels:
+    - (1:7) Samsung SSD 870 EVO 1TB (S74ZNS0W582280E)
+  these disks already contain data/labels — wipe and continue? [y/N]> y
+  create pool 'tutorial' (stripe) with 1 disks? [y/N]> y
+  ✔ pool created
+```
+
+**แปลว่า:** `n` ลิสต์เฉพาะ disk ว่าง → เลือกหลายตัวคั่นด้วยเว้นวรรค → ตั้งชื่อ pool → เลือก raid type → ถ้า disk มี data/label เก่าจะ **เตือน + ขอ confirm wipe** ก่อน → confirm สุดท้าย → `zpool create`. **new-user ดู:**
+- raid type ต้องมี disk พอ: `mirror`≥2, `raidz1`≥3, `raidz2`≥4 (ไม่พอ → `error: need at least N disks`); พิมพ์ผิด → `invalid raid type`
+- `stripe` = ไม่มี redundancy (disk เดียวก็ได้ แต่เสีย = ข้อมูลหายหมด)
+- ⚠️ ตัวอย่างนี้สร้าง pool ชื่อ `tutorial` บน disk ว่าง (1:7) — ถ้าทดสอบเสร็จลบด้วย `zpool destroy tutorial`

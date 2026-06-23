@@ -37,6 +37,15 @@ def _sim_mode():
         return "auto"
 _cfg.controller_mode = _sim_mode
 
+# Keep the sim's audit trail + pre-op snapshots OUT of the real /var/log/b2ctl
+# — write them under sim/var/ instead. Makes sim self-contained (b2ctl log /
+# rollback work without root) and impossible to confuse with real-server ops.
+import b2ctl.safety as _safety  # noqa: E402
+_simvar = os.path.join(HERE, "var")
+_safety.LOG_DIR = _simvar
+_safety.SNAP_DIR = os.path.join(_simvar, "snapshots")
+_safety.LOG_FILE = os.path.join(_simvar, "ops.jsonl")
+
 from b2ctl.cli import main  # noqa: E402
 
 sys.exit(main(sys.argv[1:]))

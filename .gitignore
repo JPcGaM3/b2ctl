@@ -39,3 +39,4 @@ tools/
 
 .agents
 codes/sim/state.json
+codes/sim/var/

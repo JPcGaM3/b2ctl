@@ -37,6 +37,16 @@ python3 sim/simctl reset           # ล้างกลับ default
 - dry-run (`--dry-run` + watch `t`), log / rollback / snapshot
 - **ทั้ง 2 backend**: IT-mode (sas2ircu) และ RAID-mode (storcli/perccli)
 
+## Audit log / snapshot ของ sim แยกจากของจริง
+
+sim เขียน audit trail + pre-op snapshot ลง **`sim/var/`** (`sim/var/ops.jsonl` +
+`sim/var/snapshots/`) — **ไม่เคยแตะ `/var/log/b2ctl/` ของ production**. ดังนั้น:
+- แยกออกง่าย: sim op อยู่คนละ path กับ real op (ไม่ปนใน `ops.jsonl` เดียวกัน)
+- `b2ctl log` / `rollback` / snapshot **ใช้ใน sim ได้** (dir เขียนได้ ไม่ต้อง root)
+- snapshot ของ sim สังเกตเพิ่มได้: token เป็น `/dev/sdX` (ไม่ใช่ by-id) + `zpool version` = `zfs-2.4.2-sim`
+
+(`sim/var/` gitignored — generated)
+
 ## ข้อจำกัด (มันคือ model ไม่ใช่ ZFS จริง)
 
 - **by-id = ""** — sim ใช้ `/dev/sdX` เป็น token (real ใช้ `ata-`/`wwn-` by-id). flow/logic เทสได้ครบ

@@ -141,6 +141,37 @@ class TestWatchSwap:
     @patch("b2ctl.watch.ui")
     @patch("b2ctl.watch.zfs")
     @patch("b2ctl.watch.core")
+    @patch("b2ctl.watch._confirm", return_value=True)
+    @patch("b2ctl.watch._ask")
+    def test_swap_candidate_list_excludes_spare(self, mock_ask, _mc, mock_core,
+                                                 mock_zfs, mock_ui, capsys):
+        # a spare (pool set, vdev=spares) must NOT appear as a swap source.
+        from b2ctl.watch import _cmd_swap
+        member = _disk(bay="1:4", vdev="raidz1-0", pool="tank",
+                       by_id="/dev/disk/by-id/wwn-member")
+        spare = _disk(bay="1:7", vdev="spares", vdev_state="AVAIL", pool="tank",
+                      dev="/dev/sde", serial="SPARE1",
+                      by_id="/dev/disk/by-id/wwn-spare",
+                      pool_token="/dev/disk/by-id/wwn-spare")
+        mock_core.scan.return_value = [member, spare]
+        mock_zfs.swap_to_spare.return_value = (True, "")
+        mock_zfs.poll_resilver_status.return_value = {"completed": True, "done": 100.0, "eta": ""}
+        mock_zfs.topology.return_value = {}
+        mock_zfs.add_spare.return_value = (True, "")
+        mock_ui.disk_label.side_effect = lambda d: f"({d.bay})"
+        mock_ask.return_value = "1"   # pick first candidate
+        _cmd_swap({})
+        out = capsys.readouterr().out
+        # only the raidz member is listed (one candidate line), spare is not
+        assert "[1] (1:4)" in out
+        assert "[2]" not in out
+        # the swap operated on the member, not the spare
+        args = mock_zfs.swap_to_spare.call_args[0]
+        assert args[1] == "/dev/disk/by-id/wwn-member"
+
+    @patch("b2ctl.watch.ui")
+    @patch("b2ctl.watch.zfs")
+    @patch("b2ctl.watch.core")
     @patch("b2ctl.watch._confirm", return_value=False)
     @patch("b2ctl.watch._ask")
     def test_swap_cancelled_on_decline(self, mock_ask, _mc, mock_core,

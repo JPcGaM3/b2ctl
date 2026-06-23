@@ -433,7 +433,9 @@ def _replace_onto_spare(d, spare) -> bool:
 
 def _cmd_replace(tbw) -> None:
     disks = core.scan(tbw)
-    in_pool = [d for d in disks if d.in_pool and d.pool]
+    # you replace an active member onto a spare — a spare is not itself a
+    # replace target, so exclude spares from the candidate list.
+    in_pool = [d for d in disks if d.in_pool and d.pool and not d.is_spare]
     if not in_pool:
         print(f"{Y}  no in-pool disks to replace{N}"); return
     for i, d in enumerate(in_pool, 1):
@@ -497,7 +499,9 @@ def _cmd_create(tbw) -> None:
 
 def _cmd_swap(tbw) -> None:
     disks = core.scan(tbw)
-    candidates = [d for d in disks if d.in_pool and d.pool]
+    # swap moves an ACTIVE pool member onto a spare — a spare itself is not a
+    # valid swap source, so exclude spares from the candidate list.
+    candidates = [d for d in disks if d.in_pool and d.pool and not d.is_spare]
     if not candidates:
         print(f"{Y}  no in-pool disks to swap{N}")
         return

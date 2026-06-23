@@ -124,7 +124,7 @@ After it starts you'll see:
 <details>
 <summary>📋 View Watch Mode Screen</summary>
 
-```
+<pre>
 ================================================================================
 BAY   DEV  IF   MODEL            SERIAL            POWER_ON      WEAR   END    ...
 --------------------------------------------------------------------------------
@@ -141,9 +141,8 @@ Pools:
 [OK] all disks healthy and assigned
 
 [r]efresh  [a]ssign  [o]ffload  [s]wap  [d]emote  [n]ew-pool  [t]oggle-dryrun  [l]ocate  [q]uit
-b2ctl>
-```
-
+b2ctl&gt;
+</pre>
 </details>
 
 Type a single letter to act.
@@ -464,7 +463,7 @@ b2ctl detects it within ~2 seconds and shows a panel:
 <details>
 <summary>📋 View New Disk Detection Panel</summary>
 
-```
+<pre>
 ╔══ NEW DISK DETECTED: /dev/sdg ══════════════════════════════════
   device : /dev/sdg  (/dev/disk/by-id/ata-Samsung_SSD_870...)
   model  : Samsung SSD 870   SN S74ZNS0WXXXXXXX
@@ -481,9 +480,8 @@ b2ctl detects it within ~2 seconds and shows a panel:
     [5] ADD single disk to a pool (expand capacity - WARNING: no redundancy)
     [6] WIPE it blank (for a new pool)
     [s] skip / decide later
-  action>
-```
-
+  action&gt;
+</pre>
 </details>
 
 **Removing a disk:**

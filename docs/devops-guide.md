@@ -274,7 +274,7 @@ Schema:
 <details>
 <summary>📋 View ops.jsonl Schema</summary>
 
-```json
+<pre>
 {
   "op_id":        "20260617-143022-replace",
   "op":           "replace",
@@ -290,11 +290,10 @@ Schema:
   "stderr":       "",
   "started_at":   "2026-06-17T14:30:22",
   "ended_at":     "2026-06-17T14:30:23",
-  "rollback_hint":"zpool replace tank /dev/disk/by-id/<new> /dev/disk/by-id/<old>",
+  "rollback_hint":"zpool replace tank /dev/disk/by-id/&lt;new&gt; /dev/disk/by-id/&lt;old&gt;",
   "snapshot_path":"/var/log/b2ctl/snapshots/20260617-143022-replace.txt"
 }
-```
-
+</pre>
 </details>
 
 `op_id` format: `YYYYMMDD-HHMMSS-<op>` (second-granularity; collision possible

@@ -105,7 +105,7 @@ sudo b2ctl watch
 <details>
 <summary>📋 ดูหน้าจอตัวอย่างโหมด Watch</summary>
 
-```
+<pre>
 ========================================================================================================
 BAY   DEV       IF   MODEL                   SERIAL            POWER_ON      WEAR(used) END(left)  ...
 --------------------------------------------------------------------------------------------------------
@@ -122,9 +122,8 @@ Pools:
 [OK] all disks healthy and assigned
 
 [r]efresh  [a]ssign  [o]ffload  [s]wap  [d]emote  [n]ew-pool  [t]oggle-dryrun  [l]ocate  [q]uit   (or hot-plug)
-b2ctl>
-```
-
+b2ctl&gt;
+</pre>
 </details>
 
 จากนั้นพิมพ์ตัวอักษรเดียวเพื่อทำงาน (ดูรายละเอียดในหัวข้อ 6)

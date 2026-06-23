@@ -122,7 +122,7 @@ zpool status rpool >> /tmp/zpool-before.txt
 <details>
 <summary>📋 ดูตัวอย่าง Output จริง (version / check / baseline) + คำอธิบาย</summary>
 
-```
+<pre>
 # 201 — b2ctl version
 b2ctl 0.5.0-itmode
 
@@ -144,7 +144,7 @@ pool: tank  state: ONLINE
              wwn-0x5002538f3351d0f6       ONLINE
              wwn-0x5002538f3354e3cb       ONLINE
   spares: wwn-0x5002538f3354e3cd AVAIL
-```
+</pre>
 
 203: เหมือน 201 (ต่างแค่ serial/hostname); 203 ไม่มี storcli/perccli ติดตั้ง (แสดง `[✗]` ทุกตัว — ปกติสำหรับเครื่องที่ยังไม่ได้ install optional tools)
 
@@ -173,7 +173,7 @@ pool: tank  state: ONLINE
 <details>
 <summary>📋 ดูตัวอย่าง Output จริง (status table / log) + คำอธิบาย</summary>
 
-```
+<pre>
 # 201 — b2ctl status
 BAY   DEV  IF   MODEL                   SERIAL            POWER_ON       WEAR  END    WRITTEN           BAD  HEALTH  POOL           STATUS   LEVEL
 1:0   sdf  SAS  Samsung SSD 860 PRO 1TB S5G8NE0MA10474H  51055h(~5.8y)  1%    99.2%  10.06TB/1200TBW   0    PASSED  rpool/mirror-0 ONLINE   NORMAL
@@ -186,16 +186,16 @@ Pools:
   rpool  952G   5.96G  free=946G   ONLINE  cap=0%
   tank   2.72T  1.71G  free=2.72T  ONLINE  cap=0%
 [OK] all disks healthy and assigned
-```
+</pre>
 
 ตาราง `b2ctl status` แสดง BAY เป็น `enclosure:slot` (เช่น `1:4`) — ช่อง bay 4 ของ controller 1. WRITTEN = `9.71TB/600TBW` = เขียนไป 9.71TB จาก capacity 600TBW. WEAR = 1% = ใช้ไป 1% ของอายุการใช้งาน.
 203: เหมือน 201; เพิ่ม `/dev/sdg` USB Virtual Floppy แสดง CRITICAL (SMART unreadable + unassigned) ปกติสำหรับ virtual device.
 
-```
+<pre>
 # 201 — b2ctl log --last 5
 OP_ID                          OP       BAY  SERIAL           POOL  STATUS  STARTED
 20260622-141956-293556-replace replace  1:4  S74ZNS0W537278Y  tank  ok      2026-06-22T14:19:56
-```
+</pre>
 
 Log แสดง operation ที่เคยรันพร้อม timestamp, bay, serial, status — ช่วย audit ย้อนหลังได้.
 
@@ -223,7 +223,7 @@ Log แสดง operation ที่เคยรันพร้อม timestamp,
 <details>
 <summary>📋 ดูตัวอย่าง Output จริง (dry-run swap / watch toggle) + คำอธิบาย</summary>
 
-```
+<pre>
 # 201 — b2ctl --dry-run swap (input: "3\ny")
 [1] (1:0) Samsung SSD 860 PRO 1TB (S5G8NE0MA10474H) in rpool
 [2] (1:1) Samsung SSD 860 PRO 1TB (S5G8NE0MA10478T) in rpool
@@ -231,24 +231,24 @@ Log แสดง operation ที่เคยรันพร้อม timestamp,
 [4] (1:5) Samsung SSD 870 EVO 1TB (S74ZNS0W533737E) in tank
 [5] (1:6) Samsung SSD 870 EVO 1TB (S74ZNS0W582278Y) in tank
 [6] (1:7) Samsung SSD 870 EVO 1TB (S74ZNS0W582280E) in tank
-swap which #> swap (1:4) ... onto spare (1:7) ...? [y/N]>
+swap which #&gt; swap (1:4) ... onto spare (1:7) ...? [y/N]&gt;
 [DRY-RUN] would run: zpool replace tank /dev/disk/by-id/wwn-0x.../...part1 /dev/disk/by-id/wwn-0x.../...part1
   ✔ swap started — resilvering onto spare
 [DRY-RUN] would run: zpool detach tank /dev/disk/by-id/wwn-0x...
   ✔ detached old disk /dev/sdb
 [DRY-RUN] would run: zpool add -f tank spare /dev/disk/by-id/wwn-0x...
   ✔ (1:4) Samsung SSD 870 EVO 1TB is now a hot spare in 'tank'
-```
+</pre>
 
 dry-run print คำสั่งพร้อม prefix `[DRY-RUN] would run:` — ไม่มีการเปลี่ยนแปลงจริง ใช้ตรวจว่า b2ctl เลือก disk path ถูกก่อน run จริง.
 
-```
+<pre>
 # 201 — b2ctl watch (input: "t\nq")
 [r]efresh [a]ssign [o]ffload [s]wap [d]emote [t]oggle-dryrun [n]ew-pool [l]ocate [q]uit
-b2ctl> [DRY-RUN MODE: ON]
+b2ctl&gt; [DRY-RUN MODE: ON]
 [r]efresh [a]ssign [o]ffload [s]wap [d]emote [t]oggle-dryrun [n]ew-pool [l]ocate [q]uit
-b2ctl> bye
-```
+b2ctl&gt; bye
+</pre>
 
 กด `t` ใน watch = toggle dry-run; ทุก action หลังจากนั้น print-only ไม่รันจริง เหมาะฝึกก่อน production.
 203: เหมือน 201 (ต่างแค่ serial/hostname).
@@ -273,7 +273,7 @@ b2ctl> bye
 <details>
 <summary>📋 ดูตัวอย่าง section headers ของ snapshot</summary>
 
-```
+<pre>
 # ตัวอย่าง section headers ของ 1 snapshot (201)
 === b2ctl pre-op snapshot: 20260622-161350-348683-replace ===
 --- zpool status tank ---
@@ -282,7 +282,7 @@ b2ctl> bye
 --- smartctl -a /dev/disk/by-id/wwn-0x...-part1 ---
 === START OF INFORMATION SECTION ===
 === START OF READ SMART DATA SECTION ===
-```
+</pre>
 
 </details>
 
@@ -330,12 +330,12 @@ b2ctl> bye
 <details>
 <summary>📋 ดูตัวอย่าง Output จริง (C1 remove / C2 spare / C3 insert) + คำอธิบาย</summary>
 
-```
+<pre>
 # 201 — C1 hot-remove (ดึง sdc ออกระหว่าง watch)
 ■ disk removed: /dev/sdc
   current pool health:
 Pools:
-  tank      2.72T   1.71G   free=2.72T   DEGRADED  cap=0%  <-- not ONLINE
+  tank      2.72T   1.71G   free=2.72T   DEGRADED  cap=0%  &lt;-- not ONLINE
 
 # 201 — C2 spare auto-replace (zpool status tank)
         spare-1                       DEGRADED
@@ -355,7 +355,7 @@ Pools:
     [2] Add to a pool as hot SPARE
     [3] REPLACE a degraded/faulted disk in a pool
     ... [4] attach  [5] add single  [6] wipe  [s] skip
-```
+</pre>
 
 - **C1**: ดึง disk → `■ disk removed` + pool `DEGRADED` (raidz1 ทนเสีย 1 ตัว ยังอ่าน/เขียนได้)
 - **C2**: มี hot spare → ZFS **auto-resilver onto spare** เอง (`spare-1` + `INUSE`) ไม่ต้องสั่ง
@@ -384,24 +384,24 @@ Pools:
 <details>
 <summary>📋 ดูตัวอย่าง Output จริง (D3/D4 create reject / D1 cancel) + คำอธิบาย</summary>
 
-```
+<pre>
 # 203 — b2ctl --dry-run create (D3: 1 disk + raidz2)
 [1] /dev/sdg (bay ?)
-pick disks (space-separated #)>  pool name>  raid type (stripe, mirror, raidz1, raidz2) [mirror]>
+pick disks (space-separated #)&gt;  pool name&gt;  raid type (stripe, mirror, raidz1, raidz2) [mirror]&gt;
   error: need at least 4 disks for raidz2
 
 # 203 — b2ctl --dry-run create (D4: 1 disk + raid9)
-pick disks (space-separated #)>  pool name>  raid type (stripe, mirror, raidz1, raidz2) [mirror]>
+pick disks (space-separated #)&gt;  pool name&gt;  raid type (stripe, mirror, raidz1, raidz2) [mirror]&gt;
   invalid raid type
-```
+</pre>
 
 เมื่อ user ป้อน raid type ผิด tool reject ทันทีก่อน execute — ไม่ทำ zpool create. raidz2 ต้องการ disk ≥ 4 ตัว (2 parity + 2 data).
 
-```
+<pre>
 # 201 — D1: cancel swap
-swap which #> N
+swap which #&gt; N
   cancelled
-```
+</pre>
 
 กด `N` (หรือ Enter) ที่ confirm prompt → ออกทันที ไม่มีอะไรเปลี่ยน.
 
@@ -429,14 +429,14 @@ cd codes && python3 -m pytest tests/ -q
 
 **โครงสร้าง test ใหม่ — 1 ไฟล์ต่อ 1 module (หาง่าย):**
 
-```
+<pre>
 tests/
   conftest.py + helpers.py     # shared _disk() factory + sample outputs
   test_common.py (17)   test_zfs.py (28)    test_watch.py (23)
   test_ui.py (14)       test_config.py (8)  test_backend.py (7)
   test_hba.py (7)       test_smart.py (5)   test_spec.py (5)
   test_core.py (4)      test_safety.py (4)  test_cli.py (2)
-```
+</pre>
 
 **9 เทสที่เคย fail — แก้แล้ว:**
 - 7 ตัว (add_spare/replace/create_pool×2/demote_to_spare×2/swap_readds): mock assertion

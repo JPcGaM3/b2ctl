@@ -36,7 +36,7 @@ b2ctl check
 <details>
 <summary>📋 ดูตัวอย่าง Output จริง</summary>
 
-```
+<pre>
 [b2ctl environment check]
   [✔] Running as root
   [✔] smartctl     /usr/sbin/smartctl       (smartctl 7.5 2025-04-30 ...)
@@ -53,8 +53,7 @@ b2ctl check
   [✔] Detected backend: IT-mode
   [✔] Controllers found: 6 (6 disks in bay map)
   [!] Config: /etc/b2ctl/config.json (missing — using defaults, run 'b2ctl config init' to create)
-```
-
+</pre>
 </details>
 
 - **แปลว่า:** tool ครบ, backend = **IT-mode** (HBA — ถูกสำหรับเครื่อง crossflash).
@@ -81,7 +80,7 @@ b2ctl update
 <details>
 <summary>📋 ดูตัวอย่าง Output จริง</summary>
 
-```
+<pre>
 [b2ctl update]
   [i] config       /etc/b2ctl/config.json missing — using defaults
   [✔] sas2ircu     /usr/sbin/sas2ircu
@@ -90,8 +89,7 @@ b2ctl update
   [✔] smartctl     /usr/sbin/smartctl
   [✔] zpool        /usr/sbin/zpool
   [i] bay_map      bundled (/opt/b2ctl/bay_map.json)  →  b2ctl update --export-bay-map to customize
-```
-
+</pre>
 </details>
 
 - **แปลว่า:** ทุก tool ที่จำเป็นรันได้ (`[✔]`).
@@ -111,7 +109,7 @@ b2ctl config show
 <details>
 <summary>📋 ดูตัวอย่าง Output จริง</summary>
 
-```json
+<pre>
 {
   "tool_paths": {
     "sas2ircu": "", "storcli": "", "perccli": "",
@@ -120,8 +118,7 @@ b2ctl config show
   "controller": { "mode": "auto", "index": "all" },
   "bay_map_path": ""
 }
-```
-
+</pre>
 </details>
 
 - **แปลว่า:** ค่าว่าง `""` = ใช้ default (b2ctl หา binary จาก PATH เอง). `controller.mode: "auto"` = auto-detect IT vs RAID.
@@ -143,7 +140,7 @@ b2ctl status
 <details>
 <summary>📋 ดูตัวอย่าง Output จริง</summary>
 
-```
+<pre>
 BAY   DEV  IF   MODEL                   SERIAL            POWER_ON       WEAR  END    WRITTEN           BAD  HEALTH  POOL           STATUS   LEVEL
 1:0   sdf  SAS  Samsung SSD 860 PRO 1TB S5G8NE0MA10474H  51055h(~5.8y)  1%    99.2%  10.06TB/1200TBW   0    PASSED  rpool/mirror-0 ONLINE   NORMAL
 1:1   sda  SAS  Samsung SSD 860 PRO 1TB S5G8NE0MA10478T  51056h(~5.8y)  1%    99.1%  10.27TB/1200TBW   0    PASSED  rpool/mirror-0 ONLINE   NORMAL
@@ -155,8 +152,7 @@ Pools:
   rpool  952G   5.96G  free=946G   ONLINE  cap=0%
   tank   2.72T  1.71G  free=2.72T  ONLINE  cap=0%
 [OK] all disks healthy and assigned
-```
-
+</pre>
 </details>
 
 - **แปลว่า:** ทุกดิสก์ ONLINE, HEALTH = PASSED, pool ทั้งสองเป็น ONLINE.
@@ -179,7 +175,7 @@ b2ctl status --json | python3 -m json.tool
 <details>
 <summary>📋 ดูตัวอย่าง Output จริง</summary>
 
-```
+<pre>
 [
   {
     "dev": "/dev/sdf",
@@ -192,8 +188,7 @@ b2ctl status --json | python3 -m json.tool
   },
   ...
 ]
-```
-
+</pre>
 </details>
 
 - **แปลว่า:** `--json` dump array ของ disk objects ทุกตัว — fields ครบ (dev, bay, model, serial, pool, vdev_state ฯลฯ).
@@ -218,22 +213,21 @@ b2ctl --dry-run swap
 <details>
 <summary>📋 ดูตัวอย่าง Output จริง</summary>
 
-```
+<pre>
 [1] (1:0) Samsung SSD 860 PRO 1TB (S5G8NE0MA10474H) in rpool
 [2] (1:1) Samsung SSD 860 PRO 1TB (S5G8NE0MA10478T) in rpool
 [3] (1:4) Samsung SSD 870 EVO 1TB (S74ZNS0W537278Y) in tank
 [4] (1:5) Samsung SSD 870 EVO 1TB (S74ZNS0W533737E) in tank
 [5] (1:6) Samsung SSD 870 EVO 1TB (S74ZNS0W582278Y) in tank
 [6] (1:7) Samsung SSD 870 EVO 1TB (S74ZNS0W582280E) in tank
-swap which #> swap (1:4) ... onto spare (1:7) ...? [y/N]>
+swap which #&gt; swap (1:4) ... onto spare (1:7) ...? [y/N]&gt;
 [DRY-RUN] would run: zpool replace tank /dev/disk/by-id/wwn-0x.../...part1 /dev/disk/by-id/wwn-0x.../...part1
   ✔ swap started — resilvering onto spare
 [DRY-RUN] would run: zpool detach tank /dev/disk/by-id/wwn-0x...
   ✔ detached old disk /dev/sdb
 [DRY-RUN] would run: zpool add -f tank spare /dev/disk/by-id/wwn-0x...
   ✔ (1:4) Samsung SSD 870 EVO 1TB is now a hot spare in 'tank'
-```
-
+</pre>
 </details>
 
 - **แปลว่า:** dry-run print คำสั่ง `zpool replace`, `zpool detach`, `zpool add spare` พร้อม prefix `[DRY-RUN] would run:` — ไม่มีการเปลี่ยนแปลงจริงเกิดขึ้น.
@@ -252,11 +246,10 @@ b2ctl --dry-run replace
 <details>
 <summary>📋 ดูตัวอย่าง Output จริง</summary>
 
-```
+<pre>
 [DRY-RUN] would run: zpool replace tank /dev/disk/by-id/wwn-0x5002538f3351d0f6 /dev/disk/by-id/wwn-0x5002538f3354e3cb-part1
 • replace dry-run preview — nothing changed
-```
-
+</pre>
 </details>
 
 - **แปลว่า:** replace dry-run แสดง zpool command ที่จะรัน แล้วจบด้วย `• replace dry-run preview — nothing changed` (neutral) — ไม่มี resilver, ไม่จุด LED.
@@ -281,13 +274,12 @@ b2ctl watch
 <details>
 <summary>📋 ดูตัวอย่าง Output จริง</summary>
 
-```
+<pre>
 [r]efresh [a]ssign [o]ffload [s]wap [d]emote [t]oggle-dryrun [n]ew-pool [l]ocate [q]uit
-b2ctl> [DRY-RUN MODE: ON]
+b2ctl&gt; [DRY-RUN MODE: ON]
 [r]efresh [a]ssign [o]ffload [s]wap [d]emote [t]oggle-dryrun [n]ew-pool [l]ocate [q]uit
-b2ctl>
-```
-
+b2ctl&gt;
+</pre>
 </details>
 
 - **แปลว่า:** กด `t` → `[DRY-RUN MODE: ON]` ปรากฏ — ทุก action ใน watch หลังจากนี้จะ print-only ไม่รันจริง กด `t` อีกครั้งเพื่อ toggle กลับ.
@@ -310,7 +302,7 @@ b2ctl watch
 <details>
 <summary>📋 ดูตัวอย่าง Output จริง</summary>
 
-```
+<pre>
 ==================================================================================================================================================================================
 BAY   DEV       IF   MODEL                   SERIAL            POWER_ON      WEAR(used) END(left)  WRITTEN            BAD   HEALTH   POOL             STATUS    LEVEL
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -326,10 +318,9 @@ Pools:
   tank      2.72T   1.71G   free=2.72T   ONLINE    cap=0%
 [OK] all disks healthy and assigned
 [r]efresh  [a]ssign  [o]ffload  [s]wap  [d]emote  [t]oggle-dryrun  [n]ew-pool  [l]ocate  [q]uit   (or hot-plug)
-b2ctl>
+b2ctl&gt;
 
-```
-
+</pre>
 </details>
 
 - **แปลว่า:** watch polling อยู่ รอ event.
@@ -342,13 +333,12 @@ b2ctl>
 <details>
 <summary>📋 ดูตัวอย่าง Output จริง</summary>
 
-```
+<pre>
 ■ disk removed: /dev/sdc
   current pool health:
 Pools:
-  tank      2.72T   1.71G   free=2.72T   DEGRADED  cap=0%  <-- not ONLINE
-```
-
+  tank      2.72T   1.71G   free=2.72T   DEGRADED  cap=0%  &lt;-- not ONLINE
+</pre>
 </details>
 
 - **แปลว่า:** watch ตรวจพบ disk หายทันทีและ print `■ disk removed` พร้อมสถานะ pool.
@@ -365,15 +355,14 @@ zpool status tank
 <details>
 <summary>📋 ดูตัวอย่าง Output จริง</summary>
 
-```
+<pre>
         spare-1                       DEGRADED
           wwn-0x...d0f6               REMOVED     ← disk ที่ดึงออก
           wwn-0x...e3cd               ONLINE      ← spare เข้าแทน
     spares
       wwn-0x...e3cd                   INUSE  currently in use
   scan: resilvered 599M in 00:00:02 with 0 errors
-```
-
+</pre>
 </details>
 
 - **แปลว่า:** ZFS เริ่ม resilver ลง spare อัตโนมัติ — spare status เปลี่ยนเป็น `INUSE`, resilvered 599M ใน 2 วินาที.
@@ -386,7 +375,7 @@ zpool status tank
 <details>
 <summary>📋 ดูตัวอย่าง Output จริง</summary>
 
-```
+<pre>
 ╔══ NEW DISK DETECTED: /dev/sdd ═══════════════════════
   model  : Samsung SSD 870 EVO 1TB   SN S74ZNS0W582278Y
   bay    : 1:6   size 931.5G   SAS   SSD
@@ -402,9 +391,8 @@ zpool status tank
     [5] ADD single disk to a pool (expand capacity - WARNING: no redundancy)
     [6] WIPE it blank (for a new pool)
     [s] skip / decide later
-  action>
-```
-
+  action&gt;
+</pre>
 </details>
 
 - **แปลว่า:** watch ตรวจพบ disk ใหม่ แสดง panel model/SN/bay/health + เมนูให้เลือกทำอะไรกับ disk.
@@ -436,12 +424,11 @@ b2ctl watch
 <details>
 <summary>📋 ดูตัวอย่าง Output จริง</summary>
 
-```
-  locate which (bay/serial/sdX)> 1:4
+<pre>
+  locate which (bay/serial/sdX)&gt; 1:4
   blinking /dev/sdb for 5s ...
   ✔ done (via dd)
-```
-
+</pre>
 </details>
 
 - **แปลว่า:** จุดไฟกระพริบที่ disk ใน bay 1:4 เป็นเวลา 5 วินาที แล้วดับเอง.
@@ -458,10 +445,9 @@ b2ctl locate 1:4 30
 <details>
 <summary>📋 ดูตัวอย่าง Output จริง</summary>
 
-```
+<pre>
 blinking /dev/sdb for 30s ... ✔ done (via dd)
-```
-
+</pre>
 </details>
 
 - **แปลว่า:** กระพริบ 30 วินาที — ให้เวลาเดินไปหาในแร็คได้สบาย.
@@ -486,14 +472,13 @@ b2ctl log --last 5
 <details>
 <summary>📋 ดูตัวอย่าง Output จริง</summary>
 
-```
+<pre>
 OP_ID                          OP       BAY  SERIAL           POOL  STATUS   STARTED
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 20260622-160135-379472-replace replace  1:4  S74ZNS0W537278Y  tank  fail     2026-06-22T16:01:35
 20260622-160139-713790-replace replace  1:4  S74ZNS0W537278Y  tank  dry_run  2026-06-22T16:01:39
 20260622-161350-348683-replace replace  1:4  S74ZNS0W537278Y  tank  dry_run  2026-06-22T16:13:50
-```
-
+</pre>
 </details>
 
 - **แปลว่า:** ทุก mutating op ถูกบันทึกพร้อม OP_ID, op type, bay, serial, pool, status, timestamp.
@@ -515,15 +500,14 @@ b2ctl rollback 20260622-160135-379472-replace
 <details>
 <summary>📋 ดูตัวอย่าง Output จริง</summary>
 
-```
+<pre>
 Op:       replace  (2026-06-22T16:01:35)
 Disk:     bay 1:4 | S74ZNS0W537278Y
 Pool:     tank/raidz1-0
-Rollback: zpool replace tank <new-disk> /dev/disk/by-id/wwn-0x5002538f3351ebe2-part1
+Rollback: zpool replace tank &lt;new-disk&gt; /dev/disk/by-id/wwn-0x5002538f3351ebe2-part1
 
 Execute rollback? [y/N]: Cancelled.
-```
-
+</pre>
 </details>
 
 - **แปลว่า:** rollback แสดง Op/Disk/Pool และ **Rollback hint** = คำสั่ง zpool reverse ที่จะรัน แล้วรอ confirm; ตอบ `N` = ยกเลิก ไม่มีอะไรเปลี่ยน.

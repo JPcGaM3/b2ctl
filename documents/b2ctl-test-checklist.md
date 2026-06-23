@@ -136,15 +136,15 @@ Log แสดง operation ที่เคยรันพร้อม timestamp,
 > ใช้ `--dry-run` → b2ctl **print คำสั่งที่จะรัน แต่ไม่ทำจริง**. รันผ่าน SSH ได้ ไม่ต้องดึงดิสก์.
 > เทียบ `zpool status tank` ก่อน-หลัง ต้อง **ไม่เปลี่ยน**.
 
-| ID | Scenario | Command | Expected | Status | Actual | Comment |
-|----|----------|---------|----------|:------:|--------|---------|
-| B1 | Swap (dry) | `b2ctl --dry-run swap` → เลือกดิสก์/spare → y | print `zpool replace ...` (dry-run), pool ไม่เปลี่ยน | ✅ 201 / ✅ 203 | แสดง `[DRY-RUN] would run: zpool replace tank ...` + `zpool detach ...` + `zpool add ... spare` | |
-| B2 | Replace (dry) | `b2ctl --dry-run replace` → เลือก → y | print `zpool replace -f tank ...` (dry-run), ไม่ resilver จริง | ✅ 201 / ✅ 203 | แสดง `[DRY-RUN] would run: zpool replace tank ...` ครบ; มี confirm box ก่อน; pool ไม่เปลี่ยน | **แก้แล้วใน source (รอ redeploy):** เดิม dry-run จบด้วย `✗ replace complete` (แดง) + Rollback hint + จุดไฟ LED จริง → เข้าใจผิดว่า fail. แก้เป็น `• replace dry-run preview — nothing changed` + ข้าม LED/post-op-verify ตอน dry-run |
-| B3 | Demote (dry) | `b2ctl --dry-run demote` → เลือก mirror leg → y | print `zpool detach ...` + `zpool add ... spare` (dry-run) | ✅ 201 / ✅ 203 | `[DRY-RUN] would run: zpool detach rpool ...` + `zpool add -f rpool spare ...` ครบ | เมนูแสดงเฉพาะ mirror-capable disks (rpool legs) — raidz members ถูก filter ออกโดย design |
-| B4 | Create pool (dry) | `b2ctl --dry-run create` → เลือกดิสก์ว่าง → y | print `zpool create -f -o ashift=12 ...` (dry-run) | ✅ 201 / ⏭ 203* | 201: `no available disks to create pool` (ทุกดิสก์ assigned แล้ว) — ถูกต้อง; 203: มี `sdg` แต่เป็น Virtual Floppy | *203 มี disk ว่างแต่เป็น USB Virtual Floppy (NOREAD) ไม่เหมาะสร้าง pool จริง — skip full flow |
-| B5 | Offload (dry) | `b2ctl --dry-run offload` → เลือก → y | print คำสั่ง detach/replace (dry-run) ตาม vdev type | ✅ 201 / ✅ 203 | เลือก spare (1:7): `[DRY-RUN] would run: zpool remove tank ...` แล้วเสนอ assign menu (กด `s` skip) | |
-| B6 | Watch dry-run toggle | `b2ctl watch` → กด `t` | แสดง `[DRY-RUN MODE: ON]` | ✅ 201 / ✅ 203 | กด `t` → `[DRY-RUN MODE: ON]` ปรากฏทันที; กด `q` → `bye` | |
-| B7 | Watch menu ครบ | `b2ctl watch` | เมนู `[r]efresh [a]ssign [o]ffload [s]wap [d]emote [t]oggle-dryrun [n]ew-pool [l]ocate [q]uit` | ✅ 201 / ✅ 203 | เมนูครบทุก option ตามที่กำหนด | |
+| ID  | Scenario             | Command                                         | Expected                                                                                       |     Status     | Actual                                                                                                            | Comment                                                                                                                                                                                                                              |
+| --- | -------------------- | ----------------------------------------------- | ---------------------------------------------------------------------------------------------- | :------------: | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| B1  | Swap (dry)           | `b2ctl --dry-run swap` → เลือกดิสก์/spare → y   | print `zpool replace ...` (dry-run), pool ไม่เปลี่ยน                                           | ✅ 201 / ✅ 203  | แสดง `[DRY-RUN] would run: zpool replace tank ...` + `zpool detach ...` + `zpool add ... spare`                   |                                                                                                                                                                                                                                      |
+| B2  | Replace (dry)        | `b2ctl --dry-run replace` → เลือก → y           | print `zpool replace -f tank ...` (dry-run), ไม่ resilver จริง                                 | ✅ 201 / ✅ 203  | แสดง `[DRY-RUN] would run: zpool replace tank ...` ครบ; มี confirm box ก่อน; pool ไม่เปลี่ยน                      | **แก้แล้วใน source (รอ redeploy):** เดิม dry-run จบด้วย `✗ replace complete` (แดง) + Rollback hint + จุดไฟ LED จริง → เข้าใจผิดว่า fail. แก้เป็น `• replace dry-run preview — nothing changed` + ข้าม LED/post-op-verify ตอน dry-run |
+| B3  | Demote (dry)         | `b2ctl --dry-run demote` → เลือก mirror leg → y | print `zpool detach ...` + `zpool add ... spare` (dry-run)                                     | ✅ 201 / ✅ 203  | `[DRY-RUN] would run: zpool detach rpool ...` + `zpool add -f rpool spare ...` ครบ                                | เมนูแสดงเฉพาะ mirror-capable disks (rpool legs) — raidz members ถูก filter ออกโดย design                                                                                                                                             |
+| B4  | Create pool (dry)    | `b2ctl --dry-run create` → เลือกดิสก์ว่าง → y   | print `zpool create -f -o ashift=12 ...` (dry-run)                                             | ✅ 201 / ⏭ 203* | 201: `no available disks to create pool` (ทุกดิสก์ assigned แล้ว) — ถูกต้อง; 203: มี `sdg` แต่เป็น Virtual Floppy | *203 มี disk ว่างแต่เป็น USB Virtual Floppy (NOREAD) ไม่เหมาะสร้าง pool จริง — skip full flow                                                                                                                                        |
+| B5  | Offload (dry)        | `b2ctl --dry-run offload` → เลือก → y           | print คำสั่ง detach/replace (dry-run) ตาม vdev type                                            | ✅ 201 / ✅ 203  | เลือก spare (1:7): `[DRY-RUN] would run: zpool remove tank ...` แล้วเสนอ assign menu (กด `s` skip)                |                                                                                                                                                                                                                                      |
+| B6  | Watch dry-run toggle | `b2ctl watch` → กด `t`                          | แสดง `[DRY-RUN MODE: ON]`                                                                      | ✅ 201 / ✅ 203  | กด `t` → `[DRY-RUN MODE: ON]` ปรากฏทันที; กด `q` → `bye`                                                          |                                                                                                                                                                                                                                      |
+| B7  | Watch menu ครบ       | `b2ctl watch`                                   | เมนู `[r]efresh [a]ssign [o]ffload [s]wap [d]emote [t]oggle-dryrun [n]ew-pool [l]ocate [q]uit` | ✅ 201 / ✅ 203  | เมนูครบทุก option ตามที่กำหนด                                                                                     |                                                                                                                                                                                                                                      |
 
 #### 📋 Output จริง + อธิบายสำหรับ new-user
 
@@ -221,13 +221,13 @@ Watch mode ให้กด `t` เพื่อ toggle dry-run — ทุก acti
 | ID | Scenario | Steps | Expected | Status | Actual | Comment |
 |----|----------|-------|----------|:------:|--------|---------|
 | C1 | Hot-remove | เปิด `watch` → ดึงดิสก์ tank 1 ตัวออก | watch แจ้ง disk removed; `zpool status tank` = `DEGRADED` | ✅ 201 / ⚠️ 203 | 201: `■ disk removed` + tank `DEGRADED` ทันที. 203: แจ้ง removed แต่ pool health ที่ auto-print ยัง `ONLINE` — ต้อง `r` ก่อนเห็น `DEGRADED`/`SUSPENDED` | ⚠️ **timing race** (203): `_handle_removed` อ่าน zpool ทันทีก่อน ZFS update state — ไว้แก้ทีหลัง (เพิ่ม `udevadm settle`) |
-| C2 | Spare auto-replace | (มี spare AVAIL อยู่) หลัง C1 | ZFS auto-resilver onto spare | ✅ 201 / ❌ 203 | 201: spare 1:7 → `INUSE`, `zpool status` เห็น `spare-1` + `resilvered 599M`, tank `DEGRADED`. 203: tank `SUSPENDED` + `3 data errors`, spare ยัง `AVAIL` (ไม่ kick) | ❌ 203 = **hardware ไม่ใช่ b2ctl bug**: 1:5 (sdc) เสียอยู่ก่อน + ดึง 1:4 = raidz1 เสีย 2 ตัว → pool พัง. ดู recovery box ด้านล่าง |
-| C3 | Hot-insert | เสียบดิสก์กลับ bay เดิม | watch แสดง `╔══ NEW DISK DETECTED ══` | ✅ 201 | 201: เสียบ sdd กลับ → `╔══ NEW DISK DETECTED: /dev/sdd ══` + panel (model/SN/bay/health) + assign menu | |
-| C4 | Assign menu ครบ | จาก C3 ดูเมนู | options `[1]`–`[6]` + `[s]` skip | ✅ 201 | เมนูครบ: `[1]` blink `[2]` spare `[3]` replace `[4]` attach `[5]` add single `[6]` wipe `[s]` skip | |
-| C5 | Assign as spare | C3 → พิมพ์ `2` → เลือก pool `tank` → y | ดิสก์เข้า tank เป็น spare | ⏭ SKIP | — | ยังไม่ได้ทำ (ทำต่อได้) |
-| C6 | Replace degraded | (มี degraded leaf) C3 → `3` → confirm | `✔ replace started — resilvering` | ⏭ SKIP | — | ยังไม่ได้ทำ |
-| C7 | Swap onto spare | `watch` → `s` → ยืนยัน | `zpool replace` รัน | ⏭ SKIP | — | ยังไม่ได้ทำ |
-| C8 | Offload spare | `watch` → `o` → เลือก spare | spare ถูก detach | ⏭ SKIP | — | ยังไม่ได้ทำ |
+| C2 | Spare auto-replace | (มี spare AVAIL อยู่) หลัง C1 | ZFS auto-resilver onto spare | ✅ 201 / ✅ 203 | 201: spare 1:7 → `INUSE`, `spare-1` + `resilvered 599M`. 203 (หลังกู้ + redeploy): spare 1:7 → `INUSE`, `zpool status -v` เห็น `spare-1` (REMOVED+ONLINE) + `resilvered 590M`, `errors: No known data errors` | 203 รอบแรกพังเพราะ hardware (เสีย 2 ตัว) — กู้แล้วเทสซ้ำผ่าน ✅ |
+| C3 | Hot-insert | เสียบดิสก์กลับ bay เดิม | watch แสดง `╔══ NEW DISK DETECTED ══` | ✅ 201 / ✅ 203 | เสียบกลับ → `╔══ NEW DISK DETECTED ══` + panel (model/SN/bay/health) + assign menu ทั้งคู่ | |
+| C4 | Assign menu ครบ | จาก C3 ดูเมนู | options `[1]`–`[6]` + `[s]` skip | ✅ 201 / ✅ 203 | เมนูครบ: `[1]` blink `[2]` spare `[3]` replace `[4]` attach `[5]` add single `[6]` wipe `[s]` skip | |
+| C5 | Assign as spare | C3 → พิมพ์ `2` → เลือก pool `tank` → y | ดิสก์เข้า tank เป็น spare | ✅ 203 | `action> 2` → `pool #> 2` (tank) → y → `✔ added as spare`; refresh เห็น 1:5 `tank/spares AVAIL` | |
+| C6 | Replace degraded | (มี degraded leaf) C3 → `3` → confirm | `✔ replace started — resilvering` | ✅ 203 | `action> 3` → เลือก leaf REMOVED → CONFIRM box → y → `✔ replace started — resilvering` → `✔ resilver completed` → `✓ replace complete` (เขียว) + Rollback + Snapshot; tank กลับ `ONLINE` | ✓ เขียวถูกต้อง (real op ไม่ใช่ dry-run) |
+| C7 | Swap onto spare | `watch` → `s` → ยืนยัน | `zpool replace` รัน | ✅ 203 | `s` → เลือก member 1:4 → y → swap onto spare 1:7 → resilver → `✔ detached old disk` → `✔ (1:4) is now a hot spare`. **ผล: 1:7 เข้า raidz1, 1:4 กลายเป็น spare** (by design) | สังเกต: disk เดิมกลายเป็น spare ใหม่ — ตั้งใจให้ pool ไม่เสีย spare หลัง swap |
+| C8 | Offload spare | `watch` → `o` → เลือก spare | spare ถูก detach | ✅ 203 | `o` → เลือก spare (vdev spares) → y → `✔ removed from pool` → disk กลายเป็น free + assign menu; เลือก `s` skip → refresh เห็น disk `[CONFIG]` (unassigned) | |
 | C9 | Create new pool | `watch` → `n` → ดิสก์ว่าง ≥2 | `zpool create` สำเร็จ | ⏭ SKIP | — | ยังไม่ได้ทำ |
 | C10 | Locate ใหม่ถูก bay | `watch` → `l` | ไฟกระพริบตรงตัว | ✅ 201 / ✅ 203 | `l` → ใส่ `1:4` → `blinking /dev/sdb for 5s ... ✔ done (via dd)` กระพริบถูกตัวทั้งคู่ | ⏱ fix 5 วินาที (watch `l` ไม่รับ custom seconds; standalone `b2ctl locate <bay> <sec>` รับได้) |
 
@@ -289,12 +289,12 @@ Pools:
 | ID | Scenario | Steps | Expected (exact message) | Status | Actual | Comment |
 |----|----------|-------|--------------------------|:------:|--------|---------|
 | D1 | Cancel ทุก prompt | ทุก action → ตอบ `N` หรือ `q` | ไม่มีอะไรเปลี่ยน; ขึ้น `cancelled` | ✅ 201 / ✅ 203 | ตอบ `N` ที่ swap prompt → `cancelled` ทันที; zpool ไม่เปลี่ยน | |
-| D2 | Swap ไม่มี spare | เอา spare ออกก่อน → `watch` → `s` | `pool 'tank' has no AVAIL spare — add one first` | ⏭ SKIP | — | ต้องเอา spare ออกก่อน = mutating; ไม่รันบน production |
+| D2 | Swap ไม่มี spare | เอา spare ออกก่อน → `watch` → `s` | `no AVAIL spare in pool 'tank'` | ✅ 203 | หลัง offload spare ออก → `s` → เลือก member → `no AVAIL spare in pool 'tank'` ✔ (ข้อความจริงไม่มีคำว่า "add one first" ในเส้นทาง _cmd_swap) | |
 | D3 | Create ดิสก์ไม่พอ | `n` → เลือก 1 ดิสก์ → raid type `raidz2` | `error: need at least 4 disks for raidz2` | ⏭ 201 / ✅ 203 | 203: `error: need at least 4 disks for raidz2` ✔ | 201 ไม่มี disk ว่าง ทำ test นี้บน 203 เท่านั้น (sdg unassigned) |
 | D4 | Invalid raid type | `n` → เลือกดิสก์ → พิมพ์ raid type มั่ว `raid9` | `invalid raid type` | ⏭ 201 / ✅ 203 | 203: `invalid raid type` ✔ | 201 ไม่มี disk ว่าง ทำ test นี้บน 203 เท่านั้น |
 | D5 | Demote last mirror leg | `d` → เลือก leg สุดท้าย | `refuse: not a detachable mirror leg / would break redundancy` | ⏭ SKIP | — | demote menu filter เฉพาะ mirror-capable disks — raidz members ไม่ปรากฏในเมนู; ไม่สามารถ trigger path นี้ด้วย SSH; ต้องทดสอบแยกต่างหาก |
 | D6 | Assign dirty disk | เสียบดิสก์มี data เก่า | `WARNING: ... already contain data/labels` | ⏭ SKIP | — | ต้องอยู่หน้าเครื่อง (physical disk) |
-| D7 | ดึงดิสก์ระหว่าง resilver | เริ่ม replace → ดึงอีกตัว | pool survive (raidz1) | ⏭ SKIP | — | physical; ต้องอยู่หน้าเครื่อง |
+| D7 | ดึงดิสก์ระหว่าง resilver | เริ่ม replace/swap → ดึงอีกตัว | pool survive (raidz1) | ⚠️ 203 (partial) | swap เสร็จ (`✔ resilver completed 100%`) แล้วดึง sde → tank `DEGRADED` (raidz1 รอด) ✔ | ⚠️ **ยังไม่ได้เทส "ดึงระหว่าง resilver จริง"**: tank ใช้แค่ 1.69G → resilver เสร็จใน 2 วิ ก่อนทันดึง. swap มี poll loop รอ resilver จบจริง (`watch.py:524`); แต่ b2ctl กันการดึง physical ไม่ได้. ถ้าจะเทสจริงต้องเขียน data เยอะก่อน |
 
 #### 📋 Output จริง + อธิบายสำหรับ new-user
 
@@ -364,12 +364,12 @@ tests/
 |---------|:------:|:------:|:------:|:------:|
 | A — Safe / Read-only | 9 | 9 | 0 | 0 |
 | B — Dry-run mutating | 7 | 7 | 0 | 0 |
-| C — Physical hotplug | 10 | 5 | 0 | 5 |
-| D — Edge / Negative | 7 | 3 | 0 | 4 |
+| C — Physical hotplug | 10 | 9 | 0 | 1 |
+| D — Edge / Negative | 7 | 5 | 0 | 2 |
 | E — Unit tests | 2 | 2 | 0 | 0 |
-| **รวม** | **35** | **26** | **0** | **9** |
+| **รวม** | **35** | **32** | **0** | **3** |
 
-> C2-203 นับ PASS เพราะ **b2ctl แสดงสถานะถูกต้อง** (SUSPENDED) — ส่วน pool พังเป็น **hardware** (raidz1 เสีย 2 ตัว) ไม่ใช่ข้อผิดพลาดของ tool
+> เหลือ SKIP 3: C9 (create new pool — ยังไม่ทำ), D5 (raidz demote refuse — cover ด้วย unit test), D6 (dirty disk — ต้องหา disk มี data เก่า). 203 กู้จาก SUSPENDED แล้ว + redeploy → เทส C2/C5-C8/D2/D7 ซ้ำผ่าน. D7 = partial (resilver เร็วเกินจนยังไม่ได้เทส "ดึงระหว่าง resilver จริง")
 
 **Overall comment / สิ่งที่ต้องแก้ต่อ:**
 

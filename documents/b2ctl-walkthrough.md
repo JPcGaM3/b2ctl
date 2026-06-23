@@ -1,8 +1,6 @@
 # b2ctl — Step-by-step Walkthrough Guide
 
 > **Version:** `0.5.0-itmode` · **Build:** IT-mode / LSI SAS2308 (PERC H710 crossflashed) · Proxmox VE 9.2
-> guide แบบ "กดอะไร → เห็นอะไร → แปลว่าอะไร" พร้อม terminal output จริงจาก server (pve/pve2).
-> ภาษา: เนื้อหาไทย, commands/technical terms อังกฤษ.
 
 เอกสารนี้เป็น **walkthrough** สำหรับคนใช้งานจริง (new-user เปิดแล้วทำตามได้ทีละขั้น).
 ส่วน pass/fail test report อยู่ที่ [`b2ctl-test-checklist.md`](b2ctl-test-checklist.md).
@@ -12,16 +10,16 @@
 
 ## สารบัญ
 
-| # | Scenario | คำสั่งหลัก |
-|---|----------|-----------|
-| 0 | ตรวจสภาพระบบก่อนใช้ | `b2ctl check` |
-| 1 | ดู/validate config | `b2ctl update` · `b2ctl config show` |
-| 2 | อ่านตาราง disk health | `b2ctl status` · `--json` |
-| 3 | dry-run (ลองก่อนทำจริง) | `b2ctl --dry-run swap/replace/demote/create/offload` · watch `t` |
-| 4 | hot-plug lifecycle | `b2ctl watch` (pull → spare → insert → assign) |
-| 5 | locate LED (หาตัวดิสก์) | watch `l` · `b2ctl locate <bay> <sec>` |
-| 6 | audit log + rollback | `b2ctl log` · `b2ctl rollback <op_id>` |
-| 7 | watch menu (ทุก hotkey) | `b2ctl watch` |
+| #   | Scenario                | คำสั่งหลัก                                                       |
+| --- | ----------------------- | ---------------------------------------------------------------- |
+| 0   | ตรวจสภาพระบบก่อนใช้     | `b2ctl check`                                                    |
+| 1   | ดู/validate config      | `b2ctl update` · `b2ctl config show`                             |
+| 2   | อ่านตาราง disk health   | `b2ctl status` · `--json`                                        |
+| 3   | dry-run (ลองก่อนทำจริง) | `b2ctl --dry-run swap/replace/demote/create/offload` · watch `t` |
+| 4   | hot-plug lifecycle      | `b2ctl watch` (pull → spare → insert → assign)                   |
+| 5   | locate LED (หาตัวดิสก์) | watch `l` · `b2ctl locate <bay> <sec>`                           |
+| 6   | audit log + rollback    | `b2ctl log` · `b2ctl rollback <op_id>`                           |
+| 7   | watch menu (ทุก hotkey) | `b2ctl watch`                                                    |
 
 ---
 
@@ -267,8 +265,23 @@ b2ctl watch
 **เห็น output:**
 
 ```
-[r]efresh [a]ssign [o]ffload [s]wap [d]emote [t]oggle-dryrun [n]ew-pool [l]ocate [q]uit
+==================================================================================================================================================================================
+BAY   DEV       IF   MODEL                   SERIAL            POWER_ON      WEAR(used) END(left)  WRITTEN            BAD   HEALTH   POOL             STATUS    LEVEL
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+1:0   sdf       SAS  Samsung SSD 860 PRO 1TB S5G8NE0MA10474H   51057h(~5.8y) 1%         99.2%      10.06TB/1200TBW    0     PASSED   rpool/mirror-0   ONLINE    NORMAL
+1:1   sda       SAS  Samsung SSD 860 PRO 1TB S5G8NE0MA10478T   51058h(~5.8y) 1%         99.1%      10.27TB/1200TBW    0     PASSED   rpool/mirror-0   ONLINE    NORMAL
+1:4   sdb       SAS  Samsung SSD 870 EVO 1TB S74ZNS0W537278Y   22928h(~2.6y) 1%         98.4%      9.71TB/600TBW      0     PASSED   tank/raidz1-0    ONLINE    NORMAL
+1:5   sdc       SAS  Samsung SSD 870 EVO 1TB S74ZNS0W533737E   18279h(~2.1y) 1%         98.4%      9.88TB/600TBW      0     PASSED   tank/raidz1-0    ONLINE    NORMAL
+1:6   sdd       SAS  Samsung SSD 870 EVO 1TB S74ZNS0W582278Y   18283h(~2.1y) 1%         98.3%      9.91TB/600TBW      0     PASSED   tank/raidz1-0    ONLINE    NORMAL
+1:7   sde       SAS  Samsung SSD 870 EVO 1TB S74ZNS0W582280E   18283h(~2.1y) 1%         99.8%      1.01TB/600TBW      0     PASSED   tank/spares      AVAIL     NORMAL
+==================================================================================================================================================================================
+Pools:
+  rpool     952G    5.96G   free=946G    ONLINE    cap=0%
+  tank      2.72T   1.71G   free=2.72T   ONLINE    cap=0%
+[OK] all disks healthy and assigned
+[r]efresh  [a]ssign  [o]ffload  [s]wap  [d]emote  [t]oggle-dryrun  [n]ew-pool  [l]ocate  [q]uit   (or hot-plug)
 b2ctl>
+
 ```
 
 **แปลว่า:** watch polling อยู่ รอ event. **new-user ดู:** ปล่อย terminal นี้ค้างไว้ระหว่างดึง/เสียบดิสก์
@@ -429,33 +442,94 @@ Execute rollback? [y/N]: Cancelled.
 
 ---
 
-## Scenario 7 — watch menu (ทุก hotkey) (`b2ctl watch`)
+## Scenario 7 — watch menu: ทุก hotkey กดแล้วเจออะไร (`b2ctl watch`)
 
-เปิด watch แล้วกด hotkey ได้เลย — เป็น reference สำหรับ hotkey ทุกตัวใน watch mode
+เปิด watch ครั้งเดียวแล้วสั่งงานทุกอย่างจาก hotkey ได้ — นี่คือ reference ว่ากดแต่ละตัวเจออะไร
 
-**Step 1:** เปิด watch
-
-```bash
-b2ctl watch
-```
-
-**เห็น output:**
+**Step 1:** เปิด watch — เห็นเมนูล่างตาราง
 
 ```
-[r]efresh [a]ssign [o]ffload [s]wap [d]emote [t]oggle-dryrun [n]ew-pool [l]ocate [q]uit
+[r]efresh  [a]ssign  [o]ffload  [s]wap  [d]emote  [t]oggle-dryrun  [n]ew-pool  [l]ocate  [q]uit   (or hot-plug)
 b2ctl>
 ```
 
-**แปลว่า:** watch พร้อมรับ hotkey. **new-user ดู:** กดตัวอักษรในวงเล็บ `[x]` ได้เลย — ไม่ต้อง Enter
+**new-user ดู:** ที่ prompt `b2ctl>` ให้ **พิมพ์ตัวอักษร** (เช่น `s`) **แล้วกด Enter** — watch อ่านทีละบรรทัด (`readline`) ไม่ใช่ single-keypress. ระหว่างรอ คำสั่ง watch จะคอย detect disk pull/insert เองด้วย (ดู Scenario 4)
 
-| Hotkey | ชื่อ | ทำอะไร |
-|--------|------|--------|
-| `r` | refresh | สั่ง scan disk ใหม่ แล้วอัพเดตตาราง — ใช้เมื่อ disk เพิ่งเสียบแต่ยังไม่ detect หรือ pool health ยังไม่อัพเดต |
-| `a` | assign | เปิดเมนู assign สำหรับ disk ที่ unassigned — เลือกได้ว่าจะทำ spare/replace/attach/single/wipe |
-| `o` | offload | ถอด spare ออกจาก pool (remove spare) — ใช้เมื่ออยากเอา spare ไปใช้ที่อื่น |
-| `s` | swap | สลับ disk ที่ assign อยู่ใน pool ไปยัง spare (resilver onto spare แล้วเอาตัวเดิมเป็น spare) |
-| `d` | demote | ถอด mirror leg ออกจาก rpool แล้วเปลี่ยนเป็น spare — ใช้ลด redundancy ของ rpool เพื่อเพิ่ม spare |
-| `t` | toggle-dryrun | เปิด/ปิด dry-run mode — เมื่อ ON ทุก action ใน watch จะ print คำสั่งโดยไม่รันจริง |
-| `n` | new-pool | สร้าง pool ใหม่จาก disk ที่ไม่ได้ assign — เลือก disk, ชื่อ pool, raid type แล้ว `zpool create` |
-| `l` | locate | กระพริบ LED ที่ disk ตาม bay — พิมพ์ `enclosure:slot` แล้ว LED จะกระพริบ 5 วินาที |
-| `q` | quit | ออกจาก watch mode — print `bye` แล้วคืน shell |
+| Hotkey | ทำอะไร | mutating? |
+| ------ | ------ | :--: |
+| `r` | refresh — scan ใหม่ + reprint ตาราง/pool/summary | no |
+| `a` | assign — เปิดเมนูจัดการ disk ที่ยัง unassigned (`[CONFIG]`) | yes |
+| `o` | offload — ถอด disk/spare ออกจาก pool | yes |
+| `s` | swap — ย้าย member ที่ใช้อยู่ไปลง spare (resilver) แล้ว **ตัวเดิมกลายเป็น spare** | yes |
+| `d` | demote — ถอด mirror leg ของ rpool มาเป็น spare (guard กัน break redundancy) | yes |
+| `t` | toggle-dryrun — เปิด/ปิด preview mode (ดู Scenario 3) | no |
+| `n` | new-pool — สร้าง pool ใหม่จาก disk ว่าง | yes |
+| `l` | locate — กระพริบ LED หา disk (ดู Scenario 5) | no |
+| `q` | quit — ออก, print `bye` | no |
+
+### `r` — refresh
+
+พิมพ์ `r` → Enter → reprint ตาราง + Pools + summary ใหม่ (เหมือน `b2ctl status`). ใช้ตอน disk เพิ่งเสียบหรือ pool health ยังไม่อัพเดต
+
+### `s` — swap (ย้าย member ไป spare)
+
+```
+b2ctl> s
+    [1] (1:0) ... in rpool
+    [3] (1:4) Samsung SSD 870 EVO 1TB (S74ZNS0W582283V) in tank
+    [6] (1:7) Samsung SSD 870 EVO 1TB (S74ZNS0W582288W) in tank
+  swap which #> 3
+  swap (1:4) ... onto spare (1:7) ...? [y/N]> y
+  ✔ swap started — resilvering onto spare
+  ✔ resilver completed 100%
+  ✔ detached old disk /dev/sdb
+  ✔ (1:4) Samsung SSD 870 EVO 1TB (S74ZNS0W582283V) is now a hot spare in 'tank'
+```
+
+**แปลว่า:** 1:7 (spare) เข้าไปแทน 1:4 ใน raidz1, แล้ว **1:4 กลายเป็น hot spare ตัวใหม่**. **new-user ดู:** ตั้งใจให้ pool ไม่เสีย spare หลัง swap — เมนูจะแสดงเฉพาะ active member (ไม่โชว์ spare เป็นตัวเลือก)
+
+### `o` — offload (ถอด spare/disk ออก)
+
+```
+b2ctl> o
+    [4] bay 1:5 /dev/sdc in tank (vdev spares)
+  offload which #> 4
+  This disk is a hot spare. Remove (1:5) ... from 'tank'? [y/N]> y
+  ✔ removed from pool
+
+  Disk ... is free.
+  What do you want to do with it?
+    [1] Blink LED  [2] spare  [3] replace ... [6] wipe  [s] skip
+  action> s
+  skipped
+```
+
+**แปลว่า:** ถอด disk ออกจาก pool → กลายเป็น free → เด้งเมนู assign ต่อ (เลือก `s` = ปล่อยไว้ → disk ขึ้น `[CONFIG]` unassigned)
+
+### `d` — demote (mirror leg → spare) *[แสดงแบบ dry-run]*
+
+```
+b2ctl> d            # หรือ b2ctl --dry-run demote
+    [1] (1:0) SAMSUNG MZ7LH1T9HMLT-00003 (S4F2NY0M105699) in rpool
+    [2] (1:1) SAMSUNG MZ7LH1T9HMLT-00003 (S4F2NY0M105559) in rpool
+  demote which #> 1
+  demote (1:0) ... in 'rpool' to a hot spare? [y/N]> y
+  [DRY-RUN] would run: zpool detach rpool /dev/sdf3
+  [DRY-RUN] would run: zpool add -f rpool spare /dev/sdf3
+  ✔ demoted to spare
+```
+
+**แปลว่า:** demote = ถอด mirror leg ออก (`zpool detach`) แล้วเพิ่มกลับเป็น spare (`zpool add spare`). **new-user ดู:** มี guard — ถ้าถอดแล้วทำให้ vdev เหลือ leg เดียว (เสีย redundancy) จะ **refuse**. ใช้ได้เฉพาะ mirror (rpool); raidz member ทำไม่ได้
+
+### `t` `l` `q`
+
+- `t` toggle-dryrun → `[DRY-RUN MODE: ON]` (ดู Scenario 3)
+- `l` locate → กระพริบ LED (ดู Scenario 5)
+- `q` quit → `bye` แล้วคืน shell
+
+### `a` — assign · `n` — new-pool
+
+*(รอ capture output จริง — ดูหมายเหตุท้ายไฟล์)*
+
+- `a` assign → เปิดเมนูเดียวกับตอน NEW DISK DETECTED (`[1]`–`[6]` + `[s]`) สำหรับ disk ที่ unassigned (`[CONFIG]`)
+- `n` new-pool → เลือก disk ว่าง (space-separated #) → ใส่ชื่อ pool → ใส่ raid type (stripe/mirror/raidz1/raidz2) → confirm → `zpool create`

@@ -33,7 +33,8 @@ b2ctl check
 
 **เห็น output:**
 
-<details><summary>📋 ดูตัวอย่าง Output จริง</summary>
+<details>
+<summary>📋 ดูตัวอย่าง Output จริง</summary>
 
 ```
 [b2ctl environment check]
@@ -77,7 +78,8 @@ b2ctl update
 
 **เห็น output:**
 
-<details><summary>📋 ดูตัวอย่าง Output จริง</summary>
+<details>
+<summary>📋 ดูตัวอย่าง Output จริง</summary>
 
 ```
 [b2ctl update]
@@ -106,7 +108,8 @@ b2ctl config show
 
 **เห็น output:**
 
-<details><summary>📋 ดูตัวอย่าง Output จริง</summary>
+<details>
+<summary>📋 ดูตัวอย่าง Output จริง</summary>
 
 ```json
 {
@@ -137,7 +140,8 @@ b2ctl status
 
 **เห็น output:**
 
-<details><summary>📋 ดูตัวอย่าง Output จริง</summary>
+<details>
+<summary>📋 ดูตัวอย่าง Output จริง</summary>
 
 ```
 BAY   DEV  IF   MODEL                   SERIAL            POWER_ON       WEAR  END    WRITTEN           BAD  HEALTH  POOL           STATUS   LEVEL
@@ -172,7 +176,8 @@ b2ctl status --json | python3 -m json.tool
 
 **เห็น output:**
 
-<details><summary>📋 ดูตัวอย่าง Output จริง</summary>
+<details>
+<summary>📋 ดูตัวอย่าง Output จริง</summary>
 
 ```
 [
@@ -210,7 +215,8 @@ b2ctl --dry-run swap
 
 **เห็น output:**
 
-<details><summary>📋 ดูตัวอย่าง Output จริง</summary>
+<details>
+<summary>📋 ดูตัวอย่าง Output จริง</summary>
 
 ```
 [1] (1:0) Samsung SSD 860 PRO 1TB (S5G8NE0MA10474H) in rpool
@@ -243,7 +249,8 @@ b2ctl --dry-run replace
 
 **เห็น output:**
 
-<details><summary>📋 ดูตัวอย่าง Output จริง</summary>
+<details>
+<summary>📋 ดูตัวอย่าง Output จริง</summary>
 
 ```
 [DRY-RUN] would run: zpool replace tank /dev/disk/by-id/wwn-0x5002538f3351d0f6 /dev/disk/by-id/wwn-0x5002538f3354e3cb-part1
@@ -271,7 +278,8 @@ b2ctl watch
 
 **เห็น output:**
 
-<details><summary>📋 ดูตัวอย่าง Output จริง</summary>
+<details>
+<summary>📋 ดูตัวอย่าง Output จริง</summary>
 
 ```
 [r]efresh [a]ssign [o]ffload [s]wap [d]emote [t]oggle-dryrun [n]ew-pool [l]ocate [q]uit
@@ -299,7 +307,8 @@ b2ctl watch
 
 **เห็น output:**
 
-<details><summary>📋 ดูตัวอย่าง Output จริง</summary>
+<details>
+<summary>📋 ดูตัวอย่าง Output จริง</summary>
 
 ```
 ==================================================================================================================================================================================
@@ -330,7 +339,8 @@ b2ctl>
 
 **เห็น output:**
 
-<details><summary>📋 ดูตัวอย่าง Output จริง</summary>
+<details>
+<summary>📋 ดูตัวอย่าง Output จริง</summary>
 
 ```
 ■ disk removed: /dev/sdc
@@ -352,7 +362,8 @@ zpool status tank
 
 **เห็น output:**
 
-<details><summary>📋 ดูตัวอย่าง Output จริง</summary>
+<details>
+<summary>📋 ดูตัวอย่าง Output จริง</summary>
 
 ```
         spare-1                       DEGRADED
@@ -372,7 +383,8 @@ zpool status tank
 
 **เห็น output:**
 
-<details><summary>📋 ดูตัวอย่าง Output จริง</summary>
+<details>
+<summary>📋 ดูตัวอย่าง Output จริง</summary>
 
 ```
 ╔══ NEW DISK DETECTED: /dev/sdd ═══════════════════════
@@ -421,7 +433,8 @@ b2ctl watch
 
 **เห็น output:**
 
-<details><summary>📋 ดูตัวอย่าง Output จริง</summary>
+<details>
+<summary>📋 ดูตัวอย่าง Output จริง</summary>
 
 ```
   locate which (bay/serial/sdX)> 1:4
@@ -442,7 +455,8 @@ b2ctl locate 1:4 30
 
 **เห็น output:**
 
-<details><summary>📋 ดูตัวอย่าง Output จริง</summary>
+<details>
+<summary>📋 ดูตัวอย่าง Output จริง</summary>
 
 ```
 blinking /dev/sdb for 30s ... ✔ done (via dd)
@@ -469,7 +483,8 @@ b2ctl log --last 5
 
 **เห็น output:**
 
-<details><summary>📋 ดูตัวอย่าง Output จริง</summary>
+<details>
+<summary>📋 ดูตัวอย่าง Output จริง</summary>
 
 ```
 OP_ID                          OP       BAY  SERIAL           POOL  STATUS   STARTED
@@ -497,7 +512,8 @@ b2ctl rollback 20260622-160135-379472-replace
 
 **เห็น output:**
 
-<details><summary>📋 ดูตัวอย่าง Output จริง</summary>
+<details>
+<summary>📋 ดูตัวอย่าง Output จริง</summary>
 
 ```
 Op:       replace  (2026-06-22T16:01:35)

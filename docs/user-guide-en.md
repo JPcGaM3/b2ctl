@@ -121,7 +121,8 @@ Shows the table once, then watches continuously. Two things happen automatically
 
 After it starts you'll see:
 
-<details><summary>📋 View Watch Mode Screen</summary>
+<details>
+<summary>📋 View Watch Mode Screen</summary>
 
 ```
 ================================================================================
@@ -460,7 +461,8 @@ bye
 
 b2ctl detects it within ~2 seconds and shows a panel:
 
-<details><summary>📋 View New Disk Detection Panel</summary>
+<details>
+<summary>📋 View New Disk Detection Panel</summary>
 
 ```
 ╔══ NEW DISK DETECTED: /dev/sdg ══════════════════════════════════

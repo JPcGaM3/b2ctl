@@ -271,7 +271,8 @@ JSONL (one JSON object per line, append-only). Each entry written by
 
 Schema:
 
-<details><summary>📋 View ops.jsonl Schema</summary>
+<details>
+<summary>📋 View ops.jsonl Schema</summary>
 
 ```json
 {

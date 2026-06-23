@@ -42,8 +42,9 @@ def _status(args) -> int:
         print(json.dumps([vars(d) for d in disks], indent=2, default=str))
         return 0
     print(ui.render_table(disks))
-    print(ui.render_pools(zfs.list_pools()))
-    print(ui.render_details(disks))
+    pools = zfs.list_pools()
+    print(ui.render_pools(pools))
+    print(ui.render_details(disks, pools))
 
     if args.locate:
         risky = [d for d in disks if d.level in ("WARNING", "CRITICAL")]

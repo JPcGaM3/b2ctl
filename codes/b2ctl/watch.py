@@ -318,9 +318,10 @@ def _handle_removed(devs: set) -> None:
 # --------------------------------------------------------------------------- #
 def _cmd_refresh(tbw) -> None:
     disks = core.scan(tbw)
+    pools = zfs.list_pools()
     print("\n" + ui.render_table(disks))
-    print(ui.render_pools(zfs.list_pools()))
-    print(ui.render_details(disks))
+    print(ui.render_pools(pools))
+    print(ui.render_details(disks, pools))
 
 
 

@@ -96,10 +96,11 @@ def render_pools(pools: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def render_details(disks: list[Disk]) -> str:
+def render_details(disks: list[Disk], pools: list[dict] | None = None) -> str:
     out = []
     config = [d for d in disks if d.level == "CONFIG"]
     risky = [d for d in disks if d.level in ("WARNING", "CRITICAL")]
+    bad_pools = [p for p in (pools or []) if p.get("health") != "ONLINE"]
 
     if config:
         out.append(f"{C}===== disks needing config (unassigned) ====={N}")
@@ -118,8 +119,16 @@ def render_details(disks: list[Disk]) -> str:
             for r in d.reasons:
                 out.append(f"    - {r}")
 
-    if not config and not risky:
+    if bad_pools:
+        out.append(f"{R}===== pools needing attention ====={N}")
+        for p in bad_pools:
+            out.append(f"{R}- pool {p['name']}: {p['health']} "
+                       f"(not ONLINE — a member may be missing/resilvering){N}")
+
+    if not config and not risky and not bad_pools:
         out.append(f"{G}[OK] all disks healthy and assigned{N}")
+    elif not config and not risky and bad_pools:
+        out.append(f"{Y}[!] disks readable but a pool is not ONLINE — see above{N}")
     return "\n".join(out)
 
 

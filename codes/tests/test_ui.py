@@ -84,3 +84,23 @@ class TestUI:
         result = ui.render_details([d1, d2])
         assert "config" in result.lower() or "CONFIG" in result
         assert "attention" in result.lower()
+
+    def test_render_details_warns_when_pool_not_online(self):
+        # disks all NORMAL but pool DEGRADED (e.g. a member was pulled) — the
+        # summary must NOT claim everything is healthy.
+        d = _disk(level="NORMAL")
+        assess(d)
+        pools = [{"name": "tank", "size": "2.72T", "alloc": "1.71G",
+                  "free": "2.72T", "health": "DEGRADED", "frag": "0%", "cap": "0%"}]
+        result = ui.render_details([d], pools)
+        assert "all disks healthy" not in result
+        assert "not ONLINE" in result
+        assert "pools needing attention" in result
+
+    def test_render_details_ok_when_pools_online(self):
+        d = _disk(level="NORMAL")
+        assess(d)
+        pools = [{"name": "tank", "size": "2.72T", "alloc": "1.71G",
+                  "free": "2.72T", "health": "ONLINE", "frag": "0%", "cap": "0%"}]
+        result = ui.render_details([d], pools)
+        assert "all disks healthy" in result

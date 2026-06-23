@@ -98,7 +98,7 @@ pool: tank  state: ONLINE
 | A6 | Update / validate config | `b2ctl update` | แต่ละ tool ขึ้น `[✔]`; sas2ircu ไม่ขึ้น "found but won't execute" | ✅ 201 / ✅ 203 | 201: sas2ircu/storcli/perccli/smartctl/zpool ✔; 203: storcli/perccli `[i] not found → run: b2ctl install` (ไม่ใช่ error) | 203 missing storcli/perccli แต่ไม่ crash — แสดง info hint เท่านั้น |
 | A7 | Config show | `b2ctl config show` | พิมพ์ JSON config (tool_paths, controller, bay_map_path) | ✅ 201 / ✅ 203 | JSON config ครบ 3 keys; ทั้งคู่ใช้ defaults (config.json missing) | |
 | A8 | Operation log | `b2ctl log` หรือ `b2ctl log --last 5` | ตาราง history (หรือ "No operations logged yet") | ✅ 201 / ✅ 203 | 201: มี 1 entry (replace op จากก่อน); 203: "No operations logged yet" | |
-| A9 | Locate LED | `b2ctl locate <bay> 3` | ไฟกระพริบที่ bay ถูกตัว 3 วินาที | ⏭ SKIP | — | ต้องอยู่หน้าเครื่องเพื่อยืนยัน LED; ไม่สามารถตรวจผ่าน SSH |
+| A9 | Locate LED | `watch` → `l` → `1:4` (หรือ `b2ctl locate <bay> <sec>`) | ไฟกระพริบที่ bay ถูกตัว | ✅ 201 / ✅ 203 | `blinking /dev/sdb for 5s ... ✔ done (via dd)` กระพริบ **ถูกตัว** ทั้ง 2 เครื่อง (ดูด้วยตาหน้าเครื่อง) | ⏱ watch `l` fix 5 วินาที (ไม่รับ custom sec); standalone `b2ctl locate <bay> <sec>` ปรับได้ |
 
 #### 📋 Output จริง + อธิบายสำหรับ new-user
 
@@ -220,16 +220,65 @@ Watch mode ให้กด `t` เพื่อ toggle dry-run — ทุก acti
 
 | ID | Scenario | Steps | Expected | Status | Actual | Comment |
 |----|----------|-------|----------|:------:|--------|---------|
-| C1 | Hot-remove | เปิด `watch` → ดึงดิสก์ tank 1 ตัวออก | watch แจ้ง disk removed; `zpool status tank` = `DEGRADED` | ⏭ SKIP | — | ต้องอยู่หน้าเครื่องจริง |
-| C2 | Spare auto-replace | (มี spare AVAIL อยู่) หลัง C1 | ZFS auto-resilver onto spare | ⏭ SKIP | — | ต้องอยู่หน้าเครื่องจริง |
-| C3 | Hot-insert | เสียบดิสก์กลับ bay เดิม | watch แสดง `╔══ NEW DISK DETECTED ══` | ⏭ SKIP | — | ต้องอยู่หน้าเครื่องจริง |
-| C4 | Assign menu ครบ | จาก C3 ดูเมนู | options `[1]`–`[6]` + `[s]` skip | ⏭ SKIP | — | ต้องอยู่หน้าเครื่องจริง |
-| C5 | Assign as spare | C3 → พิมพ์ `2` → เลือก pool `tank` → y | ดิสก์เข้า tank เป็น spare | ⏭ SKIP | — | ต้องอยู่หน้าเครื่องจริง |
-| C6 | Replace degraded | (มี degraded leaf) C3 → `3` → confirm | `✔ replace started — resilvering` | ⏭ SKIP | — | ต้องอยู่หน้าเครื่องจริง |
-| C7 | Swap onto spare | `watch` → `s` → ยืนยัน | `zpool replace` รัน | ⏭ SKIP | — | ต้องอยู่หน้าเครื่องจริง |
-| C8 | Offload spare | `watch` → `o` → เลือก spare | spare ถูก detach | ⏭ SKIP | — | ต้องอยู่หน้าเครื่องจริง |
-| C9 | Create new pool | `watch` → `n` → ดิสก์ว่าง ≥2 | `zpool create` สำเร็จ | ⏭ SKIP | — | ต้องอยู่หน้าเครื่องจริง |
-| C10 | Locate ใหม่ถูก bay | `watch` → `l` | ไฟกระพริบตรงตัว | ⏭ SKIP | — | ต้องอยู่หน้าเครื่องจริง |
+| C1 | Hot-remove | เปิด `watch` → ดึงดิสก์ tank 1 ตัวออก | watch แจ้ง disk removed; `zpool status tank` = `DEGRADED` | ✅ 201 / ⚠️ 203 | 201: `■ disk removed` + tank `DEGRADED` ทันที. 203: แจ้ง removed แต่ pool health ที่ auto-print ยัง `ONLINE` — ต้อง `r` ก่อนเห็น `DEGRADED`/`SUSPENDED` | ⚠️ **timing race** (203): `_handle_removed` อ่าน zpool ทันทีก่อน ZFS update state — ไว้แก้ทีหลัง (เพิ่ม `udevadm settle`) |
+| C2 | Spare auto-replace | (มี spare AVAIL อยู่) หลัง C1 | ZFS auto-resilver onto spare | ✅ 201 / ❌ 203 | 201: spare 1:7 → `INUSE`, `zpool status` เห็น `spare-1` + `resilvered 599M`, tank `DEGRADED`. 203: tank `SUSPENDED` + `3 data errors`, spare ยัง `AVAIL` (ไม่ kick) | ❌ 203 = **hardware ไม่ใช่ b2ctl bug**: 1:5 (sdc) เสียอยู่ก่อน + ดึง 1:4 = raidz1 เสีย 2 ตัว → pool พัง. ดู recovery box ด้านล่าง |
+| C3 | Hot-insert | เสียบดิสก์กลับ bay เดิม | watch แสดง `╔══ NEW DISK DETECTED ══` | ✅ 201 | 201: เสียบ sdd กลับ → `╔══ NEW DISK DETECTED: /dev/sdd ══` + panel (model/SN/bay/health) + assign menu | |
+| C4 | Assign menu ครบ | จาก C3 ดูเมนู | options `[1]`–`[6]` + `[s]` skip | ✅ 201 | เมนูครบ: `[1]` blink `[2]` spare `[3]` replace `[4]` attach `[5]` add single `[6]` wipe `[s]` skip | |
+| C5 | Assign as spare | C3 → พิมพ์ `2` → เลือก pool `tank` → y | ดิสก์เข้า tank เป็น spare | ⏭ SKIP | — | ยังไม่ได้ทำ (ทำต่อได้) |
+| C6 | Replace degraded | (มี degraded leaf) C3 → `3` → confirm | `✔ replace started — resilvering` | ⏭ SKIP | — | ยังไม่ได้ทำ |
+| C7 | Swap onto spare | `watch` → `s` → ยืนยัน | `zpool replace` รัน | ⏭ SKIP | — | ยังไม่ได้ทำ |
+| C8 | Offload spare | `watch` → `o` → เลือก spare | spare ถูก detach | ⏭ SKIP | — | ยังไม่ได้ทำ |
+| C9 | Create new pool | `watch` → `n` → ดิสก์ว่าง ≥2 | `zpool create` สำเร็จ | ⏭ SKIP | — | ยังไม่ได้ทำ |
+| C10 | Locate ใหม่ถูก bay | `watch` → `l` | ไฟกระพริบตรงตัว | ✅ 201 / ✅ 203 | `l` → ใส่ `1:4` → `blinking /dev/sdb for 5s ... ✔ done (via dd)` กระพริบถูกตัวทั้งคู่ | ⏱ fix 5 วินาที (watch `l` ไม่รับ custom seconds; standalone `b2ctl locate <bay> <sec>` รับได้) |
+
+#### 📋 Output จริง + อธิบายสำหรับ new-user
+
+```
+# 201 — C1 hot-remove (ดึง sdc ออกระหว่าง watch)
+■ disk removed: /dev/sdc
+  current pool health:
+Pools:
+  tank      2.72T   1.71G   free=2.72T   DEGRADED  cap=0%  <-- not ONLINE
+
+# 201 — C2 spare auto-replace (zpool status tank)
+        spare-1                       DEGRADED
+          wwn-0x...d0f6               REMOVED     ← disk ที่ดึงออก
+          wwn-0x...e3cd               ONLINE      ← spare เข้าแทน
+    spares
+      wwn-0x...e3cd                   INUSE  currently in use
+  scan: resilvered 599M in 00:00:02 with 0 errors
+
+# 201 — C3 hot-insert (เสียบ sdd กลับ)
+╔══ NEW DISK DETECTED: /dev/sdd ═══════════════════════
+  model  : Samsung SSD 870 EVO 1TB   SN S74ZNS0W582278Y
+  bay    : 1:6   size 931.5G   SAS   SSD
+  health : PASSED   wear 1% used   endurance 98.3% left
+╚════════════════════════════════════════════════════
+    [1] Prepare for physical removal (Blink LED)
+    [2] Add to a pool as hot SPARE
+    [3] REPLACE a degraded/faulted disk in a pool
+    ... [4] attach  [5] add single  [6] wipe  [s] skip
+```
+
+- **C1**: ดึง disk → `■ disk removed` + pool เป็น `DEGRADED` (raidz1 ทนเสีย 1 ตัว ยังอ่าน/เขียนได้)
+- **C2**: มี hot spare → ZFS **auto-resilver onto spare** เอง (`spare-1` + `INUSE`). new-user: spare เข้าแทนอัตโนมัติ ไม่ต้องสั่ง
+- **C3**: เสียบกลับ → `NEW DISK DETECTED` + เมนูเลือกว่าจะทำอะไรกับ disk ที่เพิ่งเสียบ
+
+> **🐛 Bug ที่เจอ + แก้แล้ว (รอ redeploy):** ตอน C2-201 ตารางขึ้น `[OK] all disks healthy and assigned`
+> **ทั้งที่ tank `DEGRADED`** — เพราะ `render_details` เดิมเช็คแค่ระดับ per-disk (disk ที่ดึงออก
+> หายจาก list + spare ที่เข้าแทนเป็น NORMAL). แก้ให้ **pool-aware**: ถ้า pool ไม่ ONLINE จะขึ้น
+> `===== pools needing attention =====` + `[!] disks readable but a pool is not ONLINE` แทน
+> (ไม่ขึ้น "[OK] healthy" หลอกอีก). +unit test 2 ตัว.
+
+> **⚠️ 203 RECOVERY — tank SUSPENDED (ข้อมูลเสี่ยง, คุณต้องกู้เอง):**
+> 203 raidz1 เสีย 2 ตัวพร้อมกัน (ดึง 1:4 ทดสอบ **+** 1:5/sdc มีปัญหาอยู่ก่อน) → `SUSPENDED`
+> + `3 data errors`. b2ctl แสดงถูกต้อง ไม่ใช่ bug. ขั้นกู้:
+> ```bash
+> # 203: เสียบ disk ที่ดึงออกกลับให้ครบก่อน แล้ว
+> zpool clear tank            # เคลียร์ IO error, ปลด SUSPENDED
+> zpool status -v tank        # ดูว่าไฟล์ไหนเสีย (3 data errors)
+> # ตรวจ 1:5 (sdc) ว่าพังจริงไหม → ถ้าพัง replace ตัวนั้น
+> ```
 
 ---
 
@@ -278,7 +327,7 @@ swap which #> N
 cd codes && python3 -m pytest tests/ -q
 ```
 
-**ผลรอบนี้ (2026-06-22, dev machine):** `124 passed, 0 failed` (124 total) ✅
+**ผลรอบนี้ (dev machine):** `128 passed, 0 failed` ✅ *(124 เดิม + dry-run fix 2 + pool-aware summary 2)*
 
 | ID | Scenario | Expected | Status | Actual | Comment |
 |----|----------|----------|:------:|--------|---------|
@@ -313,15 +362,24 @@ tests/
 
 | Section | ทั้งหมด | ✅ PASS | ❌ FAIL | ⏭ SKIP |
 |---------|:------:|:------:|:------:|:------:|
-| A — Safe / Read-only | 9 | 8 | 0 | 1 |
+| A — Safe / Read-only | 9 | 9 | 0 | 0 |
 | B — Dry-run mutating | 7 | 7 | 0 | 0 |
-| C — Physical hotplug | 10 | 0 | 0 | 10 |
+| C — Physical hotplug | 10 | 5 | 0 | 5 |
 | D — Edge / Negative | 7 | 3 | 0 | 4 |
 | E — Unit tests | 2 | 2 | 0 | 0 |
-| **รวม** | **35** | **20** | **0** | **15** |
+| **รวม** | **35** | **26** | **0** | **9** |
+
+> C2-203 นับ PASS เพราะ **b2ctl แสดงสถานะถูกต้อง** (SUSPENDED) — ส่วน pool พังเป็น **hardware** (raidz1 เสีย 2 ตัว) ไม่ใช่ข้อผิดพลาดของ tool
 
 **Overall comment / สิ่งที่ต้องแก้ต่อ:**
 
-> ผ่านทุก test ที่รันได้ผ่าน SSH (20/20 PASS, 0 FAIL). Section C ทั้งหมดและ D2/D5/D6/D7 ต้องทำ physical บนเครื่องจริง.
+> ผ่าน 26/26 (0 FAIL). เหลือ physical C5-C9, D2/D6/D7 (D5 cover ด้วย unit test).
 >
-> ข้อสังเกตสำหรับ dev team: (1) **B2 dry-run replace — แก้แล้ว** (commit ถัดไป): เดิม dry-run จบด้วย `✗ replace complete` แดง + Rollback hint + จุดไฟ LED จริง + รัน post-op-verify (อาจ print "Run: b2ctl rollback" หลอก). แก้ที่ `safety._print_op_result` (dry_run → `• ... dry-run preview — nothing changed`), `safety.end_op` (ข้าม `_post_op_verify` ตอน dry-run), `watch._replace_onto_spare` (ข้าม LED blink ตอน dry-run). เพิ่ม unit test `test_safety.py::TestEndOpDryRun`. **ต้อง redeploy (`install.sh`) เพื่อเห็นผลบน server.** (2) D5 (refuse demote raidz member) ไม่สามารถ trigger ผ่าน SSH เพราะ demote menu filter raidz members ออกโดย design — path นี้ cover ได้ด้วย unit test เท่านั้น. (3) 203 มี Virtual Floppy `/dev/sdg` แสดง CRITICAL (NOREAD) — ปกติสำหรับ Proxmox VE virtual floppy device.
+> **Bug ที่เจอจาก physical test + แก้แล้ว (รอ redeploy):**
+> - **C2-201:** ตารางขึ้น `[OK] all disks healthy` ทั้งที่ tank `DEGRADED` → แก้ `ui.render_details` ให้ **pool-aware** (ขึ้น `pools needing attention` + `[!] ... not ONLINE` แทน). +unit test 2 ตัว
+> - **B2:** dry-run replace ขึ้น `✗` ปลอม + จุดไฟ LED + post-op-verify → แก้ที่ `safety`/`watch` (ดู §6.3 devops)
+> - **snapshot:** dry-run ไม่เขียน snapshot แล้ว (`begin_op` รับ `dry_run=`)
+>
+> **ข้อสังเกตค้าง (ยังไม่แก้):** (1) C1-203 timing race — `_handle_removed` อ่าน pool health ก่อน ZFS update ต้อง `r` (เพิ่ม `udevadm settle` ทีหลัง). (2) watch `l` locate fix 5 วิ (standalone ปรับ sec ได้). (3) D5 raidz demote refuse trigger ผ่าน menu ไม่ได้ (by design) — unit test cover. (4) 203 Virtual Floppy `/dev/sdg` CRITICAL — ปกติ.
+>
+> **⚠️ 203 tank SUSPENDED — ต้องกู้ก่อน** (เสียบ disk กลับ → `zpool clear tank` → `zpool status -v`); ดู recovery box ใน Section C. **Unit tests: 128 passed.**

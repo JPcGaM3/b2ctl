@@ -5,9 +5,9 @@ runs, how each output is parsed, the scan pipeline, the safety model, and the
 deltas from the RAID-mode build. Audience: whoever maintains or debugs b2ctl on
 the R620s.
 
-> 📌 Note: See also: [`b2ctl-walkthrough.md`](b2ctl-walkthrough.md) — step-by-step
+> 📌 Note: See also: [`walkthrough.md`](walkthrough.md) — step-by-step
 > "press X → see Y" walkthrough with real server outputs;
-> [`b2ctl-test-checklist.md`](b2ctl-test-checklist.md) — pass/fail test report.
+> [`test-checklist.md`](test-checklist.md) — pass/fail test report.
 
 ---
 

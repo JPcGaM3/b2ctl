@@ -1,7 +1,7 @@
 # b2ctl (IT-mode) — Reader Guide
 
 > 📖 อยากเห็นแบบ **กดอะไร → เห็นอะไร** ทีละขั้นพร้อม output จริง → ดู
-> [`b2ctl-walkthrough.md`](b2ctl-walkthrough.md) (step-by-step walkthrough)
+> [`walkthrough.md`](walkthrough.md) (step-by-step walkthrough)
 > 🧪 อยากลองทุก flow โดย **ไม่มี hardware** → simulation harness ที่ `codes/sim/` (ดู `codes/sim/README.md`)
 
 ---

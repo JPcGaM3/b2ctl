@@ -54,9 +54,14 @@ codes/
           __init__.py __main__.py
   ssd_spec.json        # SSD model -> rated TBW
   install.sh           # -> /opt/b2ctl + launcher /usr/local/sbin/b2ctl
-documents/
-  b2ctl-itmode-reader.md     # reader-facing guide
-  b2ctl-itmode-devops.md     # DevOps guide (every subprocess)
+  tests/               # one test file per module (test_<module>.py)
+  sim/                 # stdlib simulation harness (fake disk server)
+docs/                  # (repo root, sibling of codes/)
+  user-guide-en.md     # operator guide (EN)   [was b2ctl-itmode-reader.md]
+  user-guide-th.md     # operator guide (TH)   [was b2ctl-user-guide-th.md]
+  devops-guide.md      # DevOps guide, every subprocess [was b2ctl-itmode-devops.md]
+  walkthrough.md       # step-by-step walkthrough
+  test-checklist.md    # pass/fail test report
 ```
 Run on the box as root (no `sudo` on Proxmox): `b2ctl status`, `b2ctl watch`,
 `b2ctl locate <bay> on|off`, `b2ctl swap`, `b2ctl version`.

@@ -3,7 +3,7 @@
 > **Version:** `0.5.0-itmode` · **Build:** IT-mode / LSI SAS2308 (PERC H710 crossflashed) · Proxmox VE 9.2
 
 เอกสารนี้เป็น **walkthrough** สำหรับคนใช้งานจริง (user เปิดแล้วทำตามได้ทีละขั้น).
-ส่วน pass/fail test report อยู่ที่ [`b2ctl-test-checklist.md`](b2ctl-test-checklist.md).
+ส่วน pass/fail test report อยู่ที่ [`test-checklist.md`](test-checklist.md).
 
 ## สารบัญ
 

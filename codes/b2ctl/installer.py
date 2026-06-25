@@ -131,6 +131,25 @@ def install_perccli(archive: str) -> tuple[bool, str]:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def ensure_prereqs() -> None:
+    """Install apt prerequisites the tool binaries need.
+
+    - alien      : perccli ships only as an RPM; alien converts it to a .deb.
+    - libc6-i386 : sas2ircu is a 32-bit ELF and needs the i386 multiarch runtime.
+                   On amd64 Debian/Proxmox the i386 architecture must be
+                   registered (dpkg --add-architecture i386) and the cache
+                   refreshed before apt can even see libc6-i386 — do that first.
+    """
+    subprocess.run(["dpkg", "--add-architecture", "i386"],
+                   capture_output=True, check=False)
+    subprocess.run(["apt-get", "update", "-qq"],
+                   capture_output=True, check=False)
+    r = subprocess.run(["apt-get", "install", "-y", "alien", "libc6-i386"],
+                       capture_output=True, text=True, check=False)
+    if r.returncode != 0:
+        print(f"  [!] prereq install warning: {r.stderr.strip()[:160]}")
+
+
 def install_tools(tools: list[str] | None = None) -> None:
     """Download and install tools. tools=None means all missing ones."""
     _install_fn = {
@@ -138,6 +157,7 @@ def install_tools(tools: list[str] | None = None) -> None:
         "storcli":  install_storcli,
         "perccli":  install_perccli,
     }
+    ensure_prereqs()
     if tools is None:
         tools = [t for t in _install_fn if not tool_ok(t)]
         if not tools:

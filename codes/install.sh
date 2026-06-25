@@ -67,6 +67,9 @@ install_tools() {
 
     echo ""
     echo "=== Installing tool binaries ==="
+    # i386 multiarch must be registered before libc6-i386 (sas2ircu is 32-bit ELF)
+    dpkg --add-architecture i386 2>/dev/null || true
+    apt-get update -qq 2>/dev/null || true
     apt-get install -y alien unzip libc6-i386 smartmontools zfsutils-linux gdisk util-linux coreutils udev
 
     # ── sas2ircu ──────────────────────────────────────────────────────────────
@@ -155,6 +158,8 @@ EOF
 chmod +x "${LAUNCHER}"
 
 echo "[*] installing sas2ircu runtime dependency (32-bit ELF needs libc6-i386)"
+dpkg --add-architecture i386 >/dev/null 2>&1 || true
+apt-get update -qq >/dev/null 2>&1 || true
 apt-get install -y libc6-i386 >/dev/null 2>&1 || \
     echo "  [!] libc6-i386 install failed — sas2ircu will not execute"
 

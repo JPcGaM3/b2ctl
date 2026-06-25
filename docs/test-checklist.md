@@ -49,7 +49,7 @@
 
 > **0 FAIL.** SKIP 3 = C9 (create new pool — ยังไม่ทำ), D5 (raidz demote refuse — cover ด้วย unit test),
 > D6 (dirty disk — ต้องหา disk มี data เก่า). 203 กู้จาก SUSPENDED + redeploy → เทส C2/C5-C8/D2/D7 ซ้ำผ่าน.
-> Unit tests: **128 passed**.
+> Unit tests: **142 passed**.
 
 <a id="action-items"></a>
 
@@ -210,15 +210,15 @@ Log แสดง operation ที่เคยรันพร้อม timestamp,
 > ใช้ `--dry-run` → b2ctl **print คำสั่งที่จะรัน แต่ไม่ทำจริง**. รันผ่าน SSH ได้ ไม่ต้องดึงดิสก์.
 > เทียบ `zpool status tank` ก่อน-หลัง ต้อง **ไม่เปลี่ยน**.
 
-| ID | Scenario | Expected | Status | Actual | Comment |
-|----|----------|----------|:------:|--------|---------|
-| B1 | Swap (dry) — `b2ctl --dry-run swap` → เลือก → y | print `zpool replace ...` (dry-run), pool ไม่เปลี่ยน | ✅ 201 / ✅ 203 | แสดง `[DRY-RUN] would run: zpool replace tank ...` + `zpool detach ...` + `zpool add ... spare` | |
-| B2 | Replace (dry) — `b2ctl --dry-run replace` → เลือก → y | print `zpool replace -f tank ...` (dry-run), ไม่ resilver จริง | ✅ 201 / ✅ 203 | แสดง `[DRY-RUN] would run: zpool replace tank ...` ครบ; มี confirm box ก่อน; pool ไม่เปลี่ยน | **แก้แล้วใน source (รอ redeploy):** เดิม dry-run จบด้วย `✗ replace complete` (แดง) + Rollback hint + จุดไฟ LED จริง → เข้าใจผิดว่า fail. แก้เป็น `• replace dry-run preview — nothing changed` + ข้าม LED/post-op-verify |
-| B3 | Demote (dry) — `b2ctl --dry-run demote` → เลือก mirror leg → y | print `zpool detach ...` + `zpool add ... spare` (dry-run) | ✅ 201 / ✅ 203 | `[DRY-RUN] would run: zpool detach rpool ...` + `zpool add -f rpool spare ...` ครบ | เมนูแสดงเฉพาะ mirror-capable disks (rpool legs) — raidz members ถูก filter ออกโดย design |
-| B4 | Create pool (dry) — `b2ctl --dry-run create` → เลือกดิสก์ว่าง → y | print `zpool create -f -o ashift=12 ...` (dry-run) | ✅ 201 / ⏭ 203* | 201: `no available disks to create pool` (ทุกดิสก์ assigned) — ถูกต้อง; 203: มี `sdg` แต่เป็น Virtual Floppy | *203 disk ว่างเป็น USB Virtual Floppy (NOREAD) ไม่เหมาะสร้าง pool — skip full flow |
-| B5 | Offload (dry) — `b2ctl --dry-run offload` → เลือก → y | print คำสั่ง detach/replace (dry-run) ตาม vdev type | ✅ 201 / ✅ 203 | เลือก spare (1:7): `[DRY-RUN] would run: zpool remove tank ...` แล้วเสนอ assign menu (กด `s` skip) | |
-| B6 | Watch dry-run toggle — `b2ctl watch` → กด `t` | แสดง `[DRY-RUN MODE: ON]` | ✅ 201 / ✅ 203 | กด `t` → `[DRY-RUN MODE: ON]` ทันที; กด `q` → `bye` | |
-| B7 | Watch menu ครบ — `b2ctl watch` | เมนู `[r]efresh [a]ssign [o]ffload [s]wap [d]emote [t]oggle-dryrun [n]ew-pool [l]ocate [q]uit` | ✅ 201 / ✅ 203 | เมนูครบทุก option | |
+| ID  | Scenario                                                          | Expected                                                                                       |     Status     | Actual                                                                                                       | Comment                                                                                                                                                                                                                  |
+| --- | ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- | :------------: | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| B1  | Swap (dry) — `b2ctl --dry-run swap` → เลือก → y                   | print `zpool replace ...` (dry-run), pool ไม่เปลี่ยน                                           | ✅ 201 / ✅ 203  | แสดง `[DRY-RUN] would run: zpool replace tank ...` + `zpool detach ...` + `zpool add ... spare`              |                                                                                                                                                                                                                          |
+| B2  | Replace (dry) — `b2ctl --dry-run replace` → เลือก → y             | print `zpool replace -f tank ...` (dry-run), ไม่ resilver จริง                                 | ✅ 201 / ✅ 203  | แสดง `[DRY-RUN] would run: zpool replace tank ...` ครบ; มี confirm box ก่อน; pool ไม่เปลี่ยน                 | **แก้แล้วใน source (รอ redeploy):** เดิม dry-run จบด้วย `✗ replace complete` (แดง) + Rollback hint + จุดไฟ LED จริง → เข้าใจผิดว่า fail. แก้เป็น `• replace dry-run preview — nothing changed` + ข้าม LED/post-op-verify |
+| B3  | Demote (dry) — `b2ctl --dry-run demote` → เลือก mirror leg → y    | print `zpool detach ...` + `zpool add ... spare` (dry-run)                                     | ✅ 201 / ✅ 203  | `[DRY-RUN] would run: zpool detach rpool ...` + `zpool add -f rpool spare ...` ครบ                           | เมนูแสดงเฉพาะ mirror-capable disks (rpool legs) — raidz members ถูก filter ออกโดย design                                                                                                                                 |
+| B4  | Create pool (dry) — `b2ctl --dry-run create` → เลือกดิสก์ว่าง → y | print `zpool create -f -o ashift=12 ...` (dry-run)                                             | ✅ 201 / ⏭ 203* | 201: `no available disks to create pool` (ทุกดิสก์ assigned) — ถูกต้อง; 203: มี `sdg` แต่เป็น Virtual Floppy | *203 disk ว่างเป็น USB Virtual Floppy (NOREAD) ไม่เหมาะสร้าง pool — skip full flow                                                                                                                                       |
+| B5  | Offload (dry) — `b2ctl --dry-run offload` → เลือก → y             | print คำสั่ง detach/replace (dry-run) ตาม vdev type                                            | ✅ 201 / ✅ 203  | เลือก spare (1:7): `[DRY-RUN] would run: zpool remove tank ...` แล้วเสนอ assign menu (กด `s` skip)           |                                                                                                                                                                                                                          |
+| B6  | Watch dry-run toggle — `b2ctl watch` → กด `t`                     | แสดง `[DRY-RUN MODE: ON]`                                                                      | ✅ 201 / ✅ 203  | กด `t` → `[DRY-RUN MODE: ON]` ทันที; กด `q` → `bye`                                                          |                                                                                                                                                                                                                          |
+| B7  | Watch menu ครบ — `b2ctl watch`                                    | เมนู `[r]efresh [a]ssign [o]ffload [s]wap [d]emote [t]oggle-dryrun [n]ew-pool [l]ocate [q]uit` | ✅ 201 / ✅ 203  | เมนูครบทุก option                                                                                            |                                                                                                                                                                                                                          |
 
 <details>
 <summary>📋 ดูตัวอย่าง Output จริง (dry-run swap / watch toggle) + คำอธิบาย</summary>
@@ -417,12 +417,12 @@ swap which #&gt; N
 cd codes && python3 -m pytest tests/ -q
 ```
 
-**ผลรอบนี้ (dev machine):** `128 passed, 0 failed` ✅ *(124 เดิม + dry-run fix 2 + pool-aware summary 2)*
+**ผลรอบนี้ (dev machine):** `142 passed, 0 failed` ✅ *(128 เดิม + code-review fixes 14 เทสใหม่)*
 
 | ID | Scenario | Expected | Status | Actual | Comment |
 |----|----------|----------|:------:|--------|---------|
 | E1 | Test suite รันได้ | suite รันจบ ไม่ error การ import | ✅ | tests collected, รันจบ | OK |
-| E2 | Pass rate | tests ผ่านทั้งหมด | ✅ | **128 passed / 0 failed** | 9 เทสที่เคย fail แก้แล้ว (ดูด้านล่าง) |
+| E2 | Pass rate | tests ผ่านทั้งหมด | ✅ | **142 passed / 0 failed** | +14 เทสใหม่จาก code-review fixes (dry-run escape, resilver errors, spec lookup, audit ordering) |
 
 <details>
 <summary>📋 ดูโครงสร้าง test ใหม่ + รายละเอียด 9 เทสที่แก้</summary>

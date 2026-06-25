@@ -83,6 +83,32 @@ _RESILVER_PROGRESS = """\
     123M resilvered, 45.2% done, 00:03:21 to go
 """
 
+_RESILVER_DONE_WITH_ERRORS = """\
+  pool: tank
+ state: DEGRADED
+  scan: resilvered 500M in 00:00:05 with 1 errors on Mon Jun 16 10:00:00 2025
+"""
+
+# zpool status when a hot spare auto-activates (spare-N vdev, not replacing-N)
+_SPARE_N_STATUS = """\
+  pool: tank
+ state: DEGRADED
+config:
+
+\tNAME                                      STATE     READ WRITE CKSUM
+\ttank                                      DEGRADED     0     0     0
+\t  raidz1-0                               DEGRADED     0     0     0
+\t    /dev/disk/by-id/wwn-0xCCC            ONLINE       0     0     0
+\t    spare-1                              DEGRADED     0     0     0
+\t      /dev/disk/by-id/wwn-0xDDD         REMOVED      0     0     0
+\t      /dev/disk/by-id/wwn-0xFFF         ONLINE       0     0     0
+\t    /dev/disk/by-id/wwn-0xEEE            ONLINE       0     0     0
+\tspares
+\t    /dev/disk/by-id/wwn-0xFFF            INUSE currently in use
+
+errors: No known data errors
+"""
+
 
 # --------------------------------------------------------------------------- #
 # Sample `smartctl -a` outputs (for smart parsing)

@@ -26,3 +26,13 @@ class TestSpecLookup:
     def test_empty_model_returns_none(self):
         table = {"samsung ssd 870": 600}
         assert spec.lookup("", table) is None
+
+    def test_reverse_match_short_model_in_long_key(self):
+        # fix 4: lsblk may emit "Samsung SSD 870 EVO" without capacity suffix
+        # but spec key is "samsung ssd 870 evo 1tb" → m in k must catch it
+        table = {"samsung ssd 870 evo 1tb": 600}
+        assert spec.lookup("Samsung SSD 870 EVO", table) == 600
+
+    def test_reverse_match_does_not_false_positive(self):
+        table = {"samsung ssd 870 evo 1tb": 600}
+        assert spec.lookup("WD Red", table) is None

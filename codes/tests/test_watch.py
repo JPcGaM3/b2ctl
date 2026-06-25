@@ -52,7 +52,7 @@ class TestWatchOffloadGuard:
     @patch("b2ctl.watch.run_check", return_value=(True, ""))
     def test_replace_onto_spare_returns_true_on_success(self, _mrc, _mc, _mb, _me, mock_zfs, _ml):
         from b2ctl.watch import _replace_onto_spare
-        mock_zfs.poll_resilver_status.return_value = {"completed": True, "done": 100.0, "eta": ""}
+        mock_zfs.poll_resilver_status.return_value = {"completed": True, "done": 100.0, "eta": "", "has_errors": False}
         mock_zfs.topology.return_value = {}
         d = _disk()
         spare = _disk(dev="/dev/sdb", serial="SPARE1", vdev="spares",
@@ -118,7 +118,7 @@ class TestWatchSwap:
         mock_core.scan.return_value = [d, spare]
         mock_ask.return_value = "1"
         mock_zfs.swap_to_spare.return_value = (True, "")
-        mock_zfs.poll_resilver_status.return_value = {"completed": True, "done": 100.0, "eta": ""}
+        mock_zfs.poll_resilver_status.return_value = {"completed": True, "done": 100.0, "eta": "", "has_errors": False}
         mock_zfs.topology.return_value = {}
         mock_zfs.add_spare.return_value = (True, "")
         mock_ui.disk_label.return_value = "(1:7) Samsung SSD 870 (TEST)"
@@ -155,7 +155,7 @@ class TestWatchSwap:
                       pool_token="/dev/disk/by-id/wwn-spare")
         mock_core.scan.return_value = [member, spare]
         mock_zfs.swap_to_spare.return_value = (True, "")
-        mock_zfs.poll_resilver_status.return_value = {"completed": True, "done": 100.0, "eta": ""}
+        mock_zfs.poll_resilver_status.return_value = {"completed": True, "done": 100.0, "eta": "", "has_errors": False}
         mock_zfs.topology.return_value = {}
         mock_zfs.add_spare.return_value = (True, "")
         mock_ui.disk_label.side_effect = lambda d: f"({d.bay})"
@@ -477,6 +477,63 @@ class TestOpWrapping(unittest.TestCase):
         mock_end.assert_called_once()
         call_args = mock_end.call_args[0]
         self.assertEqual(call_args[0], "20260617-replace")
+
+
+class TestWatchDryRunPropagation(unittest.TestCase):
+    """fix 1: zfs.wipe() in _wipe_ghost must receive dry_run=_DRY_RUN."""
+
+    @patch("b2ctl.watch.zfs")
+    @patch("b2ctl.watch.hba")
+    @patch("b2ctl.watch.core")
+    @patch("b2ctl.watch._confirm", return_value=False)
+    def test_wipe_ghost_cancelled_does_not_call_wipe(self, _mc, mock_core,
+                                                      mock_hba, mock_zfs):
+        from b2ctl.watch import _wipe_ghost
+        d = _disk(serial="S1", bay="1:4")
+        mock_hba.find_sg_for_ghost.return_value = "/dev/sg0"
+        mock_zfs.wipe_sg.return_value = (True, "")
+        _wipe_ghost(d, {})
+        mock_zfs.wipe.assert_not_called()
+
+    @patch("b2ctl.watch.zfs")
+    @patch("b2ctl.watch.hba")
+    @patch("b2ctl.watch.core")
+    @patch("b2ctl.watch._confirm", return_value=True)
+    @patch("b2ctl.watch._wait_for_block_device", return_value="/dev/sda")
+    @patch("b2ctl.watch.core.scan_one")
+    @patch("b2ctl.watch._assign_free_disk")
+    def test_wipe_ghost_passes_dry_run_to_wipe(self, _mafd, _mscan, _mwbdev,
+                                                _mc, mock_core, mock_hba, mock_zfs):
+        import b2ctl.watch as watch_mod
+        from b2ctl.watch import _wipe_ghost
+        d = _disk(serial="S1", bay="1:4")
+        mock_hba.find_sg_for_ghost.return_value = "/dev/sg0"
+        mock_zfs.wipe_sg.return_value = (True, "")
+        mock_zfs.wipe.return_value = (True, "")
+        watch_mod._DRY_RUN = True
+        try:
+            _wipe_ghost(d, {})
+        finally:
+            watch_mod._DRY_RUN = False
+        mock_zfs.wipe.assert_called_once()
+        _, kwargs = mock_zfs.wipe.call_args
+        assert kwargs.get("dry_run") is True
+
+
+class TestWatchAuditOrdering(unittest.TestCase):
+    """fix 7: begin_op must not fire before _confirm_op in replace paths."""
+
+    def test_replace_onto_spare_cancelled_does_not_call_begin_op(self):
+        from b2ctl import watch, safety
+        d = _disk()
+        spare = _disk(dev="/dev/sdb", serial="SPARE1", vdev="spares",
+                      pool_token="/dev/disk/by-id/wwn-0xSPARE",
+                      by_id="/dev/disk/by-id/wwn-0xSPARE")
+        with patch.object(watch, "_confirm_op", return_value=False), \
+             patch.object(safety, "begin_op") as mock_begin:
+            result = watch._replace_onto_spare(d, spare)
+        assert result is False
+        mock_begin.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -57,5 +57,36 @@ class TestCliRollback(unittest.TestCase):
         self.assertIn("not reversible", output.lower())
 
 
+class TestCliRollbackPlaceholders(unittest.TestCase):
+    """fix 6: rollback hints with placeholder tokens must not be exec'd."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def test_rollback_placeholder_hint_prints_warning_not_execute(self):
+        import b2ctl.safety as safety
+        import b2ctl.cli as cli
+        safety.LOG_FILE = os.path.join(self.tmp, "ops.jsonl")
+        entry = {
+            "op_id": "20260617-replace", "op": "replace",
+            "disk_serial": "X", "disk_bay": 1, "pool": "tank",
+            "status": "ok", "started_at": "2026-06-17T10:00:00",
+            "dev_path": "/dev/disk/by-id/x", "vdev": "raidz1-0",
+            "cmds": [], "exit_code": 0, "stdout": "", "stderr": "",
+            "ended_at": None,
+            "rollback_hint": "zpool replace tank <new-disk> /dev/disk/by-id/x",
+            "snapshot_path": None,
+        }
+        with open(safety.LOG_FILE, "w") as f:
+            f.write(json.dumps(entry) + "\n")
+        with patch("sys.stdout", new_callable=io.StringIO) as mock_out, \
+             patch("builtins.input", return_value="y"), \
+             patch("b2ctl.safety.begin_op") as mock_begin:
+            cli._rollback_cmd("20260617-replace")
+            output = mock_out.getvalue()
+        assert "placeholder" in output.lower()
+        mock_begin.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

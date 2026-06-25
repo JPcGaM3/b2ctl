@@ -1,6 +1,7 @@
 # TASKS.md — b2ctl work queue
 
-> **STATUS (v0.2.1-itmode):** HOTFIX 1, 2, 3 are **DONE** (implemented & mock-tested;
+> **STATUS (v0.2.1-itmode):** HOTFIX 1, 2, 3 are **DONE**; code-review hotfix (10 findings) **IN PROGRESS**.
+> HOTFIX 1, 2, 3 original notes: (implemented & mock-tested;
 > docs updated). The live queue now starts at **FEATURE 1c**. The hotfix specs
 > below are kept as the record of what changed — verify them on hardware, then
 > proceed to the features.
@@ -10,6 +11,25 @@
 >   shows `pool/vdev-N` (e.g. `tank/raidz1-0`, `tank/spares`).
 > - `b2ctl locate <serial>` → exactly one bay's LED/activity blinks ~5s.
 > - If a bay number is still off, edit `bay_map.json` (reverse rule or explicit map).
+
+## CODE-REVIEW HOTFIX — 10 findings from branch code review [DONE]
+
+Spec: `prompts/FEATURE_code_review_fixes.md`
+
+| # | File | Severity | Finding |
+|---|------|----------|---------|
+| 1 | watch.py:270 | CRITICAL | wipe() missing dry_run=_DRY_RUN — real wipe in dry-run mode |
+| 2 | zfs.py:267 | HIGH | resilver errors treated as success (has_errors never checked by caller) |
+| 3 | watch.py:168+ | HIGH | end_op cancel/fail paths missing dry_run=_DRY_RUN |
+| 4 | spec.py:49 | HIGH | reverse match `m in k` removed — TBW lookup fails for short model strings |
+| 5 | watch.py:396 | MED | _replace_onto_spare missing -f flag |
+| 6 | cli.py:289 | MED | rollback hint placeholders exec'd as cmd args |
+| 7 | watch.py:166 | MED | begin_op before _confirm_op — audit entry on cancelled op |
+| 8 | zfs.py:196 | MED | spares_replacing() misses spare-N containers (hot spare auto-activate) |
+| 9 | config.py:125 | LOW | subprocess imported inline, bypasses run_check() convention |
+| 10 | watch.py | CLEANUP | resilver loop triplicated — extract _wait_resilver() helper |
+
+---
 
 Read `CLAUDE.md` first for full project context, conventions, and safety rules.
 Do the three **HOTFIXes** first (small, independent, fix observed bugs on real

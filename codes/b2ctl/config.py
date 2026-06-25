@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 
 CONFIG_PATH = "/etc/b2ctl/config.json"
 
@@ -122,11 +123,10 @@ def validate() -> list[tuple[str, str, str]]:
 
     # tool paths — test-run each binary (file-existence alone misses 32-bit
     # binaries that exist with +x but can't execute without libc6-i386)
-    import subprocess as _sp
     for name in ("sas2ircu", "storcli", "perccli", "smartctl", "zpool"):
         path = tool(name)
         try:
-            _sp.run([path], capture_output=True, timeout=5)
+            subprocess.run([path], capture_output=True, timeout=5)
             can_run = True
         except (FileNotFoundError, PermissionError, OSError):
             can_run = False

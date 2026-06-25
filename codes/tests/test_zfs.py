@@ -7,7 +7,8 @@ from unittest.mock import patch
 import pytest
 
 from helpers import (_disk, _MIRROR_STATUS, _RAIDZ_STATUS, _DEGRADED_STATUS,
-                     _RESILVER_DONE, _RESILVER_PROGRESS)
+                     _RESILVER_DONE, _RESILVER_PROGRESS, _RESILVER_DONE_WITH_ERRORS,
+                     _SPARE_N_STATUS)
 from b2ctl import zfs, watch, core
 from b2ctl.common import Disk
 
@@ -113,6 +114,36 @@ class TestZfsTopologyParsing:
         assert st["completed"] is False
         assert st["done"] == pytest.approx(45.2)
         assert "03:21" in st["eta"]
+
+    @patch("b2ctl.zfs.run")
+    def test_poll_resilver_has_errors_key_in_progress(self, mock_run):
+        # fix 2: has_errors must always be present (not just on completion)
+        mock_run.return_value = _RESILVER_PROGRESS
+        st = zfs.poll_resilver_status("tank")
+        assert "has_errors" in st
+        assert st["has_errors"] is False
+
+    @patch("b2ctl.zfs.run")
+    def test_poll_resilver_completed_no_errors(self, mock_run):
+        mock_run.return_value = _RESILVER_DONE
+        st = zfs.poll_resilver_status("tank")
+        assert st["completed"] is True
+        assert st["has_errors"] is False
+
+    @patch("b2ctl.zfs.run")
+    def test_poll_resilver_completed_with_errors(self, mock_run):
+        mock_run.return_value = _RESILVER_DONE_WITH_ERRORS
+        st = zfs.poll_resilver_status("tank")
+        assert st["completed"] is True
+        assert st["has_errors"] is True
+
+    @patch("b2ctl.zfs.run")
+    def test_spares_replacing_spare_n_container(self, mock_run):
+        # fix 8: hot spare auto-activates as spare-N vdev, not replacing-N
+        mock_run.return_value = _SPARE_N_STATUS
+        result = zfs.spares_replacing("tank")
+        assert "/dev/disk/by-id/wwn-0xFFF" in result
+        assert result["/dev/disk/by-id/wwn-0xFFF"] == "/dev/disk/by-id/wwn-0xDDD"
 
 
 # ========================================================================== #
@@ -342,7 +373,7 @@ class TestFeatureFixPoolToken(unittest.TestCase):
             mock_scan.return_value = [d, spare_disk]
             mock_run_check.return_value = (True, "")
             mock_detach.return_value = (True, "")
-            mock_poll.return_value = {"completed": True, "done": 100.0, "eta": ""}
+            mock_poll.return_value = {"completed": True, "done": 100.0, "eta": "", "has_errors": False}
             mock_topo.return_value = topo
 
             # mock sys.stdout.write and flush
@@ -350,7 +381,7 @@ class TestFeatureFixPoolToken(unittest.TestCase):
                 watch._cmd_replace(None)
 
             mock_run_check.assert_called_with(
-                ["zpool", "replace", "tank", "/dev/disk/by-id/wwn-0xABC-part1", "/dev/disk/by-id/wwn-SPARE"],
+                ["zpool", "replace", "-f", "tank", "/dev/disk/by-id/wwn-0xABC-part1", "/dev/disk/by-id/wwn-SPARE"],
                 dry_run=False
             )
 

@@ -287,6 +287,10 @@ def _rollback_cmd(op_id: str):
         return
     from .common import run_check
     cmd = hint.split()
+    if any(t.startswith("<") and t.endswith(">") for t in cmd):
+        print("  Rollback hint contains unresolved placeholders — resolve manually:")
+        print(f"     {hint}")
+        return
     rb_op_id = safety.begin_op(
         f"rollback-{entry.get('op')}", entry.get("disk_serial", ""),
         entry.get("disk_bay"), entry.get("dev_path", ""),

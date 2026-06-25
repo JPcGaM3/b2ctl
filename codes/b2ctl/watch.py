@@ -163,33 +163,19 @@ def _assign_free_disk(d, tbw, all_disks=None) -> None:
             print(f"       proxmox-boot-tool init   <new-ESP-partition>")
         vdev = tgt.get("vdev", "unknown")
         cmds = [["zpool", "replace", "-f", pool, tgt["token"], d.by_id or d.dev]]
-        op_id = safety.begin_op("replace", d.serial, d.bay, tgt["token"], pool, vdev, cmds, dry_run=_DRY_RUN)
         if not _confirm_op("replace", None, d, pool, vdev, cmds):
-            safety.end_op(op_id, False, "", "cancelled", 0)
             return
+        op_id = safety.begin_op("replace", d.serial, d.bay, tgt["token"], pool, vdev, cmds, dry_run=_DRY_RUN)
         ok, out = run_check(cmds[0], dry_run=_DRY_RUN)
         if not ok:
             print(R + f"  ✗ failed: {out}" + N)
-            safety.end_op(op_id, False, "", out, 1)
+            safety.end_op(op_id, False, "", out, 1, dry_run=_DRY_RUN)
             return
         print(G + "  ✔ replace started — resilvering" + N)
         if not _DRY_RUN:
-            while True:
-                time.sleep(2)
-                st = zfs.poll_resilver_status(pool)
-                if st["completed"]:
-                    sys.stdout.write(f"\r{G}  ✔ resilver completed{N}                    \n")
-                    break
-                sys.stdout.write(f"\r{Y}  resilvering... {st['done']}% done, ETA {st['eta']}{N}")
-                sys.stdout.flush()
+            _wait_resilver(pool)
         old_token = tgt["token"]
-        topo = zfs.topology()
-        if any(e["pool"] == pool and e["token"] == old_token for e in topo.values()):
-            ok_d, out_d = zfs.detach(pool, old_token, dry_run=_DRY_RUN)
-            if ok_d:
-                print(G + f"  ✔ detached old token {old_token}" + N)
-            else:
-                print(R + f"  ✗ detach failed: {out_d}" + N)
+        _detach_if_lingers(pool, old_token)
         avail = zfs.spares(pool)
         if avail:
             print(G + f"  ✔ spare restored to AVAIL: {', '.join(avail)}" + N)
@@ -267,7 +253,7 @@ def _wipe_ghost(d, tbw) -> None:
     print(G + f"\n  ✔ appeared as {sdx}" + N)
 
     print(f"  {C}[3/3]{N} Running full wipe on {sdx} ...")
-    ok2, out2 = zfs.wipe(sdx)
+    ok2, out2 = zfs.wipe(sdx, dry_run=_DRY_RUN)
     if ok2:
         print(G + f"  ✔ done — {sdx} is clean" + N)
     else:
@@ -391,38 +377,45 @@ def _cmd_locate(tbw) -> None:
 
 
 
+def _wait_resilver(pool: str) -> bool:
+    """Poll until resilver finishes. Returns True if completed with 0 errors."""
+    while True:
+        time.sleep(2)
+        st = zfs.poll_resilver_status(pool)
+        if st["completed"]:
+            if st.get("has_errors"):
+                sys.stdout.write(
+                    f"\r{R}  ✗ resilver completed WITH ERRORS — run: zpool status {pool}{N}\n")
+                return False
+            sys.stdout.write(f"\r{G}  ✔ resilver completed{N}                    \n")
+            return True
+        sys.stdout.write(f"\r{Y}  resilvering... {st['done']}% done, ETA {st['eta']}{N}")
+        sys.stdout.flush()
+
+
+def _detach_if_lingers(pool: str, old_token: str) -> None:
+    topo = zfs.topology()
+    if any(e["pool"] == pool and e["token"] == old_token for e in topo.values()):
+        ok_d, out_d = zfs.detach(pool, old_token, dry_run=_DRY_RUN)
+        print((G + f"  ✔ detached {old_token}" if ok_d
+               else R + f"  ✗ detach failed: {out_d}") + N)
+
+
 def _replace_onto_spare(d, spare) -> bool:
     pool = d.pool
-    cmds = [["zpool", "replace", pool, _pool_dev(d), spare.pool_token or spare.by_id]]
-    op_id = safety.begin_op("replace", d.serial, d.bay, _pool_dev(d), pool, d.vdev, cmds, dry_run=_DRY_RUN)
+    cmds = [["zpool", "replace", "-f", pool, _pool_dev(d), spare.pool_token or spare.by_id]]
     if not _confirm_op("replace", d, spare, pool, d.vdev, cmds):
-        safety.end_op(op_id, False, "", "cancelled", 0)
         return False
+    op_id = safety.begin_op("replace", d.serial, d.bay, _pool_dev(d), pool, d.vdev, cmds, dry_run=_DRY_RUN)
     ok, out = run_check(cmds[0], dry_run=_DRY_RUN)
     if not ok:
         print(R + f"  ✗ failed: {out}" + N)
-        safety.end_op(op_id, False, "", out, 1)
+        safety.end_op(op_id, False, "", out, 1, dry_run=_DRY_RUN)
         return False
     print(G + "  ✔ replace started — resilvering onto spare" + N)
     if not _DRY_RUN:
-        while True:
-            time.sleep(2)
-            st = zfs.poll_resilver_status(pool)
-            if st["completed"]:
-                sys.stdout.write(f"\r{G}  ✔ resilver completed 100%{N}                 \n")
-                break
-            sys.stdout.write(f"\r{Y}  resilvering... {st['done']}% done, ETA {st['eta']}{N}")
-            sys.stdout.flush()
-
-    topo = zfs.topology()
-    old_token = _pool_dev(d)
-    lingers = any(e["pool"] == pool and e["token"] == old_token for e in topo.values())
-    if lingers:
-        ok_d, out_d = zfs.detach(pool, old_token, dry_run=_DRY_RUN)
-        if ok_d:
-            print(G + f"  ✔ detached old disk {d.dev}" + N)
-        else:
-            print(R + f"  ✗ failed to detach old disk: {out_d}" + N)
+        _wait_resilver(pool)
+    _detach_if_lingers(pool, _pool_dev(d))
 
     if not _DRY_RUN:
         print(f"{Y}  please pull bay {d.bay or '?'} ... blinking LED{N}")
@@ -525,24 +518,8 @@ def _cmd_swap(tbw) -> None:
             return
         print(G + "  ✔ swap started — resilvering onto spare" + N)
         if not _DRY_RUN:
-            while True:
-                time.sleep(2)
-                st = zfs.poll_resilver_status(d.pool)
-                if st["completed"]:
-                    sys.stdout.write(f"\r{G}  ✔ resilver completed 100%{N}                 \n")
-                    break
-                sys.stdout.write(f"\r{Y}  resilvering... {st['done']}% done, ETA {st['eta']}{N}")
-                sys.stdout.flush()
-
-        topo = zfs.topology()
-        old_token = _pool_dev(d)
-        lingers = any(e["pool"] == d.pool and e["token"] == old_token for e in topo.values())
-        if lingers:
-            ok_d, out_d = zfs.detach(d.pool, old_token, dry_run=_DRY_RUN)
-            if ok_d:
-                print(G + f"  ✔ detached old disk {d.dev}" + N)
-            else:
-                print(R + f"  ✗ failed to detach old disk: {out_d}" + N)
+            _wait_resilver(d.pool)
+        _detach_if_lingers(d.pool, _pool_dev(d))
 
         ok_s, out_s = zfs.add_spare(d.pool, d.by_id or d.dev, dry_run=_DRY_RUN)
         if ok_s:

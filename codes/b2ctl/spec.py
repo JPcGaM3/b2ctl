@@ -46,6 +46,6 @@ def lookup(model: str, table: dict):
     if not m:
         return None
     for k, v in table.items():
-        if k and k in m:
+        if k and (k in m or m in k):
             return v
     return None

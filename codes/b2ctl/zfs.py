@@ -193,7 +193,7 @@ def spares_replacing(pool: str) -> dict[str, str]:
                 replacing_leaves = []
 
         mv = _VDEV_RE.match(line)
-        if mv and st.startswith("replacing"):
+        if mv and (st.startswith("replacing") or st.startswith("spare-")):
             in_replacing = True
             replacing_indent = indent
             replacing_leaves = []
@@ -263,7 +263,7 @@ def resilver_status(pool: str) -> str | None:
 
 def poll_resilver_status(pool: str) -> dict:
     out = run(["zpool", "status", pool])
-    res = {"done": 0.0, "eta": "", "completed": False}
+    res = {"done": 0.0, "eta": "", "completed": False, "has_errors": False}
     if "resilvered" in out and "to go" not in out:
         res["completed"] = True
         res["done"] = 100.0

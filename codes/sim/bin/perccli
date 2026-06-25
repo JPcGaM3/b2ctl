@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""Fake `storcli`/`perccli` (RAID-mode bay tool). Active only when mode=='raid'."""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _simstate as S  # noqa: E402
+
+
+def main():
+    argv = sys.argv[1:]
+    state = S.load()
+    if state.get("mode") != "raid":
+        return 1   # not RAID-mode → no controller (auto-detect skips RAID)
+
+    # storcli show ctrlcount
+    if argv[:2] == ["show", "ctrlcount"] or (argv and argv[-1] == "ctrlcount"):
+        print("Controller Count = 1")
+        return 0
+
+    # storcli /c0/eall/sall show all
+    if argv and argv[0].startswith("/c") and "show" in argv:
+        print("Drive Information :")
+        for d in state["disks"]:
+            if not d.get("present"):
+                continue
+            print(f"Drive /c0/e{d['enc']}/s{d['slot']} Device attributes :")
+            print("==================================")
+            print(f"SN = {d['serial']}")
+            print(f"Manufacturer Id = ATA")
+            print(f"Model Number = {d['model']}")
+            print("")
+        return 0
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

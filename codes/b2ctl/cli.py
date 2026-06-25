@@ -17,6 +17,7 @@ import sys
 
 from . import core, watch, zfs, spec, locate as locatemod
 from . import backend as _backend_mod, config as _cfg_mod
+from . import installer as _installer_mod
 from .common import need_root, run, R, Y, G, C, N
 from . import ui
 
@@ -41,8 +42,9 @@ def _status(args) -> int:
         print(json.dumps([vars(d) for d in disks], indent=2, default=str))
         return 0
     print(ui.render_table(disks))
-    print(ui.render_pools(zfs.list_pools()))
-    print(ui.render_details(disks))
+    pools = zfs.list_pools()
+    print(ui.render_pools(pools))
+    print(ui.render_details(disks, pools))
 
     if args.locate:
         risky = [d for d in disks if d.level in ("WARNING", "CRITICAL")]
@@ -136,7 +138,11 @@ def _check(_args) -> int:
         else:
             hint = ""
             if tname in ("sas2ircu",):
-                hint = " (needed for IT/HBA mode)"
+                _p = _cfg_mod.tool(tname)
+                if os.path.isfile(_p):
+                    hint = " (binary exists but won't execute — run: apt-get install -y libc6-i386)"
+                else:
+                    hint = " (needed for IT/HBA mode)"
             elif tname in ("storcli64", "storcli", "perccli64", "perccli"):
                 hint = " (needed for RAID mode)"
             print(f"  {fail_mark} {tname:<12} not found{hint}")
@@ -163,6 +169,58 @@ def _check(_args) -> int:
     return 0
 
 
+def _install(args) -> int:
+    """Download and install tool binaries from Google Drive."""
+    if os.geteuid() != 0:
+        print(f"{R}[-] b2ctl install requires root{N}")
+        return 1
+    tools = [args.tool] if getattr(args, "tool", None) else None
+    print()
+    print(f"{C}[b2ctl install]{N}")
+    _installer_mod.install_tools(tools)
+    print()
+    return 0
+
+
+def _update(args) -> int:
+    """Validate config and report tool/bay_map status."""
+    export = getattr(args, "export_bay_map", False)
+    if export and os.geteuid() != 0:
+        print(f"{R}[-] b2ctl update --export-bay-map requires root{N}")
+        return 1
+
+    print(f"\n{C}[b2ctl update]{N}")
+    results = _cfg_mod.validate()
+    _STATUS_COLOR = {"ok": G, "warn": Y, "error": R}
+    _STATUS_ICON  = {"ok": "[✔]", "warn": "[i]", "error": "[✗]"}
+    for field, status, msg in results:
+        color = _STATUS_COLOR.get(status, N)
+        icon  = _STATUS_ICON.get(status, "[?]")
+        print(f"  {color}{icon}{N} {field:<12} {msg}")
+
+    if export:
+        import shutil as _shutil
+        import json as _json
+        src = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "bay_map.json"))
+        dest = "/etc/b2ctl/bay_map.json"
+        os.makedirs("/etc/b2ctl", exist_ok=True)
+        _shutil.copy2(src, dest)
+        cfg_path = _cfg_mod.CONFIG_PATH
+        try:
+            with open(cfg_path) as f:
+                cfg = _json.load(f)
+        except (OSError, _json.JSONDecodeError):
+            cfg = _cfg_mod.load()
+        cfg["bay_map_path"] = dest
+        with open(cfg_path, "w") as f:
+            _json.dump(cfg, f, indent=2)
+        print(f"\n{G}[✔] bay_map exported to {dest}{N}")
+        print(f"    config updated: bay_map_path = \"{dest}\"")
+        print(f"    Edit {dest} freely — install.sh won't overwrite it.")
+    print()
+    return 0
+
+
 def _config_show(_args) -> int:
     print(_cfg_mod.as_json())
     return 0
@@ -183,10 +241,74 @@ def _config_init(_args) -> int:
     return 0
 
 
+def _log_cmd(args):
+    from . import safety
+    entries = safety.load_log(last=getattr(args, "last", 20))
+    if not entries:
+        print("No operations logged yet.")
+        return
+    print(f"\n{'OP_ID':<28} {'OP':<10} {'BAY':<4} {'SERIAL':<16} {'POOL':<8} {'STATUS':<7} {'STARTED'}")
+    print("─" * 100)
+    for e in entries:
+        status = e.get("status", "?")
+        color = G if status == "ok" else (R if status == "fail" else Y)
+        print(
+            f"{e.get('op_id',''):<28} "
+            f"{e.get('op',''):<10} "
+            f"{str(e.get('disk_bay','')):<4} "
+            f"{e.get('disk_serial',''):<16} "
+            f"{e.get('pool',''):<8} "
+            f"{color}{status:<7}{N} "
+            f"{e.get('started_at','')}"
+        )
+    print()
+
+
+def _rollback_cmd(op_id: str):
+    from . import safety
+    entry = safety.find_entry(op_id)
+    if entry is None:
+        print(f"Op not found: {op_id}")
+        return
+    hint = entry.get("rollback_hint")
+    if not hint:
+        snap = entry.get("snapshot_path", "")
+        print("Op not reversible.")
+        if snap:
+            print(f"  See snapshot: {snap}")
+        return
+    print(f"\nOp:       {entry.get('op')}  ({entry.get('started_at','')})")
+    print(f"Disk:     bay {entry.get('disk_bay')} | {entry.get('disk_serial')}")
+    print(f"Pool:     {entry.get('pool')}/{entry.get('vdev')}")
+    print(f"Rollback: {hint}\n")
+    ans = input("Execute rollback? [y/N]: ").strip().lower()
+    if ans not in ("y", "yes"):
+        print("Cancelled.")
+        return
+    from .common import run_check
+    cmd = hint.split()
+    if any(t.startswith("<") and t.endswith(">") for t in cmd):
+        print("  Rollback hint contains unresolved placeholders — resolve manually:")
+        print(f"     {hint}")
+        return
+    rb_op_id = safety.begin_op(
+        f"rollback-{entry.get('op')}", entry.get("disk_serial", ""),
+        entry.get("disk_bay"), entry.get("dev_path", ""),
+        entry.get("pool", ""), entry.get("vdev", ""), [cmd]
+    )
+    ok, out = run_check(cmd)
+    safety.end_op(rb_op_id, ok, out, "" if ok else out, 0 if ok else 1)
+    print(f"{'✓' if ok else '✗'} rollback {'complete' if ok else 'failed'}")
+    if not ok:
+        print(f"  {R}{out}{N}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="b2ctl",
                                 description="ZFS/HBA disk health & lifecycle "
                                             "(IT-mode, LSI SAS2308)")
+    p.add_argument("--dry-run", action="store_true", default=False,
+                   help="preview write commands without executing them")
     sub = p.add_subparsers(dest="cmd")
 
     st = sub.add_parser("status", help="health table + details")
@@ -238,15 +360,40 @@ def build_parser() -> argparse.ArgumentParser:
     cfg_init.set_defaults(func=_config_init)
     cfg_p.set_defaults(func=lambda a: (print(f"{Y}  usage: b2ctl config show|init{N}") or 0))
 
+    log_p = sub.add_parser("log", help="show operation history")
+    log_p.add_argument("--last", type=int, default=20,
+                       metavar="N", help="show last N entries (default 20)")
+    log_p.set_defaults(func=lambda a: _log_cmd(a))
+
+    rb_p = sub.add_parser("rollback", help="reverse a logged operation")
+    rb_p.add_argument("op_id", help="op_id from b2ctl log output")
+    rb_p.set_defaults(func=lambda a: _rollback_cmd(a.op_id))
+
+    # install
+    inst_p = sub.add_parser("install",
+                            help="download and install tool binaries (sas2ircu/storcli/perccli)")
+    inst_p.add_argument("--tool", choices=["sas2ircu", "storcli", "perccli"],
+                        metavar="TOOL", help="install only this tool (default: all missing)")
+    inst_p.set_defaults(func=_install)
+
+    # update
+    upd_p = sub.add_parser("update", help="validate config and report tool status")
+    upd_p.add_argument("--export-bay-map", action="store_true",
+                       help="copy bundled bay_map.json to /etc/b2ctl/ and update config")
+    upd_p.set_defaults(func=_update)
+
     return p
 
 
 def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if getattr(args, "dry_run", False):
+        from . import watch as _watch
+        _watch._DRY_RUN = True
     if not getattr(args, "cmd", None):
         args = parser.parse_args(["status"])
-    if args.cmd not in ("version", "check", "config"):
+    if args.cmd not in ("version", "check", "config", "log", "rollback", "install", "update"):
         need_root()
     return args.func(args)
 

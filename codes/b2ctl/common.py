@@ -48,8 +48,18 @@ def run(args, timeout: int = 30) -> str:
         return ""
 
 
-def run_check(args, timeout: int = 120):
+def run_check(args, timeout: int = 120, *, op_id=None, dry_run: bool = False):
     """Run a state-changing command; return (ok, combined_output)."""
+    # dry-run: suppress write cmds, pass read cmds through
+    if dry_run:
+        try:
+            from . import safety as _safety
+            is_write = bool(args) and args[0] in _safety.WRITE_CMDS
+        except ImportError:
+            is_write = False
+        if is_write:
+            print(f"[DRY-RUN] would run: {' '.join(str(a) for a in args)}")
+            return True, ""
     try:
         r = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                            text=True, timeout=timeout)
@@ -88,6 +98,7 @@ class Disk:
     vdev_state: str | None = None  # ONLINE / DEGRADED / FAULTED / AVAIL ...
     level: str = "NORMAL"
     reasons: list = field(default_factory=list)
+    spare_replacing: str | None = None
 
     @property
     def in_pool(self) -> bool:

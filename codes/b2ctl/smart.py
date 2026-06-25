@@ -68,7 +68,7 @@ def read(d: Disk, tbw_table: dict) -> None:
 def _parse_ata(d: Disk, out: str) -> None:
     d.iface = d.iface or "SATA"
     m = re.search(r"Device Model:\s*(.+)", out)
-    if m and not d.model:
+    if m:
         d.model = m.group(1).strip()
     m = re.search(r"Serial Number:\s*(.+)", out)
     if m and not d.serial:

@@ -53,6 +53,20 @@ def scan(tbw_table=None) -> list[Disk]:
              if not (d.health == "GHOST" and d.serial in real_serials)]
 
     zfs.attach_membership(disks, zfs.topology())
+
+    inuse_spare_pools = {d.pool for d in disks
+                         if d.is_spare and d.vdev_state == "INUSE" and d.pool}
+    if inuse_spare_pools:
+        for pool in inuse_spare_pools:
+            tok_to_bay = {d.pool_token: d.bay
+                          for d in disks if d.pool == pool and d.pool_token and d.bay}
+            replacing_map = zfs.spares_replacing(pool)
+            for d in disks:
+                if (d.pool == pool and d.is_spare and d.vdev_state == "INUSE"
+                        and d.pool_token in replacing_map):
+                    replaced_tok = replacing_map[d.pool_token]
+                    d.spare_replacing = tok_to_bay.get(replaced_tok)
+
     for d in disks:
         if d.health != "GHOST":
             assess(d)

@@ -1,8 +1,7 @@
 # CLAUDE.md — b2ctl (IT-mode) project handover
 
-> Save this file at the repo root (`~/scripts/b2ctl/codes/CLAUDE.md`). Claude
-> Code reads it automatically as project context. It can also be pasted as the
-> first message in a fresh Claude Code session.
+> Lives at the **repo root** (`CLAUDE.md`). Claude Code reads it automatically as
+> project context. It can also be pasted as the first message in a fresh session.
 
 You are continuing development of **b2ctl**, a Python CLI for monitoring and
 managing ZFS disks on Dell R620 servers. Phase 1 (health monitoring) and the
@@ -49,14 +48,22 @@ table + details layout.
 ## 3. Repo layout & deploy
 
 ```
+CLAUDE.md              # this file — project handover (repo root)
+TASKS.md               # work queue / status (HOTFIX/FEATURE items)
+prompts/               # FEATURE_<name>.md — detailed per-feature specs
 codes/
   b2ctl/  common.py spec.py hba.py smart.py zfs.py core.py ui.py watch.py cli.py
           __init__.py __main__.py
   ssd_spec.json        # SSD model -> rated TBW
   install.sh           # -> /opt/b2ctl + launcher /usr/local/sbin/b2ctl
-documents/
-  b2ctl-itmode-reader.md     # reader-facing guide
-  b2ctl-itmode-devops.md     # DevOps guide (every subprocess)
+  tests/               # one test file per module (test_<module>.py)
+  sim/                 # stdlib simulation harness (fake disk server)
+docs/
+  user-guide-en.md     # operator guide (EN)   [was b2ctl-itmode-reader.md]
+  user-guide-th.md     # operator guide (TH)   [was b2ctl-user-guide-th.md]
+  devops-guide.md      # DevOps guide, every subprocess [was b2ctl-itmode-devops.md]
+  walkthrough.md       # step-by-step walkthrough
+  test-checklist.md    # pass/fail test report
 ```
 Run on the box as root (no `sudo` on Proxmox): `b2ctl status`, `b2ctl watch`,
 `b2ctl locate <bay> on|off`, `b2ctl swap`, `b2ctl version`.
@@ -72,6 +79,10 @@ Run on the box as root (no `sudo` on Proxmox): `b2ctl status`, `b2ctl watch`,
 - **Documentation: two docs per deliverable** using the `engineering:documentation`
   skill — a reader-facing guide (easy) AND a DevOps guide (covers every
   sub-process). Architecture decisions get an ADR (`engineering:architecture`).
+- **Work tracking:** keep the root `TASKS.md` (work queue + status of HOTFIX/FEATURE
+  items) current, and write a detailed `prompts/FEATURE_<name>.md` spec (affected
+  files, architecture, signatures, test plan) per feature. Update both whenever
+  behaviour changes — `TASKS.md` = "what's next / done", `prompts/` = the blueprint.
 - Ask structured clarifying questions when intent is ambiguous; build
   incrementally and test before claiming done.
 
@@ -147,6 +158,19 @@ parsers and the membership-by-serial fallback. For Task B, mock a sequence of
 `zpool status` outputs that walk 0% → 50% → 100% → "resilvered ... with 0
 errors" and assert the bar/ETA/countdown and the detach+replenish steps fire in
 order. Run `python3 -m py_compile b2ctl/*.py` before finishing.
+
+Test layout: **one test file per source module** — `tests/test_<module>.py`
+(e.g. `test_zfs.py`, `test_watch.py`). Shared `_disk()` factory and sample
+command outputs live in `tests/helpers.py` (`tests/conftest.py` puts that on
+the path). Run the suite with `cd codes && python3 -m pytest tests/ -q`.
+
+Beyond unit tests there is a **stateful simulation harness at `codes/sim/`** —
+the "fake binaries on PATH" idea made stateful: run the *real* b2ctl against a
+fake 6-disk server (`state.json`) on a laptop, no hardware/SSH/root.
+`python3 sim/simctl init && python3 sim/run status`; change state with
+`sim/simctl pull|insert|dirty|mode|show`. Covers both backends (IT/RAID) and the
+whole lifecycle; sim audit/snapshots land in `sim/var/` (never `/var/log/b2ctl`).
+b2ctl itself is unmodified (sim = fake binaries + a launcher). See `sim/README.md`.
 
 ## 9. Safety rules (non-negotiable)
 

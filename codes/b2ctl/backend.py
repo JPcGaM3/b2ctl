@@ -137,9 +137,22 @@ def _detect_backend() -> Backend:
         return ITBackend()
     if mode == "raid":
         return RaidBackend()
+    import os as _os, shutil as _shutil, sys as _sys
     # auto-detect: try sas2ircu first
     sas = _cfg.tool("sas2ircu")
     if run([sas, "list"]):
+        return ITBackend()
+    # Binary exists but can't execute? (32-bit sas2ircu needs libc6-i386)
+    # Prefer IT-mode over RAID — crossflashed PERC H710 still responds to
+    # storcli's management plane even in IT/HBA mode, causing false RAID detection.
+    _sas_path = _shutil.which(sas) or sas
+    if _os.path.isfile(_sas_path):
+        print(
+            f"[!] sas2ircu found at {_sas_path} but failed to execute.\n"
+            f"    Fix: apt-get install -y libc6-i386\n"
+            f"    Forcing IT-mode — set controller.mode='it' in config to suppress.",
+            file=_sys.stderr,
+        )
         return ITBackend()
     # try storcli / perccli variants
     for tname in ("storcli64", "storcli", "perccli64", "perccli"):

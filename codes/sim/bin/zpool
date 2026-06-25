@@ -1,0 +1,268 @@
+#!/usr/bin/env python3
+"""Fake `zpool` for the b2ctl simulation harness.
+
+Reads/writes sim state.json. Supports the subset of zpool that b2ctl issues:
+list / status / replace / add / attach / detach / remove / create /
+labelclear / online / offline / version.
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _simstate as S  # noqa: E402
+
+
+def _present(state, name):
+    d = S.disk_by_name(state, name)
+    return bool(d and d.get("present"))
+
+
+def _vdev_label(pool):
+    return {"raidz1": "raidz1-0", "raidz2": "raidz2-0",
+            "mirror": "mirror-0", "stripe": None}.get(pool["type"])
+
+
+def _pool_health(state, pool):
+    removed = [m for m in pool["members"] if not _present(state, m)]
+    if len(removed) > S.parity_of(pool):
+        return "SUSPENDED"
+    if removed or pool.get("replacements"):
+        return "DEGRADED"
+    return "ONLINE"
+
+
+# --------------------------------------------------------------------------- #
+# list
+# --------------------------------------------------------------------------- #
+
+def cmd_list(args, state):
+    # b2ctl: zpool list -H -o name,size,alloc,free,health,frag,cap
+    if "-H" in args:
+        for p in state["pools"]:
+            health = _pool_health(state, p)
+            size = "952G" if p["name"] == "rpool" else "2.72T"
+            print("\t".join([p["name"], size, "1.71G", size, health, "0%", "0%"]))
+        return 0
+    # zpool list -v (snapshot) — minimal
+    print("NAME   SIZE  ALLOC  FREE  CKPOINT  EXPANDSZ  FRAG  CAP  DEDUP  HEALTH  ALTROOT")
+    for p in state["pools"]:
+        print(f"{p['name']}  2.72T  1.71G  2.72T  -  -  0%  0%  1.00x  {_pool_health(state, p)}  -")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# status
+# --------------------------------------------------------------------------- #
+
+def _render_status(state, pool):
+    health = _pool_health(state, pool)
+    lines = [f"  pool: {pool['name']}", f" state: {health}"]
+
+    # scan line (resilver progress / completion)
+    res = pool.get("resilver")
+    if res is not None:
+        pct = res.get("pct", 0)
+        if pct >= 100:
+            lines.append("  scan: resilvered 590M in 00:00:02 with 0 errors on Tue Jan  1 00:00:00 2030")
+        else:
+            lines.append("  scan: resilver in progress since Tue Jan  1 00:00:00 2030")
+            lines.append(f"\t590M scanned, {pct}.0% done, 00:00:02 to go")
+
+    lines += ["config:", "", "\tNAME                              STATE     READ WRITE CKSUM"]
+    lines.append(f"\t{pool['name']:<33} {health}")
+
+    repl = {r["removed"]: r["spare"] for r in pool.get("replacements", [])}
+    vlabel = _vdev_label(pool)
+    indent_member = "\t    " if vlabel else "\t  "
+    if vlabel:
+        vstate = "DEGRADED" if (health != "ONLINE") else "ONLINE"
+        lines.append(f"\t  {vlabel:<31} {vstate}")
+
+    snum = 1
+    for m in pool["members"]:
+        if m in repl:
+            sp = repl[m]
+            lines.append(f"{indent_member}spare-{snum:<26} DEGRADED")
+            lines.append(f"{indent_member}  /dev/{m:<22} REMOVED")
+            lines.append(f"{indent_member}  /dev/{sp:<22} ONLINE")
+            snum += 1
+        else:
+            st = "ONLINE" if _present(state, m) else "REMOVED"
+            lines.append(f"{indent_member}/dev/{m:<24} {st}")
+
+    if pool["spares"]:
+        lines.append("\tspares")
+        inuse = {r["spare"] for r in pool.get("replacements", [])}
+        for s in pool["spares"]:
+            st = "INUSE     currently in use" if s in inuse else "AVAIL"
+            lines.append(f"\t    /dev/{s:<24} {st}")
+
+    lines.append("")
+    lines.append("errors: No known data errors")
+    return "\n".join(lines)
+
+
+def cmd_status(args, state):
+    pos = [a for a in args if not a.startswith("-")]
+    targets = [pool for pool in state["pools"] if not pos or pool["name"] in pos]
+    bump = False
+    out = []
+    for p in targets:
+        out.append(_render_status(state, p))
+        # advance resilver one step per status read (simulates poll loop)
+        if p.get("resilver") is not None and p["resilver"].get("pct", 0) < 100:
+            p["resilver"]["pct"] = min(100, p["resilver"]["pct"] + 50)
+            bump = True
+    print("\n".join(out))
+    if bump:
+        S.save(state)
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# mutating
+# --------------------------------------------------------------------------- #
+
+def _strip_flags(args):
+    return [a for a in args if not a.startswith("-")]
+
+
+def cmd_replace(args, state):
+    a = _strip_flags(args)               # pool old new
+    if len(a) < 3:
+        return 1
+    pool = S.pool_of(state, a[0]) or next((p for p in state["pools"] if p["name"] == a[0]), None)
+    if not pool:
+        print("cannot open pool", file=sys.stderr); return 1
+    old = a[1].replace("/dev/", "")
+    new = a[2].replace("/dev/", "")
+    old = (S.disk_by_token(state, old) or {}).get("name", old)
+    new = (S.disk_by_token(state, new) or {}).get("name", new)
+    # finalize any replacement for old, swap member old->new
+    pool["replacements"] = [r for r in pool.get("replacements", []) if r["removed"] != old]
+    pool["members"] = [new if m == old else m for m in pool["members"]]
+    pool["spares"] = [s for s in pool["spares"] if s != new]
+    pool["resilver"] = {"pct": 0}
+    S.save(state)
+    return 0
+
+
+def cmd_add(args, state):
+    a = _strip_flags(args)               # pool [spare|mirror] devs...
+    pool = next((p for p in state["pools"] if p["name"] == a[0]), None)
+    if not pool:
+        return 1
+    if len(a) >= 2 and a[1] == "spare":
+        for dev in a[2:]:
+            name = dev.replace("/dev/", "")
+            name = (S.disk_by_token(state, name) or {}).get("name", name)
+            if name not in pool["spares"]:
+                pool["spares"].append(name)
+    elif len(a) >= 2 and a[1] == "mirror":
+        for dev in a[2:]:
+            name = dev.replace("/dev/", "")
+            if name not in pool["members"]:
+                pool["members"].append(name)
+    S.save(state)
+    return 0
+
+
+def cmd_attach(args, state):
+    a = _strip_flags(args)               # pool existing new
+    pool = next((p for p in state["pools"] if p["name"] == a[0]), None)
+    if not pool or len(a) < 3:
+        return 1
+    new = a[2].replace("/dev/", "")
+    if new not in pool["members"]:
+        pool["members"].append(new)
+    pool["resilver"] = {"pct": 0}
+    S.save(state)
+    return 0
+
+
+def cmd_detach(args, state):
+    a = _strip_flags(args)               # pool dev
+    pool = next((p for p in state["pools"] if p["name"] == a[0]), None)
+    if not pool or len(a) < 2:
+        return 1
+    dev = a[1].replace("/dev/", "")
+    dev = (S.disk_by_token(state, dev) or {}).get("name", dev)
+    # detaching a removed-old token finalizes the spare into the vdev
+    for r in list(pool.get("replacements", [])):
+        if r["removed"] == dev:
+            pool["members"] = [r["spare"] if m == dev else m for m in pool["members"]]
+            pool["spares"] = [s for s in pool["spares"] if s != r["spare"]]
+            pool["replacements"].remove(r)
+            S.save(state); return 0
+    pool["members"] = [m for m in pool["members"] if m != dev]
+    pool["spares"] = [s for s in pool["spares"] if s != dev]
+    S.save(state)
+    return 0
+
+
+def cmd_remove(args, state):
+    a = _strip_flags(args)               # pool dev  (offload spare)
+    pool = next((p for p in state["pools"] if p["name"] == a[0]), None)
+    if not pool or len(a) < 2:
+        return 1
+    dev = a[1].replace("/dev/", "")
+    dev = (S.disk_by_token(state, dev) or {}).get("name", dev)
+    pool["spares"] = [s for s in pool["spares"] if s != dev]
+    pool["members"] = [m for m in pool["members"] if m != dev]
+    S.save(state)
+    return 0
+
+
+def cmd_create(args, state):
+    a = _strip_flags(args)               # name [raidtype] devs...
+    if not a:
+        return 1
+    name = a[0]
+    rest = a[1:]
+    rtype = "stripe"
+    if rest and rest[0] in ("mirror", "raidz1", "raidz2"):
+        rtype = rest[0]; rest = rest[1:]
+    members = [(S.disk_by_token(state, d.replace("/dev/", "")) or {}).get("name", d.replace("/dev/", "")) for d in rest]
+    state["pools"].append({"name": name, "type": rtype, "members": members,
+                           "spares": [], "replacements": [], "resilver": None})
+    for m in members:
+        d = S.disk_by_name(state, m)
+        if d:
+            d["dirty"] = False
+    S.save(state)
+    return 0
+
+
+def cmd_labelclear(args, state):
+    a = _strip_flags(args)
+    if a:
+        d = S.disk_by_token(state, a[0].replace("/dev/", ""))
+        if d:
+            d["dirty"] = False
+            S.save(state)
+    return 0
+
+
+def main():
+    argv = sys.argv[1:]
+    if not argv:
+        return 1
+    sub, args = argv[0], argv[1:]
+    state = S.load()
+    table = {
+        "list": cmd_list, "status": cmd_status, "replace": cmd_replace,
+        "add": cmd_add, "attach": cmd_attach, "detach": cmd_detach,
+        "remove": cmd_remove, "create": cmd_create, "labelclear": cmd_labelclear,
+    }
+    if sub == "version":
+        print("zfs-2.4.2-sim"); return 0
+    if sub in ("online", "offline", "clear", "trim", "scrub"):
+        return 0
+    fn = table.get(sub)
+    if fn is None:
+        print(f"unrecognized command '{sub}'", file=sys.stderr); return 2
+    return fn(args, state)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

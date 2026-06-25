@@ -147,28 +147,81 @@ def spares(pool: str) -> list[str]:
             if "spare" in e["vdev"] and e["state"] == "AVAIL"]
 
 
+def spares_replacing(pool: str) -> dict[str, str]:
+    """Return {spare_token: replaced_token} for replacements where the replaced
+    leaf has a bad state (REMOVED/FAULTED/UNAVAIL/OFFLINE).
+
+    Parses replacing-N vdevs from zpool status. Returns {} if none in progress.
+    """
+    out = run(["zpool", "status", "-P", "-v", pool])
+    result: dict[str, str] = {}
+    in_cfg = False
+    in_replacing = False
+    replacing_indent = 0
+    replacing_leaves: list[tuple[str, str]] = []
+
+    for line in out.splitlines():
+        st = line.strip()
+        if not st:
+            continue
+        if st.startswith("config:"):
+            in_cfg = True
+            continue
+        if not in_cfg:
+            continue
+        if st.startswith("errors:"):
+            break
+
+        indent = len(line) - len(line.lstrip())
+
+        if in_replacing:
+            ml = _LEAF_RE.match(line)
+            if ml and indent > replacing_indent:
+                replacing_leaves.append((ml.group(1), ml.group(2)))
+                if len(replacing_leaves) == 2:
+                    (t0, s0), (t1, s1) = replacing_leaves
+                    _bad = {"REMOVED", "FAULTED", "UNAVAIL", "OFFLINE"}
+                    if s0 in _bad:
+                        result[t1] = t0
+                    elif s1 in _bad:
+                        result[t0] = t1
+                    in_replacing = False
+                    replacing_leaves = []
+                continue
+            if indent <= replacing_indent:
+                in_replacing = False
+                replacing_leaves = []
+
+        mv = _VDEV_RE.match(line)
+        if mv and (st.startswith("replacing") or st.startswith("spare-")):
+            in_replacing = True
+            replacing_indent = indent
+            replacing_leaves = []
+
+    return result
+
+
 # --------------------------------------------------------------------------- #
 # Actions (mutating) — return (ok, output)
 # --------------------------------------------------------------------------- #
-def add_spare(pool: str, dev: str):
-    return run_check(["zpool", "add", "-f", pool, "spare", dev])
+def add_spare(pool: str, dev: str, *, dry_run: bool = False):
+    return run_check(["zpool", "add", "-f", pool, "spare", dev], dry_run=dry_run)
 
 
-def add_mirror(pool: str, dev_a: str, dev_b: str):
-    return run_check(["zpool", "add", "-f", pool, "mirror", dev_a, dev_b])
+def add_mirror(pool: str, dev_a: str, dev_b: str, *, dry_run: bool = False):
+    return run_check(["zpool", "add", "-f", pool, "mirror", dev_a, dev_b], dry_run=dry_run)
 
 
-def attach(pool: str, existing: str, new: str):
-    return run_check(["zpool", "attach", "-f", pool, existing, new])
+def attach(pool: str, existing: str, new: str, *, dry_run: bool = False):
+    return run_check(["zpool", "attach", "-f", pool, existing, new], dry_run=dry_run)
 
 
-def replace(pool: str, old: str, new: str):
-    return run_check(["zpool", "replace", "-f", pool, old, new])
+def replace(pool: str, old: str, new: str, *, dry_run: bool = False):
+    return run_check(["zpool", "replace", "-f", pool, old, new], dry_run=dry_run)
 
 
-
-def detach(pool: str, dev: str):
-    return run_check(["zpool", "detach", pool, dev])
+def detach(pool: str, dev: str, *, dry_run: bool = False):
+    return run_check(["zpool", "detach", pool, dev], dry_run=dry_run)
 
 
 def can_detach(pool: str, dev_token: str) -> bool:
@@ -190,16 +243,16 @@ def can_detach(pool: str, dev_token: str) -> bool:
     return True
 
 
-def demote_to_spare(pool: str, dev_token: str) -> tuple[bool, str]:
-    ok, out = detach(pool, dev_token)
+def demote_to_spare(pool: str, dev_token: str, *, dry_run: bool = False) -> tuple[bool, str]:
+    ok, out = detach(pool, dev_token, dry_run=dry_run)
     if not ok:
         return False, out
-    return add_spare(pool, dev_token)
+    return add_spare(pool, dev_token, dry_run=dry_run)
 
 
-def swap_to_spare(pool: str, member: str, spare: str):
+def swap_to_spare(pool: str, member: str, spare: str, *, dry_run: bool = False):
     """Proactively move a still-alive member onto an AVAIL spare."""
-    return run_check(["zpool", "replace", pool, member, spare])
+    return run_check(["zpool", "replace", pool, member, spare], dry_run=dry_run)
 
 
 def resilver_status(pool: str) -> str | None:
@@ -210,10 +263,11 @@ def resilver_status(pool: str) -> str | None:
 
 def poll_resilver_status(pool: str) -> dict:
     out = run(["zpool", "status", pool])
-    res = {"done": 0.0, "eta": "", "completed": False}
-    if "resilvered" in out and "with 0 errors" in out:
+    res = {"done": 0.0, "eta": "", "completed": False, "has_errors": False}
+    if "resilvered" in out and "to go" not in out:
         res["completed"] = True
         res["done"] = 100.0
+        res["has_errors"] = "with 0 errors" not in out
         return res
     m_done = re.search(r'(\d+\.\d+)%\s*done', out)
     if m_done:
@@ -224,12 +278,14 @@ def poll_resilver_status(pool: str) -> dict:
     return res
 
 
-def wipe_sg(sg_dev: str) -> tuple[bool, str]:
+def wipe_sg(sg_dev: str, *, dry_run: bool = False) -> tuple[bool, str]:
     """Zero first 40 MB of a SCSI generic device to erase RAID metadata.
 
     Uses subprocess directly (not run_check) so dd's status=progress output
     flows live to the terminal via stderr.
     """
+    if dry_run:
+        return True, f"dry-run: would zero 40 MB on {sg_dev}"
     r = subprocess.run(
         ["dd", "if=/dev/zero", f"of={sg_dev}", "bs=4M", "count=10",
          "conv=fsync", "status=progress"],
@@ -250,14 +306,14 @@ def wipe_sg(sg_dev: str) -> tuple[bool, str]:
     return True, "zeroed 40 MB, rescan triggered"
 
 
-def wipe(dev: str):
+def wipe(dev: str, *, dry_run: bool = False):
     """Make a disk blank for a fresh pool: clear ZFS label, signatures, GPT."""
-    run_check(["zpool", "labelclear", "-f", dev])
-    run_check(["wipefs", "-a", dev])
-    return run_check(["sgdisk", "--zap-all", dev])
+    run_check(["zpool", "labelclear", "-f", dev], dry_run=dry_run)
+    run_check(["wipefs", "-a", dev], dry_run=dry_run)
+    return run_check(["sgdisk", "--zap-all", dev], dry_run=dry_run)
 
 
-MIN_DISKS = {"stripe": 1, "mirror": 2, "raidz1": 2, "raidz2": 4}
+MIN_DISKS = {"stripe": 1, "mirror": 2, "raidz1": 3, "raidz2": 4}
 
 def has_zfs_label(dev: str) -> bool:
     """True if `dev` already carries a ZFS label / known signature."""
@@ -268,10 +324,10 @@ def has_zfs_label(dev: str) -> bool:
     return len(lines) > 0
 
 
-def create_pool(name: str, raid_type: str, devs: list[str]) -> tuple[bool, str]:
+def create_pool(name: str, raid_type: str, devs: list[str], *, dry_run: bool = False) -> tuple[bool, str]:
     cmd = ["zpool", "create", "-f", "-o", "ashift=12", "-O", "compression=lz4", "-O", "atime=off", "-O", "xattr=sa", "-o", "autotrim=on", name]
     if raid_type != "stripe":
         cmd.append(raid_type)
     cmd.extend(devs)
-    return run_check(cmd)
+    return run_check(cmd, dry_run=dry_run)
 

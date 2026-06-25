@@ -1,0 +1,30 @@
+#!/usr/bin/env python3
+"""Fake `lsblk` for the b2ctl sim — emits `-P` KEY="value" rows from state."""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _simstate as S  # noqa: E402
+
+
+def main():
+    argv = sys.argv[1:]
+    cols = "NAME"
+    if "-o" in argv:
+        cols = argv[argv.index("-o") + 1]
+    fields = [c.strip() for c in cols.split(",")]
+    state = S.load()
+    for d in state["disks"]:
+        if not d.get("present"):
+            continue
+        vals = {
+            "NAME": d["name"], "SIZE": str(d["size"]), "SERIAL": d["serial"],
+            "MODEL": d["model"], "TRAN": d["tran"], "ROTA": str(d["rota"]),
+            "TYPE": "disk",
+        }
+        print(" ".join(f'{f}="{vals.get(f, "")}"' for f in fields))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

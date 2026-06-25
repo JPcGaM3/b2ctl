@@ -34,11 +34,32 @@ def color_level(level: str) -> str:
     return LEVEL_COLOR.get(level, G) + f"{level:<8}" + N
 
 
+def _status_cell(d: Disk) -> str:
+    """Return 10-visible-char STATUS cell with ANSI color."""
+    if d.is_spare:
+        if d.vdev_state == "AVAIL":
+            return G + f"{'AVAIL':<10}" + N
+        if d.vdev_state == "INUSE":
+            tgt = f"→{d.spare_replacing}" if d.spare_replacing else ""
+            return Y + f"{('INUSE' + tgt)[:10]:<10}" + N
+        return f"{(d.vdev_state or ''):<10}"
+    if d.in_pool and d.vdev_state:
+        raw = f"{d.vdev_state[:10]:<10}"
+        if d.vdev_state == "ONLINE":
+            return G + raw + N
+        if d.vdev_state == "DEGRADED":
+            return Y + raw + N
+        if d.vdev_state in ("FAULTED", "REMOVED", "UNAVAIL", "OFFLINE"):
+            return R + raw + N
+        return raw
+    return f"{'':10}"
+
+
 def render_table(disks: list[Disk]) -> str:
     hdr = (f"{'BAY':<6}{'DEV':<10}{'IF':<5}{'MODEL':<24}{'SERIAL':<18}"
            f"{'POWER_ON':<14}{'WEAR(used)':<11}{'END(left)':<11}"
-           f"{'WRITTEN':<19}{'BAD':<6}{'HEALTH':<9}{'POOL':<17}{'LEVEL'}")
-    lines = ["=" * 168, hdr, "-" * 168]
+           f"{'WRITTEN':<19}{'BAD':<6}{'HEALTH':<9}{'POOL':<17}{'STATUS':<10}{'LEVEL'}")
+    lines = ["=" * 178, hdr, "-" * 178]
     for d in disks:
         wear_used = "N/A" if d.wear_val is None else f"{100 - d.wear_val}%"
         end_left = "N/A" if d.end_left is None else f"{d.end_left:.1f}%"
@@ -57,8 +78,8 @@ def render_table(disks: list[Disk]) -> str:
             f"{(d.iface or '?'):<5}{(d.model or '?')[:23]:<24}"
             f"{(d.serial or 'N/A')[:17]:<18}{fmt_poh(d.poh):<14}"
             f"{wear_used:<11}{end_left:<11}{written:<19}{d.realloc:<6}"
-            f"{d.health:<9}{pool[:16]:<17}{color_level(d.level)}")
-    lines.append("=" * 168)
+            f"{d.health:<9}{pool[:16]:<17}{_status_cell(d)}{color_level(d.level)}")
+    lines.append("=" * 178)
     return "\n".join(lines)
 
 
@@ -75,10 +96,11 @@ def render_pools(pools: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def render_details(disks: list[Disk]) -> str:
+def render_details(disks: list[Disk], pools: list[dict] | None = None) -> str:
     out = []
     config = [d for d in disks if d.level == "CONFIG"]
     risky = [d for d in disks if d.level in ("WARNING", "CRITICAL")]
+    bad_pools = [p for p in (pools or []) if p.get("health") != "ONLINE"]
 
     if config:
         out.append(f"{C}===== disks needing config (unassigned) ====={N}")
@@ -97,8 +119,16 @@ def render_details(disks: list[Disk]) -> str:
             for r in d.reasons:
                 out.append(f"    - {r}")
 
-    if not config and not risky:
+    if bad_pools:
+        out.append(f"{R}===== pools needing attention ====={N}")
+        for p in bad_pools:
+            out.append(f"{R}- pool {p['name']}: {p['health']} "
+                       f"(not ONLINE — a member may be missing/resilvering){N}")
+
+    if not config and not risky and not bad_pools:
         out.append(f"{G}[OK] all disks healthy and assigned{N}")
+    elif not config and not risky and bad_pools:
+        out.append(f"{Y}[!] disks readable but a pool is not ONLINE — see above{N}")
     return "\n".join(out)
 
 

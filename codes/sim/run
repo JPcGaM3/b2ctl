@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""Run real b2ctl against the simulation.
+
+Sets PATH to the fake binaries, points B2CTL_STATE at the sim state, and
+pretends to be root (the sim does not touch real devices). The b2ctl package
+itself is unmodified.
+
+  python3 sim/run status
+  python3 sim/run watch
+  python3 sim/run --dry-run swap
+"""
+import os
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))   # .../codes/sim
+CODES = os.path.dirname(HERE)                        # .../codes
+
+os.environ["PATH"] = os.path.join(HERE, "bin") + os.pathsep + os.environ.get("PATH", "")
+os.environ.setdefault("B2CTL_STATE", os.path.join(HERE, "state.json"))
+os.geteuid = lambda: 0   # sim runs as fake-root; no real devices are touched
+
+sys.path.insert(0, CODES)
+# sim uses an identity bay map (state slot == displayed bay); the bundled
+# bay_map.json applies a Dell slot-reversal that would confuse simctl.
+import json  # noqa: E402
+import b2ctl.config as _cfg  # noqa: E402
+_cfg.bay_map_path = lambda: os.path.join(HERE, "bay_map.json")
+
+# Select the backend straight from the sim's declared mode (it/raid) so
+# auto-detection (which would see the fake sas2ircu binary and force IT) is
+# bypassed — lets the sim exercise the RAID-mode path too.
+def _sim_mode():
+    try:
+        with open(os.environ["B2CTL_STATE"]) as f:
+            return json.load(f).get("mode", "auto")
+    except Exception:
+        return "auto"
+_cfg.controller_mode = _sim_mode
+
+# Keep the sim's audit trail + pre-op snapshots OUT of the real /var/log/b2ctl
+# — write them under sim/var/ instead. Makes sim self-contained (b2ctl log /
+# rollback work without root) and impossible to confuse with real-server ops.
+import b2ctl.safety as _safety  # noqa: E402
+_simvar = os.path.join(HERE, "var")
+_safety.LOG_DIR = _simvar
+_safety.SNAP_DIR = os.path.join(_simvar, "snapshots")
+_safety.LOG_FILE = os.path.join(_simvar, "ops.jsonl")
+
+from b2ctl.cli import main  # noqa: E402
+
+sys.exit(main(sys.argv[1:]))

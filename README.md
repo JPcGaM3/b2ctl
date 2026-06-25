@@ -1,559 +1,59 @@
-# b2ctl — คู่มือผู้ใช้ฉบับสมบูรณ์
+# b2ctl
 
----
+**IT-mode ZFS disk manager** for Dell R620 servers whose **PERC H710** is crossflashed
+to IT/HBA mode (LSI SAS9207-8i / SAS2308), running on Proxmox VE. Disks are raw — no RAID
+controller to query — so b2ctl reads each drive directly (SMART, `sas2ircu` bay mapping)
+and drives ZFS for everything else.
 
-## สารบัญ
+It shows a wide per-disk health table (bay, model, serial, power-on hours, wear, TBW
+endurance, bad sectors, SMART, pool/vdev, overall LEVEL) and performs the full disk
+lifecycle: replace / swap / offload / demote / create-pool, hot-plug detection, and LED
+locate — with a `--dry-run` preview mode, an audit trail, and rollback hints.
 
-1. [b2ctl คืออะไร?](#1-b2ctl-คืออะไร)
-2. [การติดตั้ง](#2-การติดตั้ง)
-3. [เริ่มต้นใช้งาน](#3-เริ่มต้นใช้งาน)
-4. [การอ่านตาราง](#4-การอ่านตาราง)
-5. [ฟีเจอร์ทั้งหมดในโหมด watch](#5-ฟีเจอร์ทั้งหมดในโหมด-watch)
-6. [สถานการณ์ที่พบบ่อย](#6-สถานการณ์ที่พบบ่อย)
-7. [ข้อควรระวัง](#7-ข้อควรระวัง)
-8. [สรุปคำสั่งลัด](#8-สรุปคำสั่งลัด)
+> 📌 Python **stdlib only** — no pip dependencies. Runs as root on Proxmox VE.
 
----
-
-## 1. b2ctl คืออะไร?
-
-**b2ctl** คือเครื่องมือสำหรับ **ดูแลดิสก์** บนเซิร์ฟเวอร์ Dell R620
-ที่ใช้การ์ด RAID (PERC H710) ถูกแปลงเป็นโหมด **IT/HBA** (By-pass
-RAID controller) แล้วใช้ **ZFS** เป็นระบบจัดการ pool แทน
-
-### สิ่งที่ b2ctl ทำได้:
-
-- **ดูสุขภาพดิสก์** — แสดงตารางรวมทุกดิสก์: รุ่น, ซีเรียล, ชั่วโมงใช้งาน, ความสึกหรอ, อายุการใช้งานที่เหลือ
-- **จัดการ ZFS pool** — เพิ่ม spare, สลับดิสก์, สร้าง pool ใหม่, ถอดดิสก์ออก
-- **ค้นหาดิสก์ตัวจริง** — กระพริบไฟ LED เพื่อบอกว่าดิสก์อยู่ช่องไหน
-- **ตรวจจับดิสก์อัตโนมัติ** — เสียบดิสก์ใหม่หรือถอดดิสก์ออก ระบบจะแจ้งเตือนทันที
-
-> 💡 **เปรียบเทียบง่ายๆ:** b2ctl เหมือน "หมอประจำตัว" ของดิสก์ในเครื่อง — มันตรวจสุขภาพ,
-> แนะนำการรักษา (เปลี่ยนดิสก์, เพิ่ม spare) และช่วยทำให้เสร็จโดยไม่ต้องพิมพ์คำสั่ง
-> ZFS ยาวๆ เอง
-
----
-
-## 2. การติดตั้ง
-
-### ขั้นตอน:
+## 🚀 Quick install
 
 ```bash
 cd codes
-sudo ./install.sh
+sudo ./install.sh                 # installs to /opt/b2ctl + launcher /usr/local/sbin/b2ctl
+# or, on a fresh server, also fetch the HBA/RAID tool binaries:
+sudo ./install.sh --with-tools    # downloads + installs sas2ircu / storcli / perccli
 ```
 
-### สิ่งที่ต้องมีในเครื่องก่อน:
-
-| โปรแกรม                    | ทำหน้าที่             | ต้องมีไหม?                                   |
-| -------------------------- | --------------------- | -------------------------------------------- |
-| `smartctl` (smartmontools) | อ่านข้อมูลสุขภาพดิสก์ | ✅ need                                      |
-| `zpool` (zfsutils-linux)   | จัดการ ZFS pool       | ✅ need                                      |
-| `sas2ircu`                 | บอกหมายเลขช่อง (bay)  | 💡 optional (ไม่มีก็ได้ แต่จะไม่เห็นเลข bay) |
-
----
-
-## 3. เริ่มต้นใช้งาน
-
-b2ctl มี 2 วิธีใช้หลักๆ:
-
-### 3.1 ดูผลตรวจสุขภาพแบบเร็ว (Status)
+Then:
 
 ```bash
-sudo b2ctl status
+sudo b2ctl status        # one-shot health table
+sudo b2ctl watch         # interactive hotplug-aware loop
+sudo b2ctl check         # verify tools + backend
 ```
 
-ระบบจะแสดงตารางดิสก์ทั้งหมดครั้งเดียวแล้วจบ เหมาะสำหรับแวะดูเร็วๆ ว่า "ทุกอย่างโอเคไหม?"
+## 📚 Documentation
 
-**ตัวเลือกเพิ่มเติม:**
+| Doc | สำหรับใคร |
+|-----|-----------|
+| 📖 [**User Guide (EN)**](docs/user-guide-en.md) | Full manual for operators — runbooks, table reference, watch features, safety |
+| 🇹🇭 [**คู่มือการใช้งาน (TH)**](docs/user-guide-th.md) | คู่มือผู้ใช้ฉบับสมบูรณ์ภาษาไทย — runbook หน้างาน + cheat sheet |
+| 🛠️ [**DevOps & Architecture Guide**](docs/devops-guide.md) | Internals: every subprocess, scan pipeline, safety model, backend detection |
+| 👣 [**Step-by-step Walkthrough**](docs/walkthrough.md) | "press X → see Y → what it means", with real server output |
+| ✅ [**Test Checklist / Report**](docs/test-checklist.md) | Pass/fail test report across all scenarios |
 
-| คำสั่ง                       | ทำอะไร                                      |
-| ---------------------------- | ------------------------------------------- |
-| `sudo b2ctl status --locate` | กระพริบไฟ LED บนดิสก์ที่มีปัญหา (~5 วินาที) |
-| `sudo b2ctl status --json`   | แสดงผลเป็น JSON                             |
+## 🧪 Try it without hardware
 
-### 3.2 โหมดเฝ้าดู (Watch)
+A stdlib **simulation harness** lets you run the real b2ctl against a fake 6-disk server
+(both IT and RAID backends) on a laptop — no hardware, SSH, or root:
 
 ```bash
-sudo b2ctl watch
+cd codes
+python3 sim/simctl init && python3 sim/run status
 ```
 
-นี่คือโหมดหลัก — เปิดทิ้งไว้แล้วจะ:
+See [`codes/sim/README.md`](codes/sim/README.md).
 
-- แสดงตารางสุขภาพดิสก์
-- **เฝ้าดูตลอดเวลา** — ถ้าเสียบดิสก์ใหม่หรือถอดดิสก์ออก ระบบจะแจ้งเตือนทันที
-- ให้คุณพิมพ์คำสั่งจัดการดิสก์ได้ตลอด
-
-หลังจากเปิดจะเห็นหน้าจอแบบนี้:
+## Repository layout
 
 ```
-========================================================================================================
-BAY   DEV       IF   MODEL                   SERIAL            POWER_ON      WEAR(used) END(left)  ...
---------------------------------------------------------------------------------------------------------
-1:0   sdf       SAS  Samsung SSD 860         S5G8NE0MXXXXXXX   51020h(~5.8y) 1%         99.2%      ...
-1:1   sda       SAS  Samsung SSD 860         S5G8NE0MXXXXXXX   51021h(~5.8y) 1%         99.1%      ...
-1:4   sdb       SAS  Samsung SSD 870         S74ZNS0WXXXXXXX   18238h(~2.1y) 1%         98.4%      ...
-1:5   sdc       SAS  Samsung SSD 870         S74ZNS0WXXXXXXX   18243h(~2.1y) 1%         98.4%      ...
-1:6   sdd       SAS  Samsung SSD 870         S74ZNS0WXXXXXXX   18246h(~2.1y) 1%         98.4%      ...
-1:7   sde       SAS  Samsung SSD 870         S74ZNS0WXXXXXXX   18247h(~2.1y) 1%         99.8%      ...
-========================================================================================================
-Pools:
-  rpool     952G    4.83G   free=947G    ONLINE    cap=0%
-  tank      2.72T   1.72G   free=2.72T   ONLINE    cap=0%
-[OK] all disks healthy and assigned
-
-[r]efresh  [a]ssign  [o]ffload  [s]wap  [d]emote  [n]ew-pool  [l]ocate  [q]uit   (or hot-plug)
-b2ctl>
+codes/        b2ctl Python package + install.sh + tests/ + sim/
+docs/         user/devops guides, walkthrough, test checklist
 ```
-
-จากนั้นพิมพ์ตัวอักษรเดียวเพื่อทำงาน (ดูรายละเอียดในหัวข้อ 5)
-
----
-
-## 4. การอ่านตาราง
-
-แต่ละคอลัมน์ในตารางหมายถึง:
-
-| คอลัมน์        | ความหมาย                                    | ตัวอย่าง                           |
-| -------------- | ------------------------------------------- | ---------------------------------- |
-| **BAY**        | หมายเลขช่องดิสก์ (enclosure:slot)           | `1:4` = ตู้ 1 ช่อง 4               |
-| **DEV**        | ชื่อ device ใน Linux                        | `sda`, `sdb`, `sdc`                |
-| **IF**         | ชนิดการเชื่อมต่อ                            | `SAS`, `SATA`, `NVMe`              |
-| **MODEL**      | รุ่นดิสก์                                   | `Samsung SSD 870`                  |
-| **SERIAL**     | หมายเลขซีเรียล (เฉพาะตัว)                   | `S74ZNS0WXXXXXXX`                  |
-| **POWER_ON**   | จำนวนชั่วโมงที่เปิดใช้งาน                   | `18238h(~2.1y)`                    |
-| **WEAR(used)** | ดิสก์สึกหรอไปกี่ % (ยิ่งน้อยยิ่งดี)         | `1%`                               |
-| **END(left)**  | อายุการใช้งานที่เหลือ (คำนวณจาก TBW)        | `98.4%`                            |
-| **WRITTEN**    | เขียนข้อมูลไปแล้วเท่าไร / ต่อ TBW ที่รับรอง | `9.87TB/600TBW`                    |
-| **BAD**        | จำนวน bad sectors                           | `0` = ปกติ, `มากกว่า 0` = อันตราย! |
-| **HEALTH**     | ผลตรวจ SMART                                | `PASSED`, `FAILED`                 |
-| **POOL**       | อยู่ใน pool / vdev ไหน                      | `tank/raidz1-0`, `rpool/mirror-0`  |
-| **LEVEL**      | ระดับสถานะรวม                               | ดูตารางด้านล่าง                    |
-
-### ความหมายของ LEVEL:
-
-| สี  | ระดับ        | ความหมาย                                                                                    |
-| --- | ------------ | ------------------------------------------------------------------------------------------- |
-| 🟢  | **NORMAL**   | ดิสก์แข็งแรง อยู่ในพูลเรียบร้อย — ไม่ต้องทำอะไร                                             |
-| 🔵  | **CONFIG**   | ดิสก์แข็งแรงแต่ **ยังไม่ได้อยู่ในพูลไหนเลย** — ต้องตั้งค่า (เพิ่มเป็น spare หรือสร้าง pool) |
-| 🟡  | **WARNING**  | เริ่มมีปัญหา — อายุเหลือน้อย หรือ vdev สถานะ DEGRADED — ควรเตรียมเปลี่ยน                    |
-| 🔴  | **CRITICAL** | อันตราย! — SMART ไม่ผ่าน, มี bad sectors, หรืออายุเหลือน้อยมาก — ต้องดำเนินการทันที         |
-
----
-
-## 5. ฟีเจอร์ทั้งหมดในโหมด watch
-
-หลังจากเข้า `sudo b2ctl watch` คุณสามารถพิมพ์คำสั่งได้ที่ prompt `b2ctl>`:
-
----
-
-### 5.1 `r` — รีเฟรชตาราง (Refresh)
-
-**ใช้เมื่อ:** ต้องการดูข้อมูลล่าสุด
-
-```
-b2ctl> r
-```
-
-ระบบจะสแกนดิสก์ทั้งหมดใหม่และแสดงตารางอีกครั้ง กด `r` ได้เรื่อยๆ ตามต้องการ
-
----
-
-### 5.2 `a` — Assign (จัดสรรดิสก์ว่างเข้าพูล)
-
-**ใช้เมื่อ:** มีดิสก์ที่ยังไม่ได้อยู่ในพูลไหน (แสดงเป็น CONFIG) และต้องการจัดสรรมัน
-
-```
-b2ctl> a
-    [1] bay 1:7 /dev/sde (Samsung SSD 870, SN S74ZNS0WXXXXXXX)
-  assign which #>
-```
-
-พิมพ์หมายเลขของดิสก์ที่ต้องการ ระบบจะถามว่าจะทำอะไรกับมัน:
-
-```
-  Disk /dev/disk/by-id/wwn-0x5002538... is free.
-  What do you want to do with it?
-    [1] Prepare for physical removal (Blink LED)
-    [2] Add to a pool as hot SPARE
-    [3] REPLACE a degraded/faulted disk in a pool
-    [4] ATTACH to an existing disk (convert to/expand mirror)
-    [5] ADD single disk to a pool (expand capacity - WARNING: no redundancy)
-    [6] WIPE it blank (for a new pool)
-    [s] skip / decide later
-  action>
-```
-
-แต่ละตัวเลือกคือ:
-
-| ตัวเลือก                        | ทำอะไร                                 | ใช้เมื่อ                                        |
-| ------------------------------- | -------------------------------------- | ----------------------------------------------- |
-| **[1]** กระพริบ LED             | ไฟดิสก์จะกระพริบ ~5 วินาที             | ต้องการรู้ว่าดิสก์อยู่ช่องไหน ก่อนดึงออก        |
-| **[2]** เพิ่มเป็น SPARE         | เพิ่มเข้า pool เป็นดิสก์สำรอง          | เพิ่มดิสก์สำรองไว้ใน pool                       |
-| **[3]** REPLACE ดิสก์เสีย       | แทนที่ดิสก์ที่เสียในพูล                | มีดิสก์ FAULTED/DEGRADED ในพูล และต้องการแทนที่ |
-| **[4]** ATTACH เป็น mirror      | ต่อเข้ากับดิสก์ที่มีอยู่เป็นคู่ mirror | ต้องการเพิ่ม redundancy                         |
-| **[5]** ADD แบบไม่มี redundancy | เพิ่มเข้า pool เป็น vdev ตัวเดียว      | ⚠️ อันตราย — ดิสก์เสีย 1 ตัว = ข้อมูลหายหมด     |
-| **[6]** WIPE ล้างข้อมูล         | ลบทุกอย่างในดิสก์                      | ต้องการเริ่มต้นใหม่ / เตรียมสร้าง pool ใหม่     |
-| **[s]** ข้าม                    | ไม่ทำอะไรตอนนี้                        | ยังไม่ตัดสินใจ                                  |
-
-> **⚠️ สำคัญ** — ทุกตัวเลือกที่เปลี่ยนแปลงข้อมูลจะถาม `[y/N]` ยืนยันก่อนทำเสมอ
-
-#### ตัวอย่าง: เพิ่มดิสก์เป็น spare
-
-```
-  action> 2
-    [1] rpool (ONLINE)
-    [2] tank (ONLINE)
-  pool #> 2
-  add (1:7) Samsung SSD 870 (S74ZNS0WXXXXXXX) to 'tank' as spare? [y/N]> y
-  ✔ added as spare
-```
-
----
-
-### 5.3 `o` — Offload (ถอดดิสก์ออกจากพูล)
-
-**ใช้เมื่อ:** ต้องการเอาดิสก์ออกจาก pool เพื่อถอดออกทางกายภาพ
-
-```
-b2ctl> o
-    [1] bay 1:0 /dev/sdf in rpool (vdev mirror-0)
-    [2] bay 1:1 /dev/sda in rpool (vdev mirror-0)
-    [3] bay 1:4 /dev/sdb in tank (vdev raidz1-0)
-    [4] bay 1:5 /dev/sdc in tank (vdev raidz1-0)
-    [5] bay 1:6 /dev/sdd in tank (vdev raidz1-0)
-    [6] bay 1:7 /dev/sde in tank (vdev spares)
-  offload which #>
-```
-
-ระบบจะทำงานต่างกันขึ้นอยู่กับประเภทดิสก์:
-
-| ดิสก์เป็นอะไร     | ระบบทำอะไร                                        |
-| ----------------- | ------------------------------------------------- |
-| **Spare** (สำรอง) | ถอดออกจาก pool ทันที (ไม่ต้อง resilver)           |
-| **Mirror member** | ถอดออกจาก mirror ทันที (ถ้ามี leg อื่นที่ ONLINE) |
-| **RAIDZ member**  | ⚠️ ต้อง resilver ไปยัง spare ก่อน — ใช้เวลา       |
-
-#### ตัวอย่าง: ถอด spare ออก
-
-```
-  offload which #> 6
-  This disk is a hot spare. Remove (1:7) Samsung SSD 870 (S74ZNS0WXXXXXXX) from 'tank'? [y/N]> y
-  ✔ removed from pool
-```
-
-#### ตัวอย่าง: ถอดดิสก์จาก RAIDZ (ต้องใช้ spare)
-
-```
-  offload which #> 3
-  Replace (1:4) Samsung SSD 870 (S74ZNS0WXXXXXXX) onto spare (1:7) Samsung SSD 870 (S74ZNS0WXXXXXXX)? [y/N]> y
-  ✔ replace started — resilvering onto spare
-  resilvering... 45.2% done, ETA 00:03:21
-  ✔ resilver completed 100%
-  ✔ detached old disk /dev/sdb
-  please pull bay 1:4 ... blinking LED
-```
-
-> ⚠️ **สำคัญ:** ถ้ากด `N` (ปฏิเสธ) ระบบจะกลับเมนูหลักทันที — ดิสก์จะไม่ถูกถอดออก
-> ไม่ต้องกังวลเรื่องความปลอดภัย
-
----
-
-### 5.4 `s` — Swap (สลับดิสก์สึกหรอไปยัง spare)
-
-**ใช้เมื่อ:** ดิสก์เริ่มสึกหรอ (WEAR สูง, END เหลือน้อย) แต่ยังไม่เสีย — ต้องการสลับไปยัง
-spare ก่อนที่จะเสีย
-
-> 💡 **ความแตกต่างจาก offload:** swap = สลับที่กัน (ดิสก์เก่ากลายเป็น spare อัตโนมัติ,
-> ดิสก์ใหม่เข้าไปทำงานแทน) ส่วน offload = ถอดออกไปเลย
-
-```
-b2ctl> s
-    [1] (1:0) SAMSUNG MZ7LH1T9 (S4F2NY0XXXXXXX) in rpool
-    [2] (1:1) SAMSUNG MZ7LH1T9 (S4F2NY0XXXXXXX) in rpool
-    [3] (1:4) Samsung SSD 870 (S74ZNS0WXXXXXXX) in tank
-    [4] (1:5) Samsung SSD 870 (S74ZNS0WXXXXXXX) in tank
-    [5] (1:6) Samsung SSD 870 (S74ZNS0WXXXXXXX) in tank
-    [6] (1:7) Samsung SSD 870 (S74ZNS0WXXXXXXX) in tank
-  swap which #> 6
-  swap (1:7) Samsung SSD 870 (S74ZNS0WXXXXXXX) onto spare (1:4) Samsung SSD 870 (S74ZNS0W582283V)? [y/N]> y
-  ✔ swap started — resilvering onto spare
-  ✔ resilver completed 100%
-  ✔ detached old disk /dev/sde
-  ✔ (1:7) Samsung SSD 870 (S74ZNS0WXXXXXXX) is now a hot spare in 'tank'
-```
-
-**ผลลัพธ์:** ดิสก์ spare (1:4) เข้าไปทำงานแทนใน raidz1, ส่วนดิสก์เก่า (1:7) กลายเป็น
-spare อัตโนมัติ — **ไม่ต้องถอดดิสก์ออก ทั้งสองตัวยังอยู่ในเครื่อง**
-
----
-
-### 5.5 `d` — Demote (ลดดิสก์ mirror ลงเป็น spare)
-
-**ใช้เมื่อ:** มี mirror ที่มีมากกว่า 2 ขา (เช่น 3-way mirror) และต้องการถอด 1 ขาลงไปเป็น spare
-
-```
-b2ctl> d
-    [1] (1:0) SAMSUNG MZ7LH1T9 (S4F2NY0XXXXXXX) in rpool
-    [2] (1:1) SAMSUNG MZ7LH1T9 (S4F2NY0XXXXXXX) in rpool
-  demote which #> 2
-  demote (1:1) SAMSUNG MZ7LH1T9 (S4F2NY0XXXXXXX) in 'rpool' to a hot spare? [y/N]> y
-  ✔ demoted to spare
-```
-
-> ⚠️ ระบบจะ **ปฏิเสธ** ถ้าการถอดจะทำให้ mirror เหลือไม่พอ (เหลือ 1 ขาสุดท้าย = ไม่มี
-> redundancy)
-
----
-
-### 5.6 `n` — New Pool (สร้างพูลใหม่)
-
-**ใช้เมื่อ:** มีดิสก์ว่างหลายตัวและต้องการสร้าง ZFS pool ใหม่
-
-```
-b2ctl> n
-    [1] /dev/sdb (bay 1:4)
-    [2] /dev/sdc (bay 1:5)
-    [3] /dev/sdd (bay 1:6)
-  pick disks (space-separated #)> 1 2 3
-  pool name> backup
-  raid type (stripe, mirror, raidz1, raidz2) [mirror]> raidz1
-  create pool 'backup' (raidz1) with 3 disks? [y/N]> y
-  ✔ pool created
-```
-
-**ประเภท RAID ที่เลือกได้:**
-
-| ประเภท     | ดิสก์ขั้นต่ำ | ความปลอดภัย                       | เนื้อที่ได้ |
-| ---------- | ------------ | --------------------------------- | ----------- |
-| **stripe** | 1            | ไม่มี — เสีย 1 ตัว = ข้อมูลหายหมด | เต็ม 100%   |
-| **mirror** | 2            | ทนเสียได้ 1 ตัว                   | 50%         |
-| **raidz1** | 2 (แนะนำ 3+) | ทนเสียได้ 1 ตัว                   | (N-1)/N     |
-| **raidz2** | 4            | ทนเสียได้ 2 ตัว                   | (N-2)/N     |
-
-> ⚠️ ถ้าดิสก์ที่เลือกมีข้อมูลเก่าอยู่ ระบบจะเตือนและถามว่าจะ wipe ก่อนหรือไม่
-
----
-
-### 5.7 `l` — Locate (ค้นหาดิสก์ทางกายภาพ)
-
-**ใช้เมื่อ:** ต้องการรู้ว่าดิสก์ตัวไหนอยู่ช่องไหนในเครื่อง
-
-```
-b2ctl> l
-  locate which (bay/serial/sdX)> sdc
-  blinking /dev/sdc for 5s ...
-  ✔ done (via dd)
-```
-
-สามารถระบุได้ 3 แบบ:
-
-- **ชื่อ bay:** `1:4`
-- **ซีเรียล:** `S74ZNS0WXXXXXXX`
-- **ชื่อ device:** `sdc` หรือ `/dev/sdc`
-
-ไฟ LED ของช่องนั้นจะกระพริบ ~5 วินาที แล้วหยุดเอง
-
-> 💡 **เคล็ดลับ:** ใช้คำสั่งนี้ก่อนดึงดิสก์ออกทุกครั้ง เพื่อให้มั่นใจว่าดึงถูกตัว!
-
----
-
-### 5.8 `q` — Quit (ออก)
-
-```
-b2ctl> q
-bye
-```
-
----
-
-### 5.9 การเสียบ/ถอดดิสก์ขณะ watch ทำงาน (Hot-plug)
-
-**เสียบดิสก์ใหม่:**
-
-ระบบจะแจ้งอัตโนมัติภายใน 2-3 วินาที:
-
-```
-╔══ NEW DISK DETECTED: /dev/sdg ═══════════════════════
-  device : /dev/sdg  (/dev/disk/by-id/wwn-0x500...)
-  model  : Samsung SSD 870   SN S74ZNS0WXXXXXXX
-  bay    : 1:3   size 1.0T   SAS   SSD
-  health : PASSED   wear 0% used   endurance 100.0% left
-╚════════════════════════════════════════════════════
-
-  Disk /dev/disk/by-id/wwn-0x500... is free.
-  What do you want to do with it?
-    [1] Prepare for physical removal (Blink LED)
-    [2] Add to a pool as hot SPARE
-    ...
-```
-
-**ถอดดิสก์ออก:**
-
-```
-■ disk removed: /dev/sdc
-  current pool health:
-Pools:
-  rpool     952G    4.83G   free=947G    ONLINE    cap=0%
-  tank      2.72T   1.72G   free=2.72T   DEGRADED  cap=0%    <-- not ONLINE
-```
-
-> ⚠️ ถ้า pool กลายเป็น **DEGRADED** หลังถอดดิสก์ แปลว่าต้องเปลี่ยนดิสก์ใหม่เข้าไปโดยเร็ว
-
----
-
-## 6. สถานการณ์ที่พบบ่อย
-
-### 📌 สถานการณ์ 1: ดิสก์เสีย — ต้องเปลี่ยนใหม่
-
-**อาการ:** ตารางแสดง LEVEL = `CRITICAL`, HEALTH = `FAILED`, หรือ BAD > 0
-
-**ขั้นตอน:**
-
-1. **ค้นหาดิสก์ที่เสีย** — กด `l` แล้วพิมพ์ serial ของดิสก์ที่เสีย → ไฟกระพริบ
-2. **ดึงดิสก์เสียออก** — ถอดออกจากช่อง (ระบบจะแจ้ง "disk removed")
-3. **เสียบดิสก์ใหม่เข้าไป** — ระบบจะแจ้ง "NEW DISK DETECTED"
-4. **เลือก [3] REPLACE** — เพื่อแทนที่ดิสก์ที่เสีย
-
-```
-  action> 3
-    [1] tank: /dev/disk/by-id/wwn-0x500... (FAULTED)
-  replace #> 1
-  replace /dev/disk/by-id/wwn-0x500... in 'tank' with (1:5) Samsung SSD 870 (S74ZNS0W...)? [y/N]> y
-  ✔ replace started — resilvering
-```
-
-5. **รอ resilver เสร็จ** — ZFS จะ rebuild ข้อมูลอัตโนมัติ
-
----
-
-### 📌 สถานการณ์ 2: ดิสก์เริ่มสึกหรอ — สลับไปยัง spare ก่อนเสีย
-
-**อาการ:** LEVEL = `WARNING`, END(left) ต่ำลง, WEAR(used) สูงขึ้น
-
-**ขั้นตอน:**
-
-1. **ตรวจสอบว่ามี spare ในพูล** — ดูคอลัมน์ POOL ว่ามีดิสก์ที่ขึ้น `tank/spares`
-2. **กด `s` (swap)** — เลือกดิสก์ที่สึกหรอ
-3. **ยืนยัน `y`** — ระบบ resilver ข้อมูลไปยัง spare แล้วสลับที่กัน
-4. **เสร็จ** — ดิสก์เก่ากลายเป็น spare, ดิสก์ใหม่ทำงานแทน
-
-> 💡 ไม่ต้องถอดดิสก์ออกจากเครื่อง — ทั้งสองตัวยังอยู่ในช่อง
-
----
-
-### 📌 สถานการณ์ 3: เพิ่ม spare ใหม่เข้าพูล
-
-**ใช้เมื่อ:** pool ไม่มี spare สำรอง และต้องการเพิ่ม
-
-**ขั้นตอน:**
-
-1. **เสียบดิสก์ใหม่** — ระบบจะแจ้ง "NEW DISK DETECTED"
-2. **เลือก [2] Add to a pool as hot SPARE**
-3. **เลือก pool** ที่ต้องการเพิ่ม spare
-4. **ยืนยัน `y`**
-
-```
-  action> 2
-    [1] rpool (ONLINE)
-    [2] tank (ONLINE)
-  pool #> 2
-  add (1:7) Samsung SSD 870 (S74ZNS0W582280E) to 'tank' as spare? [y/N]> y
-  ✔ added as spare
-```
-
----
-
-### 📌 สถานการณ์ 4: สร้างพูลใหม่จากดิสก์ว่าง
-
-**ขั้นตอน:**
-
-1. **กด `n`** (new pool)
-2. **เลือกดิสก์** — พิมพ์หมายเลขคั่นด้วยเว้นวรรค เช่น `1 2 3`
-3. **ตั้งชื่อ pool** — เช่น `backup`, `data`
-4. **เลือกประเภท RAID** — แนะนำ `raidz1` สำหรับ 3 ดิสก์ หรือ `mirror` สำหรับ 2 ดิสก์
-5. **ยืนยัน `y`**
-
-> ⚠️ ถ้าดิสก์มี label/ข้อมูลเก่า ระบบจะเตือนและถามว่าจะ wipe ก่อนหรือไม่
-
----
-
-### 📌 สถานการณ์ 5: ถอดดิสก์ออกจากพูลอย่างปลอดภัย
-
-**ขั้นตอน:**
-
-1. **กด `o`** (offload)
-2. **เลือกดิสก์** ที่ต้องการถอด
-3. **ยืนยัน `y`** — ระบบจะ resilver ไปหา spare
-4. **กระพริบ LED** — ระบบจะบอกว่า "blinking LED" เพื่อให้คุณรู้ว่าต้องดึงช่องไหน
-5. **ดึงดิสก์ออก** — ตอนนี้ปลอดภัยแล้ว
-
----
-
-## 7. ข้อควรระวัง
-
-### ⚠️ อย่าผสม SAS กับ SATA โดยไม่ทดสอบก่อน
-
-การเอาดิสก์ SAS มาเป็น spare ในพูลที่เป็น SATA ล้วน อาจมีปัญหาได้ ถ้าไม่แน่ใจ ให้ใช้
-ดิสก์ชนิดเดียวกับที่มีอยู่ในพูล
-
-### ⚠️ หมายเลข Bay เป็นเพียงตัวแสดง
-
-บน Dell R620 ที่แฟลชเป็น IT mode หมายเลข slot จะสลับกัน b2ctl
-แก้ไขผ่าน `bay_map.json` แต่ทุกการทำงานใช้ **serial** ของดิสก์ ไม่ใช่หมายเลข bay ดังนั้น
-ถ้า bay ผิด ให้ใช้ `l` (locate) กระพริบไฟเพื่อยืนยันก่อนเสมอ
-
-### ⚠️ ทุกคำสั่งที่เปลี่ยนแปลงข้อมูลจะถามยืนยัน
-
-ไม่ต้องกังวลว่าจะกดผิดแล้วข้อมูลหาย — ระบบจะถาม `[y/N]` ก่อนทุกครั้ง ค่าเริ่มต้นคือ
-**N (No)** ดังนั้นถ้ากด Enter เปล่าๆ จะไม่มีอะไรเกิดขึ้น
-
-### ⚠️ ZFS resilver ใช้เวลา
-
-การ resilver (rebuild ข้อมูล) ต้องใช้เวลาขึ้นอยู่กับปริมาณข้อมูล ห้ามปิดเครื่องหรือถอด
-ดิสก์ระหว่าง resilver
-
----
-
-## 8. สรุปคำสั่งลัด
-
-### คำสั่ง CLI (ใช้จาก terminal โดยตรง)
-
-| คำสั่ง                               | ทำอะไร                             |
-| ------------------------------------ | ---------------------------------- |
-| `sudo b2ctl status`                  | ดูตารางสุขภาพดิสก์ครั้งเดียว       |
-| `sudo b2ctl status --locate`         | ดูตาราง + กระพริบไฟดิสก์ที่มีปัญหา |
-| `sudo b2ctl status --json`           | แสดงผลเป็น JSON                    |
-| `sudo b2ctl watch`                   | ⭐ เข้าโหมดเฝ้าดู (แนะนำ)          |
-| `sudo b2ctl locate <bay/serial/sdX>` | กระพริบไฟดิสก์ตัวนั้น              |
-| `sudo b2ctl version`                 | แสดงเวอร์ชัน                       |
-
-### คำสั่งในโหมด watch (พิมพ์ที่ `b2ctl>`)
-
-| ปุ่ม | คำสั่ง   | ทำอะไร                                               |
-| ---- | -------- | ---------------------------------------------------- |
-| `r`  | refresh  | รีเฟรชตาราง                                          |
-| `a`  | assign   | จัดสรรดิสก์ว่างเข้า pool                             |
-| `o`  | offload  | ถอดดิสก์ออกจาก pool (เพื่อดึงออกทางกายภาพ)           |
-| `s`  | swap     | สลับดิสก์สึกหรอไปยัง spare (ดิสก์เก่ากลายเป็น spare) |
-| `d`  | demote   | ลดดิสก์ mirror ลงเป็น spare                          |
-| `n`  | new-pool | สร้าง pool ใหม่                                      |
-| `l`  | locate   | กระพริบไฟ LED หาดิสก์ (~5 วินาที)                    |
-| `q`  | quit     | ออก                                                  |
-
-### ตัวเลือกเมื่อมีดิสก์ว่าง (assign / new disk detected)
-
-| ปุ่ม | ทำอะไร                                      |
-| ---- | ------------------------------------------- |
-| `1`  | กระพริบ LED (เตรียมดึงออก)                  |
-| `2`  | เพิ่มเป็น spare ใน pool                     |
-| `3`  | แทนที่ดิสก์ที่เสีย (REPLACE)                |
-| `4`  | ต่อเป็น mirror กับดิสก์ที่มี (ATTACH)       |
-| `5`  | เพิ่มเข้า pool แบบเดี่ยว (ไม่มี redundancy) |
-| `6`  | ล้างข้อมูลทั้งหมด (WIPE)                    |
-| `s`  | ข้ามไว้ก่อน                                 |
-
----
-
-> **มีปัญหา?** ถ้าไม่แน่ใจว่าจะทำอะไร ให้กด `s` (skip) ไว้ก่อนเสมอ — ดิสก์จะไม่ถูก
-> เปลี่ยนแปลง แล้วค่อยกลับมาจัดการทีหลังด้วย `a` (assign)

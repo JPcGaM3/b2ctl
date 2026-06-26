@@ -266,24 +266,29 @@ def _wipe_ghost(d, tbw) -> None:
 
 
 def _cmd_assign(tbw) -> None:
+    from . import raid_actions
     disks = core.scan(tbw)
-    # ZFS-assignable = owns a real block device and is NOT a PERC-managed drive.
-    # A PERC member/UGood disk's dev is the shared VD block device (/dev/sda);
-    # never offer it to the wipe/add-to-pool flow.
-    avail = [d for d in disks if not d.in_pool and d.dev != "-"
-             and not d.array_type and not d.pd_state]
+    # ZFS-assignable = owns a real block device (smart_dtype unset). A HIDDEN
+    # PERC drive (member/UGood) is read via megaraid passthrough and shares the
+    # VD block device /dev/sda, so it must never reach the ZFS wipe/add flow.
+    # A drive set to JBOD has its own /dev/sdX (smart_dtype "") and IS poolable.
+    zfs_avail = [d for d in disks if not d.in_pool and d.dev != "-"
+                 and not d.smart_dtype]
     ghosts = [d for d in disks if d.health == "GHOST"]
-    avail_all = avail + ghosts
+    # Hidden Unconfigured-Good PERC drives — actionable via the hardware-RAID menu
+    # (set JBOD for ZFS, create a volume, or add as a hot spare).
+    raid_avail = [d for d in disks if d.smart_dtype and d.array_type != "HW"
+                  and d.pd_state.upper() in ("UGOOD", "READY", "UGUNSP")]
+    avail_all = zfs_avail + ghosts + raid_avail
     if not avail_all:
-        if any(d.pd_state for d in disks):
-            print(f"{Y}  no ZFS-assignable disks. For hardware-RAID drives use "
-                  f"'b2ctl raid-create' to build a volume from Unconfigured-Good drives.{N}")
-        else:
-            print(f"{Y}  no unassigned disks available to assign{N}")
+        print(f"{Y}  no unassigned disks available to assign{N}")
         return
     for i, d in enumerate(avail_all, 1):
         if d.health == "GHOST":
             print(f"    [{i}] {R}[GHOST]{N} bay {d.bay or '?'} (SN {d.serial or '?'}) — needs wipe")
+        elif d in raid_avail:
+            print(f"    [{i}] bay {d.bay or '?'} ({d.model}, SN {d.serial or '?'}) "
+                  f"{C}(PERC Unconfigured-Good){N}")
         else:
             print(f"    [{i}] bay {d.bay or '?'} {d.dev} ({d.model}, SN {d.serial or '?'})")
     sel = _ask("  assign which #> ")
@@ -291,7 +296,9 @@ def _cmd_assign(tbw) -> None:
         d = avail_all[int(sel) - 1]
     except (ValueError, IndexError):
         print(f"{Y}  cancelled{N}"); return
-    if d.health == "GHOST":
+    if d in raid_avail:
+        raid_actions.assign_perc(d, raid_avail)
+    elif d.health == "GHOST":
         _wipe_ghost(d, tbw)
     else:
         _assign_free_disk(d, tbw, all_disks=disks)
@@ -457,11 +464,10 @@ def _cmd_replace(tbw) -> None:
 
 
 def _cmd_create(tbw) -> None:
-    # Exclude PERC-managed drives: their dev is the shared VD block device
-    # (/dev/sda), so creating a ZFS pool on one would target the OS disk.
+    # Exclude HIDDEN PERC drives (megaraid passthrough → shared /dev/sda); a
+    # JBOD'd drive has its own /dev/sdX (smart_dtype "") and is poolable.
     available = [d for d in core.scan(tbw)
-                 if not d.in_pool and d.dev != "-"
-                 and not d.array_type and not d.pd_state]
+                 if not d.in_pool and d.dev != "-" and not d.smart_dtype]
     if not available:
         print(f"{Y}  no available disks to create pool{N}")
         return

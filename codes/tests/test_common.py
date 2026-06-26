@@ -34,19 +34,29 @@ class TestDiskAssessment:
         assert any("FAILED" in r for r in d.reasons)
 
     def test_ugood_perc_drive_is_config_not_critical(self):
-        # A PERC Unconfigured-Good drive is available, not a ghost/critical.
+        # A HIDDEN PERC Unconfigured-Good drive (megaraid passthrough) is
+        # available, not a ghost/critical.
         d = _disk(pool=None, vdev=None, vdev_state=None)
-        d.pd_state = "UGood"
+        d.pd_state = "UGood"; d.smart_dtype = "megaraid,4"
         assess(d)
         assert d.level == "CONFIG"
         assert any("Unconfigured Good" in r for r in d.reasons)
 
     def test_failed_perc_drive_is_critical(self):
         d = _disk(pool=None, vdev=None, vdev_state=None)
-        d.pd_state = "Failed"
+        d.pd_state = "Failed"; d.smart_dtype = "megaraid,4"
         assess(d)
         assert d.level == "CRITICAL"
         assert any("PD state=Failed" in r for r in d.reasons)
+
+    def test_jbod_exposed_drive_is_plain_unassigned(self):
+        # A JBOD'd drive has its own /dev/sdX (no megaraid passthrough) — it is a
+        # normal unassigned disk that ZFS can pool, not a hidden PERC drive.
+        d = _disk(pool=None, vdev=None, vdev_state=None, dev="/dev/sdb")
+        d.pd_state = "JBOD"   # smart_dtype stays "" (read direct)
+        assess(d)
+        assert d.level == "CONFIG"
+        assert any("unassigned" in r for r in d.reasons)
 
     def test_critical_bad_sectors(self):
         d = _disk(realloc=5)

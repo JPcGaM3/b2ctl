@@ -149,7 +149,7 @@ def create_vd(level: str, drives: list[str]) -> int:
     if not _confirm("Are you absolutely sure? (second confirm)"):
         print("cancelled")
         return 1
-    cmds = [["perccli", "/c0", "add", "vd", f"type={level.lower()}",
+    cmds = [["perccli", "/c0", "add", "vd", hba_raid._raid_token(level),
              f"drives={','.join(drives)}"]]
     op_id = safety.begin_op("raid_create", "", ",".join(drives), "",
                             level, level, cmds)
@@ -157,6 +157,73 @@ def create_vd(level: str, drives: list[str]) -> int:
     safety.end_op(op_id, ok, out, "" if ok else out, 0 if ok else 1)
     print((G + "[+] VD created" if ok else R + f"[-] failed: {out}") + N)
     return 0 if ok else 1
+
+
+def assign_perc(d, candidates: list) -> int:
+    """Interactive menu for an Unconfigured-Good PERC drive (from watch [a]ssign).
+
+    Offers both software RAID (set JBOD -> /dev/sdX -> ZFS) and hardware RAID
+    (create a volume / add as a hot spare), plus locate. `candidates` is the list
+    of other available UGood drives (for building a multi-disk volume).
+    """
+    print(f"  {C}PERC drive {disk_label(d)} [{d.pd_state}]{N}")
+    print("    [1] Locate LED (blink the bay)")
+    print("    [2] Use for ZFS / software RAID  (set JBOD — exposes it as /dev/sdX)")
+    print("    [3] CREATE a hardware RAID volume (perccli)")
+    print("    [4] Add as hardware HOT SPARE")
+    print("    [s] skip / decide later")
+    choice = input("  action> ").strip().lower()
+
+    if choice == "1":
+        from . import locate as _loc
+        _loc.blink_disk(d)
+        return 0
+
+    if choice == "2":
+        if not _confirm(f"set {disk_label(d)} to JBOD (expose to the OS for ZFS)?"):
+            print("cancelled")
+            return 1
+        ok, out = hba_raid.set_jbod(d.bay)
+        if ok:
+            import subprocess
+            subprocess.run(["udevadm", "settle", "--timeout=10"], check=False)
+            print(f"{G}  ✔ {d.bay} set to JBOD — it should now appear as /dev/sdX.\n"
+                  f"    Press [r]efresh, then use [n]ew-pool or [a]ssign to add it to a ZFS pool.{N}")
+        else:
+            print(f"{R}  ✗ failed: {out}{N}")
+        return 0 if ok else 1
+
+    if choice == "3":
+        picks = [d]
+        if candidates:
+            print("  drives for the volume:")
+            for i, c in enumerate(candidates, 1):
+                print(f"    [{i}] {disk_label(c)}")
+            sel = input("  pick (space-separated #, blank = just this drive)> ").strip()
+            if sel:
+                try:
+                    picks = [candidates[int(x) - 1] for x in sel.split()]
+                except (ValueError, IndexError):
+                    print(f"{Y}  invalid selection — cancelled{N}")
+                    return 1
+        level = input("  raid level (raid0/raid1/raid5/raid10) [raid1]> ").strip() or "raid1"
+        return create_vd(level, [p.bay for p in picks])
+
+    if choice == "4":
+        dg = input("  drive-group # to protect (blank = global spare)> ").strip()
+        tgt = f"DG{dg}" if dg else "global"
+        if not _confirm(f"add {disk_label(d)} as a hot spare ({tgt})?"):
+            print("cancelled")
+            return 1
+        cmds = [["perccli", hba_raid._pd(d.bay), "add", "hotsparedrive"]
+                + ([f"DGs={dg}"] if dg else [])]
+        op_id = safety.begin_op("raid_hotspare", d.serial, d.bay, d.dev, tgt, tgt, cmds)
+        ok, out = hba_raid.add_hotspare(d.bay, dg or None)
+        safety.end_op(op_id, ok, out, "" if ok else out, 0 if ok else 1)
+        print((G + "  ✔ hot spare added" if ok else R + f"  ✗ failed: {out}") + N)
+        return 0 if ok else 1
+
+    return 0
 
 
 def delete_vd(vd: int) -> int:

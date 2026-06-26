@@ -536,24 +536,43 @@ class TestWatchAuditOrdering(unittest.TestCase):
         mock_begin.assert_not_called()
 
 
-class TestAssignExcludesPercDisks(unittest.TestCase):
-    """SAFETY: PERC-managed disks (dev=/dev/sda) must never reach the ZFS
-    wipe/assign flow — that would target the OS virtual disk."""
+class TestAssignRaidAware(unittest.TestCase):
+    """SAFETY + feature: a HIDDEN PERC drive (smart_dtype set, dev=/dev/sda) must
+    never reach the ZFS wipe/assign flow; a UGood one routes to the RAID menu."""
 
+    @patch("b2ctl.raid_actions.assign_perc", return_value=0)
     @patch("b2ctl.watch._wipe_ghost")
     @patch("b2ctl.watch._assign_free_disk")
-    @patch("builtins.input")
+    @patch("b2ctl.watch._ask", return_value="1")
     @patch("b2ctl.watch.core")
-    def test_assign_skips_hw_and_ugood(self, mock_core, inp, assign_mock, wipe_mock):
+    def test_member_excluded_ugood_routed_to_raid(self, mock_core, _ask,
+                                                   assign_mock, wipe_mock, perc_mock):
         import b2ctl.watch as watch
-        member = Disk(dev="/dev/sda"); member.array_type = "HW"; member.bay = "32:0"
-        ugood = Disk(dev="/dev/sda"); ugood.pd_state = "UGood"; ugood.bay = "32:4"
+        member = Disk(dev="/dev/sda"); member.array_type = "HW"
+        member.bay = "32:0"; member.smart_dtype = "megaraid,0"; member.pd_state = "Onln"
+        ugood = Disk(dev="/dev/sda"); ugood.bay = "32:4"
+        ugood.smart_dtype = "megaraid,4"; ugood.pd_state = "UGood"
         mock_core.scan.return_value = [member, ugood]
         watch._cmd_assign({})
-        # nothing ZFS-assignable -> no prompt, no wipe/assign on /dev/sda
-        inp.assert_not_called()
+        # only the UGood drive is selectable ([1]) -> routed to the RAID menu;
+        # the HW member is not offered; ZFS wipe/assign never touched /dev/sda.
+        perc_mock.assert_called_once()
+        assert perc_mock.call_args[0][0] is ugood
         assign_mock.assert_not_called()
         wipe_mock.assert_not_called()
+
+    @patch("b2ctl.raid_actions.assign_perc")
+    @patch("b2ctl.watch._assign_free_disk")
+    @patch("b2ctl.watch._ask", return_value="1")
+    @patch("b2ctl.watch.core")
+    def test_jbod_disk_routes_to_zfs(self, mock_core, _ask, assign_mock, perc_mock):
+        import b2ctl.watch as watch
+        # a JBOD'd drive: own /dev/sdb, no smart_dtype -> ZFS-assignable
+        jbod = Disk(dev="/dev/sdb"); jbod.bay = "32:4"; jbod.pd_state = "JBOD"
+        mock_core.scan.return_value = [jbod]
+        watch._cmd_assign({})
+        assign_mock.assert_called_once()
+        perc_mock.assert_not_called()
 
 
 if __name__ == "__main__":

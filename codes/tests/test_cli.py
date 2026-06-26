@@ -118,6 +118,29 @@ class TestRaidCommands(unittest.TestCase):
         assert rc == 1
         add_mock.assert_not_called()
 
+    def test_assign_perc_jbod_path_calls_set_jbod(self):
+        import b2ctl.raid_actions as ra
+        from b2ctl.common import Disk
+        d = Disk(dev="/dev/sda"); d.bay = "32:4"; d.pd_state = "UGood"
+        # menu choice 2 (set JBOD), then confirm 'y'
+        with patch("builtins.input", side_effect=["2", "y"]), \
+             patch("b2ctl.hba_raid.set_jbod", return_value=(True, "")) as jbod_mock, \
+             patch("subprocess.run"):
+            rc = ra.assign_perc(d, [d])
+        assert rc == 0
+        jbod_mock.assert_called_once_with("32:4")
+
+    def test_assign_perc_create_path_calls_add_vd(self):
+        import b2ctl.raid_actions as ra
+        from b2ctl.common import Disk
+        d = Disk(dev="/dev/sda"); d.bay = "32:4"; d.pd_state = "UGood"
+        d2 = Disk(dev="/dev/sda"); d2.bay = "32:5"; d2.pd_state = "UGood"
+        # choice 3 (create), pick both drives, level raid1, two create confirms
+        with patch("builtins.input", side_effect=["3", "1 2", "raid1", "y", "y"]), \
+             patch("b2ctl.hba_raid.add_vd", return_value=(True, "")) as add_mock:
+            ra.assign_perc(d, [d, d2])
+        add_mock.assert_called_once_with("raid1", ["32:4", "32:5"])
+
 
 if __name__ == "__main__":
     unittest.main()

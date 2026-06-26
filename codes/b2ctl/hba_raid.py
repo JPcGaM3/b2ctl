@@ -424,11 +424,40 @@ def rebuild_progress(enc_slot: str, controller: int = CONTROLLER) -> dict:
     return {"pct": pct, "done": done}
 
 
+def _raid_token(level: str) -> str:
+    """Normalise a level to perccli's r-form: raid1 / r1 / 1 -> 'r1'."""
+    lv = level.lower().strip()
+    if lv.startswith("raid"):
+        lv = lv[4:]
+    return "r" + lv.lstrip("r")
+
+
 def add_vd(level: str, drives: list[str], controller: int = CONTROLLER) -> tuple[bool, str]:
-    """Create a virtual disk: `perccli /cC add vd type=raidN drives=e:s,e:s`."""
-    drv = ",".join(drives)
+    """Create a virtual disk: `perccli /cC add vd rN drives=e:s,e:s`.
+
+    perccli takes the level as r0/r1/r5/... (not type=raidN).
+    """
     return run_check([_tool(), f"/c{controller}", "add", "vd",
-                      f"type={level.lower()}", f"drives={drv}"])
+                      _raid_token(level), f"drives={','.join(drives)}"])
+
+
+def add_hotspare(enc_slot: str, dg=None, controller: int = CONTROLLER) -> tuple[bool, str]:
+    """Add a drive as a hot spare: `perccli /cC/eE/sS add hotsparedrive [DGs=<dg>]`.
+
+    dg=None -> global spare; dg=<n> -> dedicated to that drive group.
+    """
+    cmd = [_tool(), _pd(enc_slot, controller), "add", "hotsparedrive"]
+    if dg is not None and str(dg) != "":
+        cmd.append(f"DGs={dg}")
+    return run_check(cmd)
+
+
+def set_jbod(enc_slot: str, controller: int = CONTROLLER) -> tuple[bool, str]:
+    """Expose a drive to the OS for software RAID/ZFS: `perccli /cC/eE/sS set jbod`.
+
+    The drive leaves the controller's RAID management and appears as /dev/sdX.
+    """
+    return run_check([_tool(), _pd(enc_slot, controller), "set", "jbod"])
 
 
 def del_vd(vd: int, controller: int = CONTROLLER) -> tuple[bool, str]:

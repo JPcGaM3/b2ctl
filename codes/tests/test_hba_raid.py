@@ -197,6 +197,34 @@ class TestActions(unittest.TestCase):
         raid._tool_cache = None
         self.assertEqual(seen["cmd"], ["perccli", "/c0/e32/s1", "set", "offline"])
 
+    def test_raid_token(self):
+        self.assertEqual(raid._raid_token("raid1"), "r1")
+        self.assertEqual(raid._raid_token("r1"), "r1")
+        self.assertEqual(raid._raid_token("1"), "r1")
+        self.assertEqual(raid._raid_token("RAID10"), "r10")
+
+    def _capture(self, fn):
+        seen = []
+        with patch.object(raid, "run_check",
+                          side_effect=lambda c: (seen.append(c), (True, ""))[1]), \
+             patch("b2ctl.config.tool", side_effect=lambda n: n):
+            raid._tool_cache = "perccli"
+            fn()
+        raid._tool_cache = None
+        return seen[0]
+
+    def test_add_vd_uses_r_level(self):
+        cmd = self._capture(lambda: raid.add_vd("raid1", ["32:4", "32:5"]))
+        self.assertEqual(cmd, ["perccli", "/c0", "add", "vd", "r1", "drives=32:4,32:5"])
+
+    def test_add_hotspare_with_dg(self):
+        cmd = self._capture(lambda: raid.add_hotspare("32:4", dg=0))
+        self.assertEqual(cmd, ["perccli", "/c0/e32/s4", "add", "hotsparedrive", "DGs=0"])
+
+    def test_set_jbod(self):
+        cmd = self._capture(lambda: raid.set_jbod("32:4"))
+        self.assertEqual(cmd, ["perccli", "/c0/e32/s4", "set", "jbod"])
+
 
 if __name__ == "__main__":
     unittest.main()

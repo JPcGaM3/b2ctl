@@ -145,12 +145,15 @@ def assess(d: Disk) -> None:
         if st and st not in ("ONLN", "ONLINE", "OPTL", "OPTIMAL"):
             sev = "WARNING" if st in ("RBLD", "REBUILD") else "CRITICAL"
             bump(sev, f"PD state={d.pd_state}")
-    elif d.pd_state:
-        # A PERC physical drive that is NOT a VD member (UGood/JBOD/Failed). The
-        # controller hides it from the OS — it is available, not a ghost.
+    elif d.pd_state and d.smart_dtype:
+        # A HIDDEN PERC physical drive (read via megaraid passthrough, shares the
+        # VD's /dev/sdX): UGood/Failed/etc. — available, not a ghost. An EXPOSED
+        # JBOD drive has its own block device (smart_dtype == "") and falls
+        # through to the normal "unassigned" path below, so ZFS can pool it.
         st = d.pd_state.upper()
-        if st in ("UGOOD", "JBOD", "READY", "UGUNSP"):
-            bump("CONFIG", "available (Unconfigured Good) — add to a RAID volume via raid-create")
+        if st in ("UGOOD", "READY", "UGUNSP"):
+            bump("CONFIG", "available (Unconfigured Good) — set JBOD for ZFS, "
+                           "or add to a RAID volume (raid-create)")
         elif st in ("OFFLN", "FAILED", "UBAD", "MISSING"):
             bump("CRITICAL", f"PD state={d.pd_state}")
         else:

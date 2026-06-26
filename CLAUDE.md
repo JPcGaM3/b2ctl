@@ -14,22 +14,43 @@ is the next set of lifecycle features, described in §7.
 
 A stdlib-only Python CLI that shows a wide per-disk health table (bay, model,
 serial, power-on hours, wear, TBW endurance, bad sectors, SMART health,
-pool/vdev, and an overall LEVEL) plus a details block, and performs ZFS disk
-lifecycle actions. It is the IT-mode/HBA sibling of an earlier storcli/RAID-mode
-build; the old perccli `ssd_health.py` script is the visual reference for the
-table + details layout.
+pool/array, and an overall LEVEL) plus a details block, and performs disk
+lifecycle actions.
+
+**b2ctl now has two co-equal backends (auto-detected, or forced by
+`controller.mode`):**
+
+- **IT/HBA mode** (`sas2ircu`) — crossflashed PERC → LSI SAS2308, raw disks,
+  **ZFS** lifecycle (zpool replace/attach/detach/spare/create). The `POOL/ARRAY`
+  column shows `SW:<pool>/<vdev>` (software RAID = ZFS).
+- **RAID mode** (`perccli`) — Dell PERC owning hardware RAID volumes. Physical
+  members behind a virtual disk are enumerated from `perccli /cN/vall show all`
+  and read via SMART passthrough (`smartctl -d megaraid,<DID>`). The column shows
+  `HW:vd<n>/<level>`; volumes get their own table. Actions are **perccli**-driven
+  (locate, offline/missing, replace+rebuild, add/del vd) — the controller, not
+  ZFS, owns the array.
+
+storcli was removed (LSI tool, blind to a PERC, caused false detection).
+The old perccli `ssd_health.py` script is the visual reference for the layout.
 
 ## 2. Environment (read carefully — it dictates every command)
 
 - 2× Dell R620, **Proxmox VE 9.2** (Debian 13, ZFS 2.4).
-- PERC H710 mini **crossflashed to IT/HBA mode** → presents as LSI SAS9207-8i
-  (SAS2308). **Disks are raw.** There is NO storcli/perccli and NO
-  `smartctl -d megaraid`. Do not reintroduce them.
-- Identify/inspect disks with: `lsblk` (serial/model), `smartctl -a /dev/sdX`
-  (direct, auto device type), `sas2ircu <c> DISPLAY` (serial→enclosure:slot),
-  `sas2ircu <c> LOCATE <enc:slot> ON|OFF` (LEDs).
-- SATA SSDs sit behind the SAS2308, so `lsblk` reports `TRAN=sas` for them.
-  That is expected (SATA-over-STP); the SMART parser still reads them as ATA.
+- **IT/HBA boxes** (R620): PERC H710 mini **crossflashed to IT/HBA mode** →
+  presents as LSI SAS9207-8i (SAS2308). **Disks are raw.** Identify/inspect with:
+  `lsblk` (serial/model), `smartctl -a /dev/sdX` (direct, auto device type),
+  `sas2ircu <c> DISPLAY` (serial→enclosure:slot), `sas2ircu <c> LOCATE` (LEDs).
+  SATA SSDs sit behind the SAS2308, so `lsblk` reports `TRAN=sas` (SATA-over-STP);
+  the SMART parser still reads them as ATA.
+- **RAID boxes** (R640): PERC H730P Mini in **RAID mode**. The OS sees the
+  virtual disk (`/dev/sda`); the physical members live behind it. Inspect via
+  `perccli /c0/vall show all` (members, DID, enc:slot, state) and
+  `smartctl -a -d megaraid,<DID> /dev/sda` (per-member SMART). LEDs/actions via
+  `perccli /cC/eE/sS set locate|offline|missing`, `… start rebuild`,
+  `/cC add vd …`, `/cC/vV del`. (RAID mode is the reason the old IT-only
+  prohibition on `perccli`/`-d megaraid` is gone.)
+- NVMe enumeration follows the kernel: a 2×M.2 PCIe card needs **BIOS PCIe
+  bifurcation (x4x4)** or only one namespace appears — that is hardware, not b2ctl.
 
 **Storage layout (current):**
 - `rpool` — RAID1 mirror, 2× Samsung 860 PRO 1TB, on `-part3` of by-id devices

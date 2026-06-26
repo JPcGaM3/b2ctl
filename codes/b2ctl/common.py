@@ -1,11 +1,13 @@
-"""b2ctl.common — shared primitives for the IT-mode (HBA) build.
+"""b2ctl.common — shared primitives for both backends.
 
 Colours, external-command execution, the Disk model, and the health-level
 assessment. No other b2ctl module depends on anything above this one.
 
-This build targets a crossflashed PERC H710 (LSI SAS9207-8i / SAS2308) in
-IT/HBA mode: disks are raw, so there is no storcli/perccli or megaraid
-passthrough. SMART is read directly and LEDs are driven by sas2ircu.
+Two backends share this model: IT/HBA (crossflashed PERC → LSI SAS2308, raw
+disks, SMART direct, LEDs via sas2ircu) and RAID (Dell PERC via perccli, member
+SMART via `smartctl -d megaraid`). The Disk model carries both ZFS membership
+(pool/vdev) and hardware-RAID fields (array_type/array_name/smart_dtype/did/
+pd_state); a HW member is treated as 'assigned' and graded by its PERC PD state.
 """
 
 from __future__ import annotations

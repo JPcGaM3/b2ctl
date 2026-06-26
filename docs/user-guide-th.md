@@ -723,3 +723,37 @@ b2ctl rollback 20260617-143022-replace
 
 > 💡 Tip: **มีปัญหา?** ถ้าไม่แน่ใจว่าจะทำอะไร ให้กด `s` (skip) ไว้ก่อนเสมอ — ดิสก์จะไม่ถูก
 > เปลี่ยนแปลง แล้วค่อยกลับมาจัดการทีหลังด้วย `a` (assign)
+
+---
+
+## เครื่องที่ใช้ RAID จริง (Dell PERC เช่น R640 / H730P)
+
+b2ctl รองรับเครื่องที่ PERC ทำ **hardware RAID** (ไม่ได้ crossflash) ด้วย ติดตั้งแบบ
+RAID แล้วมันจะสลับเป็นโหมด RAID เอง:
+
+```
+b2ctl install --perc      # ลง perccli + ตั้ง controller.mode=raid
+b2ctl install --flash     # เครื่อง IT/HBA: ลง sas2ircu + mode=it
+```
+
+`b2ctl status` จะโชว์ **ดิสก์จริงที่อยู่หลัง RAID volume** (อ่านผ่าน controller) คอลัมน์
+`POOL/ARRAY` บอกชนิด:
+
+- `HW:vd0/raid1` — เป็นสมาชิกของ **hardware** RAID (PERC คุม)
+- `SW:tank/raidz1-0` — เป็นสมาชิก **software** RAID (ZFS)
+- `-` — ดิสก์เดี่ยว/ยังไม่ได้ assign (เช่น NVMe, JBOD)
+
+มีตาราง **RAID volumes (hardware)** แยกบอกแต่ละ volume (level/สถานะ/ขนาด/จำนวนสมาชิก)
+
+### เปลี่ยนดิสก์ RAID ที่เสีย
+
+```
+b2ctl raid-replace          # เลือกตัว หรือระบุ: b2ctl raid-replace 32:0
+```
+
+มันจะ fail ดิสก์ออก, **เปิดไฟ LED ช่องนั้น**, รอให้ถอดของเก่าใส่ของใหม่, แล้วเฝ้าดู
+controller **rebuild** พร้อมแถบความคืบหน้า คำสั่งอื่น: `raid-offline <bay>`,
+`locate <bay> on`, และ (อันตราย ยืนยันสองครั้ง) `raid-create` / `raid-del`
+
+> หมายเหตุ: การ์ด NVMe 2×M.2 ถ้าโชว์แค่ตัวเดียว ต้องเปิด **PCIe bifurcation (x4x4)**
+> ใน BIOS — เป็นเรื่องฮาร์ดแวร์ ไม่ใช่ b2ctl

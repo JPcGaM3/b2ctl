@@ -12,6 +12,30 @@
 > - `b2ctl locate <serial>` → exactly one bay's LED/activity blinks ~5s.
 > - If a bay number is still off, edit `bay_map.json` (reverse rule or explicit map).
 
+## FEATURE — RAID-mode support (Dell PERC) + dual-backend [DONE, validate on R640]
+
+Spec: `prompts/FEATURE_raid_mode.md`. Bumped to **v0.6.0-itmode**.
+
+b2ctl is now dual-backend: IT/HBA (sas2ircu, ZFS) **and** RAID (perccli, hardware
+RAID). storcli removed everywhere. Shipped:
+
+- perccli tool-pick (non-zero controller count), member enumeration from
+  `/cN/vall show all`, SMART via `-d megaraid,<DID>`, HW members as Disk rows.
+- `POOL/ARRAY` column `HW:`/`SW:` prefix + hardware RAID-volumes table.
+- Install profiles: `b2ctl install --perc` (perccli+mode=raid) / `--flash`
+  (sas2ircu+mode=it); `config.set_mode()`; installer reconciled to `cp -f
+  /usr/sbin` (matches install.sh). `--perc`/`--flash` in install.sh too.
+- RAID actions (guarded + audited): `b2ctl locate` (perccli for HW members),
+  `raid-replace` (guided offline→missing→LED→rebuild w/ live progress),
+  `raid-offline`, `raid-create`, `raid-del`.
+
+**Validate on the R640** (mutating perccli ops + rebuild-progress parser are
+untested on CI): `b2ctl check` → perccli, ≥1 controller; `b2ctl status` → 2
+members (32:0/32:1, SMART via megaraid, `HW:vd0/raid1`), VD in volumes table,
+NVMe direct, no false GHOST; `b2ctl locate 32:0 on`; then the raid-* flows.
+Also capture `perccli /c0/eall/sall show all` with a JBOD disk to finalise the
+JBOD tag path.
+
 ## CODE-REVIEW HOTFIX — 10 findings from branch code review [DONE]
 
 Spec: `prompts/FEATURE_code_review_fixes.md`

@@ -729,3 +729,40 @@ exists.
 
 > 💡 Tip: **Not sure what to do?** Press `s` (skip) — nothing changes. Come back with
 > `a` (assign) when you're ready.
+
+---
+
+## RAID-mode boxes (Dell PERC, e.g. R640 / H730P)
+
+b2ctl works on servers where the PERC runs **hardware RAID** (not crossflashed).
+Install it for that box and it switches to RAID mode:
+
+```
+b2ctl install --perc      # installs perccli, sets controller.mode=raid
+b2ctl install --flash     # (the IT/HBA boxes) installs sas2ircu, mode=it
+```
+
+`b2ctl status` then shows the **physical drives behind the RAID volume** (read
+through the controller), with the `POOL/ARRAY` column marking each disk:
+
+- `HW:vd0/raid1` — member of a **hardware** RAID volume (the PERC owns it)
+- `SW:tank/raidz1-0` — member of a **software** RAID (ZFS pool)
+- `-` — direct/unassigned (e.g. an NVMe, a JBOD disk)
+
+A separate **RAID volumes (hardware)** table lists each volume (level, state,
+size, member count).
+
+### Replacing a failed RAID disk
+
+```
+b2ctl raid-replace          # pick the member, or: b2ctl raid-replace 32:0
+```
+
+It fails the drive out, **lights its bay LED**, waits for you to pull it and
+insert the replacement, then watches the controller **rebuild** with a live
+progress bar. Related: `b2ctl raid-offline <bay>` (just fail it out + LED),
+`b2ctl locate <bay> on`, and (destructive, double-confirmed) `b2ctl raid-create
+--level raid1 --drives 32:0,32:1` / `b2ctl raid-del <vd>`.
+
+> Note: on a 2×M.2 NVMe card, if only one NVMe shows, enable **PCIe bifurcation
+> (x4x4)** for that slot in the BIOS — that is a hardware setting, not b2ctl.

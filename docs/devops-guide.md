@@ -588,3 +588,42 @@ python3 sim/simctl show           # disks + pools + mode
 
 b2ctl source (`b2ctl/*.py`) is **unchanged** — everything sim-specific lives in
 `sim/` (fake binaries + launcher). Full detail: `codes/sim/README.md`.
+
+---
+
+## RAID mode (Dell PERC) — every subprocess
+
+b2ctl auto-detects (or `controller.mode=raid`) and drives **perccli**. storcli is
+gone (blind to a PERC). Enumeration + SMART:
+
+| step | command | parsed for |
+|------|---------|-----------|
+| tool pick | `perccli show ctrlcount` | `Controller Count = N` (>0 wins) |
+| members | `perccli /cN/vall show all` | VD row (raid/state/size/name) + `PDs for VD n` (EID:Slt, DID, State, Med, Model) |
+| bay→serial | `perccli /cN/eall/sall show all` | `Drive /cN/eE/sS` + `SN =` |
+| member SMART | `smartctl -a -d megaraid,<DID> /dev/sda` | ATA attrs (POH, LBAs written, wear), `test result: PASSED` |
+| VD block dev | `lsblk -dnb -P` MODEL contains `PERC` | which `/dev/sdX` is the virtual disk (dropped from rows) |
+
+Actions (each `[y/N]`-guarded + audited via `safety.begin_op/end_op`):
+
+| op | command |
+|----|---------|
+| locate | `perccli /cN/eE/sS set locate start|stop` |
+| offline / missing | `perccli /cN/eE/sS set offline` → `set missing` |
+| rebuild | `perccli /cN/eE/sS start rebuild`; progress `… show rebuild` (`NN%`) |
+| create VD | `perccli /cN add vd type=raidL drives=e:s,e:s` |
+| delete VD | `perccli /cN/vV del force` |
+
+> Mutating ops + the rebuild-progress parser are **defensive** — validate on the
+> R640. ADR: b2ctl is now **dual-backend** (IT/HBA via sas2ircu + ZFS; RAID via
+> perccli + `smartctl -d megaraid`). On HW RAID the **controller** owns the
+> array, so lifecycle is perccli-driven, not ZFS — that is why the old IT-only
+> ban on `perccli`/`-d megaraid` was lifted.
+
+### Install profiles
+
+`b2ctl install --perc` → perccli + `controller.mode=raid`;
+`b2ctl install --flash` → sas2ircu + `controller.mode=it`
+(same flags on `./install.sh`). Binaries `cp -f` to `/usr/sbin` so they survive
+deletion of `/opt/MegaRAID` or the download dir. `config.set_mode()` is the only
+writer of `/etc/b2ctl/config.json`.

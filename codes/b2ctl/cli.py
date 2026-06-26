@@ -21,7 +21,7 @@ from . import installer as _installer_mod
 from .common import need_root, run, R, Y, G, C, N
 from . import ui
 
-__version__ = "0.5.0-itmode"
+__version__ = "0.6.0-itmode"
 
 
 def _resolve_dev(target: str, disks=None):

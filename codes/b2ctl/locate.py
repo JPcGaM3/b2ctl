@@ -36,6 +36,24 @@ def blink(dev: str, seconds: int = DEFAULT_SECONDS) -> tuple[bool, str]:
     return True, "dd"
 
 
+def blink_disk(disk, seconds: int = DEFAULT_SECONDS) -> tuple[bool, str]:
+    """Blink a Disk's bay LED, routed by backend.
+
+    HW-RAID members have no per-member block device (they share the VD's
+    /dev/sdX), so a dd read would blink the wrong thing — light the slot LED via
+    perccli (by enc:slot) instead. Everything else uses the dd activity read.
+    """
+    if getattr(disk, "array_type", "") == "HW" and disk.bay:
+        import time
+        from . import hba_raid
+        ok, _ = hba_raid.locate(disk.bay, True)
+        if ok:
+            time.sleep(seconds)
+            hba_raid.locate(disk.bay, False)
+        return ok, "perccli"
+    return blink(disk.dev, seconds)
+
+
 def blink_many(devs: list[str], seconds: int = DEFAULT_SECONDS) -> str:
     """Blink several disks at once for `seconds`, then stop."""
     import time

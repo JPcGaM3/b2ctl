@@ -137,8 +137,8 @@ def _assign_free_disk(d, tbw, all_disks=None) -> None:
     choice = _ask("  action> ")
 
     if choice == "1":
-        print(G + f"  ✔ Blinking {d.dev}..." + N)
-        locate.blink(d.dev, locate.DEFAULT_SECONDS)
+        print(G + f"  ✔ Blinking {d.bay if d.array_type == 'HW' else d.dev}..." + N)
+        locate.blink_disk(d, locate.DEFAULT_SECONDS)
     elif choice == "2":
         pool = _pick_pool()
         if pool and _confirm(f"add {ui.disk_label(d)} to '{pool}' as spare?"):
@@ -360,19 +360,20 @@ def _cmd_locate(tbw) -> None:
     target = _ask("  locate which (bay/serial/sdX)> ")
     if not target:
         return
-    dev = None
+    chosen = None
     for d in disks:
         if target in (d.bay, d.serial, d.dev, d.dev.replace("/dev/", "")):
-            dev = d.dev
+            chosen = d
             break
-    if not dev:
+    if chosen is None:
         print(f"{Y}  could not resolve '{target}'{N}")
         return
-    if dev == "-":
+    if chosen.dev == "-":
         print(f"{R}  cannot locate a GHOST disk (OS rejected it, no /dev node){N}")
         return
-    print(f"{Y}  blinking {dev} for {locate.DEFAULT_SECONDS}s ...{N}")
-    ok, method = locate.blink(dev)
+    where = f"bay {chosen.bay}" if chosen.array_type == "HW" else chosen.dev
+    print(f"{Y}  blinking {where} for {locate.DEFAULT_SECONDS}s ...{N}")
+    ok, method = locate.blink_disk(chosen)
     print((G + f"  ✔ done (via {method})" if ok else R + "  ✗ failed") + N)
 
 
@@ -419,7 +420,7 @@ def _replace_onto_spare(d, spare) -> bool:
 
     if not _DRY_RUN:
         print(f"{Y}  please pull bay {d.bay or '?'} ... blinking LED{N}")
-        locate.blink(d.dev, locate.DEFAULT_SECONDS)
+        locate.blink_disk(d, locate.DEFAULT_SECONDS)
     safety.end_op(op_id, True, out, "", 0, dry_run=_DRY_RUN)
     return True
 

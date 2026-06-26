@@ -73,21 +73,10 @@ def _locate(args) -> int:
     if d is None:
         print(f"{R}[-] could not resolve '{args.target}' to a disk{N}")
         return 1
-    # HW RAID members have no per-member block device — drive the LED via perccli.
-    if d.array_type == "HW":
-        from . import hba_raid
-        import time
-        print(f"{Y}[*] locate LED ON for bay {d.bay} ({args.seconds}s)...{N}")
-        ok, out = hba_raid.locate(d.bay, True)
-        if ok:
-            time.sleep(args.seconds)
-            hba_raid.locate(d.bay, False)
-        print((G + "[+] done (via perccli)" if ok else R + f"[-] failed: {out}") + N)
-        return 0 if ok else 1
-    print(f"{Y}[*] blinking {d.dev} for {args.seconds}s ...{N}")
-    ok, method = locatemod.blink(d.dev, args.seconds)
-    print((G + f"[+] done (via {method})" if ok
-           else R + "[-] failed") + N)
+    where = f"bay {d.bay}" if d.array_type == "HW" else d.dev
+    print(f"{Y}[*] blinking {where} for {args.seconds}s ...{N}")
+    ok, method = locatemod.blink_disk(d, args.seconds)
+    print((G + f"[+] done (via {method})" if ok else R + "[-] failed") + N)
     return 0 if ok else 1
 
 

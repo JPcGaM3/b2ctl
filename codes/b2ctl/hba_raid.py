@@ -144,6 +144,25 @@ def _is_perc_vd(model: str) -> bool:
     return any(mark in m for mark in _PERC_VD_MARKERS)
 
 
+def _parse_pd_rows(text: str) -> list[dict]:
+    """Extract physical-drive rows from any perccli table (vall or eall/sall).
+
+    Row: `EID:Slt DID State DG Size(2 tok) Intf Med SED PI SeSz Model… Sp`.
+    Returns {"bay","did","state","dg","size","intf","med","model"} per drive.
+    DG is "-" for unconfigured (UGood/JBOD) drives.
+    """
+    pds: list[dict] = []
+    for line in text.splitlines():
+        tok = line.split()
+        if len(tok) >= 12 and re.match(r"^\d+:\d+$", tok[0]):
+            pds.append({
+                "bay": tok[0], "did": tok[1], "state": tok[2], "dg": tok[3],
+                "size": f"{tok[4]} {tok[5]}", "intf": tok[6], "med": tok[7],
+                "model": " ".join(tok[11:-1]),
+            })
+    return pds
+
+
 def _parse_vall(text: str) -> tuple[list[dict], list[dict]]:
     """Parse `perccli /cN/vall show all`.
 
@@ -229,6 +248,7 @@ def enumerate_disks() -> list[Disk]:
     bay_to_sn = {bay: sn for sn, bay in bay_map().items()}
 
     member_disks: list[Disk] = []
+    member_bays = set()
     for m in members:
         d = Disk(dev=ctrl_dev)
         d.bay = m["bay"]
@@ -242,6 +262,33 @@ def enumerate_disks() -> list[Disk]:
         d.array_name = f"vd{m['vd']}/{(m['raid'] or '').lower()}"
         d.pd_state = m["state"]
         member_disks.append(d)
+        member_bays.add(m["bay"])
+
+    # Non-member physical drives the PERC sees (UGood/JBOD/Failed). These are NOT
+    # ghosts — the controller just hides them from the OS. Surface them as real
+    # disks (megaraid SMART) so they show health + state, not false GHOST rows.
+    raw_serials = {d.serial for d in raw if d.serial}
+    t = _tool()
+    for idx in _ctrl_indices():
+        for pd in _parse_pd_rows(run([t, f"/c{idx}/eall/sall", "show", "all"])):
+            if pd["bay"] in member_bays:
+                continue
+            sn = bay_to_sn.get(pd["bay"], "")
+            if sn and sn in raw_serials:        # OS-exposed JBOD: tag the real disk
+                for r in raw:
+                    if r.serial == sn:
+                        r.bay, r.pd_state = pd["bay"], pd["state"]
+                continue
+            d = Disk(dev=ctrl_dev)              # hidden drive: synthesise + megaraid SMART
+            d.bay = pd["bay"]
+            d.did = int(pd["did"]) if str(pd["did"]).isdigit() else None
+            d.smart_dtype = f"megaraid,{pd['did']}"
+            d.model = pd["model"]
+            d.serial = sn
+            d.is_ssd = (pd["med"].upper() == "SSD")
+            d.iface = pd["intf"]
+            d.pd_state = pd["state"]            # array_type stays "" (not in an array)
+            member_disks.append(d)
 
     # Keep lsblk disks that are NOT a PERC virtual disk (JBOD/non-RAID + NVMe).
     raw_kept = [d for d in raw if d.dev not in perc_dev_set]
@@ -314,29 +361,14 @@ def attach_bays(disks: list[Disk], controller: int | None = None, bm=None) -> No
 
 
 def get_ghost_disks(disks: list[Disk], controller: int | None = None, bm=None) -> list[Disk]:
-    """Find HBA-visible disks that the OS rejected (same algorithm as hba.py)."""
-    if not have_tool():
-        return []
-    cfg = _load_bay_map_cfg()
-    if bm is None:
-        bm = bay_map(controller)
-    os_serials = [d.serial for d in disks if d.serial]
-    ghosts = []
-    for serial, raw_bay in bm.items():
-        matched = any(
-            os_sn.startswith(serial) or serial.startswith(os_sn)
-            for os_sn in os_serials
-        )
-        if not matched:
-            d = Disk(dev="-")
-            d.bay = _remap(raw_bay, cfg)
-            d.serial = serial
-            d.model = "(Ghost / OS Rejected)"
-            d.health = "GHOST"
-            d.level = "CRITICAL"
-            d.reasons = ["OS_REJECTED"]
-            ghosts.append(d)
-    return ghosts
+    """No ghosts in RAID mode.
+
+    The IT-mode "ghost" concept means a disk the HBA sees but the OS rejected
+    (RAID metadata). Under a PERC in RAID mode the controller *deliberately*
+    hides non-VD drives from the OS — that is normal, and such drives are
+    surfaced as available (UGood/JBOD) by `enumerate_disks()`, not as ghosts.
+    """
+    return []
 
 
 def udev_rescue_ghost(serial: str) -> bool:

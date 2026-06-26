@@ -33,6 +33,21 @@ class TestDiskAssessment:
         assert d.level == "CRITICAL"
         assert any("FAILED" in r for r in d.reasons)
 
+    def test_ugood_perc_drive_is_config_not_critical(self):
+        # A PERC Unconfigured-Good drive is available, not a ghost/critical.
+        d = _disk(pool=None, vdev=None, vdev_state=None)
+        d.pd_state = "UGood"
+        assess(d)
+        assert d.level == "CONFIG"
+        assert any("Unconfigured Good" in r for r in d.reasons)
+
+    def test_failed_perc_drive_is_critical(self):
+        d = _disk(pool=None, vdev=None, vdev_state=None)
+        d.pd_state = "Failed"
+        assess(d)
+        assert d.level == "CRITICAL"
+        assert any("PD state=Failed" in r for r in d.reasons)
+
     def test_critical_bad_sectors(self):
         d = _disk(realloc=5)
         assess(d)

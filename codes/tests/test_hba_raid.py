@@ -111,6 +111,38 @@ class TestEnumerate(unittest.TestCase):
         self.assertEqual(hw[0].array_name, "vd0/raid1")
         self.assertIn("/dev/nvme0n1", devs)
 
+    def test_ugood_drives_enumerated_as_available_not_ghost(self):
+        from b2ctl.common import Disk
+        sda = Disk(dev="/dev/sda"); sda.model = "PERC H730 Mini"
+        nvme = Disk(dev="/dev/nvme0n1"); nvme.model = "Samsung 990 EVO"
+        vols, members = raid._parse_vall(_VALL)        # 2 members (32:0/32:1)
+        eall = (
+            "EID:Slt DID State DG     Size Intf Med SED PI SeSz Model               Sp\n"
+            "32:0      0 Onln   0 931.0 GB SATA SSD Y   N  512B Samsung SSD 870 EVO 1TB U\n"
+            "32:1      1 Onln   0 931.0 GB SATA SSD Y   N  512B Samsung SSD 870 EVO 1TB U\n"
+            "32:4      4 UGood  - 931.0 GB SATA SSD Y   N  512B Samsung SSD 870 EVO 1TB U\n"
+            "32:5      5 UGood  - 931.0 GB SATA SSD Y   N  512B Samsung SSD 870 EVO 1TB U\n")
+        bm = {"S8C5...616E": "32:0", "S8C5...619T": "32:1",
+              "S74Z...288W": "32:4", "S74Z...280E": "32:5"}
+        with patch.object(raid, "have_tool", return_value=True), \
+             patch.object(raid, "_vall_data", return_value=(vols, members)), \
+             patch.object(raid, "bay_map", return_value=bm), \
+             patch.object(raid, "_ctrl_indices", return_value=[0]), \
+             patch.object(raid, "_tool", return_value="perccli"), \
+             patch.object(raid, "run", return_value=eall), \
+             patch("b2ctl.hba.enumerate_disks", return_value=[sda, nvme]):
+            disks = raid.enumerate_disks()
+        hw = [d for d in disks if d.array_type == "HW"]
+        ugood = [d for d in disks if d.pd_state == "UGood"]
+        self.assertEqual(len(hw), 2)
+        self.assertEqual(len(ugood), 2)
+        for d in ugood:
+            self.assertEqual(d.array_type, "")          # available, not a member
+            self.assertIn(d.smart_dtype, ("megaraid,4", "megaraid,5"))
+            self.assertEqual(d.dev, "/dev/sda")          # megaraid target
+        # no ghosts in RAID mode
+        self.assertEqual(raid.get_ghost_disks(disks), [])
+
     def test_raid_volumes_member_count(self):
         vols, members = raid._parse_vall(_VALL)
         with patch.object(raid, "have_tool", return_value=True), \

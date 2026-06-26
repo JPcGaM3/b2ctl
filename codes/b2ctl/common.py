@@ -145,6 +145,16 @@ def assess(d: Disk) -> None:
         if st and st not in ("ONLN", "ONLINE", "OPTL", "OPTIMAL"):
             sev = "WARNING" if st in ("RBLD", "REBUILD") else "CRITICAL"
             bump(sev, f"PD state={d.pd_state}")
+    elif d.pd_state:
+        # A PERC physical drive that is NOT a VD member (UGood/JBOD/Failed). The
+        # controller hides it from the OS — it is available, not a ghost.
+        st = d.pd_state.upper()
+        if st in ("UGOOD", "JBOD", "READY", "UGUNSP"):
+            bump("CONFIG", "available (Unconfigured Good) — add to a RAID volume via raid-create")
+        elif st in ("OFFLN", "FAILED", "UBAD", "MISSING"):
+            bump("CRITICAL", f"PD state={d.pd_state}")
+        else:
+            bump("CONFIG", f"PD state={d.pd_state}")
     elif not d.in_pool and not d.is_spare:
         bump("CONFIG", "unassigned (not in any pool — add to a pool or set as spare)")
 

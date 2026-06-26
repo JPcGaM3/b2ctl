@@ -267,11 +267,19 @@ def _wipe_ghost(d, tbw) -> None:
 
 def _cmd_assign(tbw) -> None:
     disks = core.scan(tbw)
-    avail = [d for d in disks if not d.in_pool and d.dev != "-"]
+    # ZFS-assignable = owns a real block device and is NOT a PERC-managed drive.
+    # A PERC member/UGood disk's dev is the shared VD block device (/dev/sda);
+    # never offer it to the wipe/add-to-pool flow.
+    avail = [d for d in disks if not d.in_pool and d.dev != "-"
+             and not d.array_type and not d.pd_state]
     ghosts = [d for d in disks if d.health == "GHOST"]
     avail_all = avail + ghosts
     if not avail_all:
-        print(f"{Y}  no unassigned disks available to assign{N}")
+        if any(d.pd_state for d in disks):
+            print(f"{Y}  no ZFS-assignable disks. For hardware-RAID drives use "
+                  f"'b2ctl raid-create' to build a volume from Unconfigured-Good drives.{N}")
+        else:
+            print(f"{Y}  no unassigned disks available to assign{N}")
         return
     for i, d in enumerate(avail_all, 1):
         if d.health == "GHOST":
@@ -449,7 +457,11 @@ def _cmd_replace(tbw) -> None:
 
 
 def _cmd_create(tbw) -> None:
-    available = [d for d in core.scan(tbw) if not d.in_pool]
+    # Exclude PERC-managed drives: their dev is the shared VD block device
+    # (/dev/sda), so creating a ZFS pool on one would target the OS disk.
+    available = [d for d in core.scan(tbw)
+                 if not d.in_pool and d.dev != "-"
+                 and not d.array_type and not d.pd_state]
     if not available:
         print(f"{Y}  no available disks to create pool{N}")
         return

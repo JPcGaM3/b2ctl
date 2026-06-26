@@ -536,5 +536,25 @@ class TestWatchAuditOrdering(unittest.TestCase):
         mock_begin.assert_not_called()
 
 
+class TestAssignExcludesPercDisks(unittest.TestCase):
+    """SAFETY: PERC-managed disks (dev=/dev/sda) must never reach the ZFS
+    wipe/assign flow — that would target the OS virtual disk."""
+
+    @patch("b2ctl.watch._wipe_ghost")
+    @patch("b2ctl.watch._assign_free_disk")
+    @patch("builtins.input")
+    @patch("b2ctl.watch.core")
+    def test_assign_skips_hw_and_ugood(self, mock_core, inp, assign_mock, wipe_mock):
+        import b2ctl.watch as watch
+        member = Disk(dev="/dev/sda"); member.array_type = "HW"; member.bay = "32:0"
+        ugood = Disk(dev="/dev/sda"); ugood.pd_state = "UGood"; ugood.bay = "32:4"
+        mock_core.scan.return_value = [member, ugood]
+        watch._cmd_assign({})
+        # nothing ZFS-assignable -> no prompt, no wipe/assign on /dev/sda
+        inp.assert_not_called()
+        assign_mock.assert_not_called()
+        wipe_mock.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

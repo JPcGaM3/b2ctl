@@ -153,18 +153,27 @@ exec env PYTHONPATH="${PREFIX}" python3 -m b2ctl "\$@"
 EOF
 chmod +x "${LAUNCHER}"
 
-echo "[*] installing sas2ircu runtime dependency (32-bit ELF needs libc6-i386)"
-dpkg --add-architecture i386 >/dev/null 2>&1 || true
-apt-get update -qq >/dev/null 2>&1 || true
-apt-get install -y libc6-i386 >/dev/null 2>&1 || \
-    echo "  [!] libc6-i386 install failed — sas2ircu will not execute"
+# sas2ircu (IT/HBA mode) is a 32-bit ELF needing libc6-i386. A RAID-only
+# (--perc) install uses perccli for bays/LEDs, so skip the sas2ircu bits there.
+if [ "${SET_MODE}" != "raid" ]; then
+    echo "[*] installing sas2ircu runtime dependency (32-bit ELF needs libc6-i386)"
+    dpkg --add-architecture i386 >/dev/null 2>&1 || true
+    apt-get update -qq >/dev/null 2>&1 || true
+    apt-get install -y libc6-i386 >/dev/null 2>&1 || \
+        echo "  [!] libc6-i386 install failed — sas2ircu will not execute"
+fi
 
 echo "[*] checking dependencies"
 for bin in smartctl zpool lsblk; do
     command -v "$bin" >/dev/null 2>&1 || echo "  [!] missing: $bin"
 done
-command -v sas2ircu >/dev/null 2>&1 ||
-    echo "  [!] sas2ircu missing — bay numbers will be disabled"
+if [ "${SET_MODE}" = "raid" ]; then
+    command -v perccli >/dev/null 2>&1 ||
+        echo "  [i] perccli will be installed below (RAID mode)"
+else
+    command -v sas2ircu >/dev/null 2>&1 ||
+        echo "  [!] sas2ircu missing — bay numbers disabled (IT mode); install with: ./install.sh --flash"
+fi
 command -v ledctl >/dev/null 2>&1 ||
     echo "  [i] optional: apt install ledmon  (nicer locate LEDs; dd fallback works without it)"
 

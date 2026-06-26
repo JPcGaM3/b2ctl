@@ -104,3 +104,28 @@ class TestUI:
                   "free": "2.72T", "health": "ONLINE", "frag": "0%", "cap": "0%"}]
         result = ui.render_details([d], pools)
         assert "all disks healthy" in result
+
+
+class TestArrayColumn:
+    def test_pool_cell_sw_prefix(self):
+        from b2ctl import ui
+        d = _disk()
+        d.pool = "tank"; d.vdev = "raidz1-0"
+        assert "SW:tank/raidz1-0" in ui.render_table([d])
+
+    def test_pool_cell_hw_prefix(self):
+        from b2ctl import ui
+        d = _disk()
+        d.pool = None; d.array_type = "HW"; d.array_name = "vd0/raid1"
+        assert "HW:vd0/raid1" in ui.render_table([d])
+
+    def test_render_raid_volumes(self):
+        from b2ctl import ui
+        out = ui.render_raid_volumes([
+            {"vd": "0", "raid": "RAID1", "state": "Optl",
+             "size": "640.0 GB", "name": "MainSSD", "members": 2}])
+        assert "vd0" in out and "RAID1" in out and "members=2" in out
+
+    def test_render_raid_volumes_empty(self):
+        from b2ctl import ui
+        assert ui.render_raid_volumes([]) == ""

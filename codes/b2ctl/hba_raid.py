@@ -1,10 +1,13 @@
-"""b2ctl.hba_raid — RAID-mode backend (storcli64 / perccli64).
+"""b2ctl.hba_raid — RAID-mode backend (perccli).
 
-Supports Dell PERC controllers in RAID mode. Both JBOD and RAID-array
-virtual drives are enumerated. JBOD disks appear in lsblk as /dev/sdX;
-virtual drives appear as a synthetic entry with dev="-" and health="RAID_VD".
+Supports Dell PERC controllers in RAID mode. Physical drives behind a RAID
+virtual disk are enumerated from `perccli /cN/vall show all` and read via SMART
+passthrough (`smartctl -d megaraid,<DID>`); JBOD/non-RAID disks appear in lsblk
+as /dev/sdX. The virtual disk itself is reported by raid_volumes(), not as a
+disk row.
 
-Tested CLI: storcli64 / perccli64 (same syntax, different binary name).
+perccli64 and perccli are the same tool (64-bit binary name vs copied name).
+storcli was dropped — it is blind to a PERC and only caused false detection.
 """
 from __future__ import annotations
 
@@ -16,32 +19,62 @@ import re
 from .common import Disk, run, run_check
 
 CONTROLLER = 0
-_TOOL_CANDIDATES = ("storcli64", "storcli", "perccli64", "perccli")
+# Dell PERC speaks perccli; storcli (LSI) is blind to a PERC and only caused
+# false RAID detection — dropped. RAID = perccli, IT = sas2ircu.
+_TOOL_CANDIDATES = ("perccli64", "perccli")
+
+_tool_cache: str | None = None
+
+
+def _ctrlcount(tool: str) -> int | None:
+    """Return the controller count a tool reports, or None if it can't run."""
+    out = run([tool, "show", "ctrlcount"])
+    if not out:
+        return None
+    m = re.search(r"Controller Count\s*=\s*(\d+)", out)
+    return int(m.group(1)) if m else 0
+
+
+def _pick_tool() -> str:
+    """Resolve the storcli/perccli binary that actually sees a controller.
+
+    A tool can run yet report 0 controllers (storcli is blind to a PERC), so we
+    prefer the first candidate reporting a non-zero controller count and only
+    fall back to a runnable-but-0 tool, then to a bare name.
+    """
+    from . import config as _cfg
+    fallback: str | None = None
+    for name in _TOOL_CANDIDATES:
+        t = _cfg.tool(name)
+        cnt = _ctrlcount(t)
+        if cnt is None:
+            continue
+        if cnt > 0:
+            return t
+        fallback = fallback or t
+    return fallback or _cfg.tool("perccli64")
 
 
 def _tool() -> str:
-    """Return resolved path for the first available storcli/perccli binary."""
-    from . import config as _cfg
-    for name in _TOOL_CANDIDATES:
-        t = _cfg.tool(name)
-        if run([t, "show", "ctrlcount"]):
-            return t
-    # fallback to storcli64 (will fail with clear error if not present)
-    return _cfg.tool("storcli64")
+    """Return (and cache) the resolved storcli/perccli path."""
+    global _tool_cache
+    if _tool_cache is None:
+        _tool_cache = _pick_tool()
+    return _tool_cache
 
 
 def have_tool() -> bool:
-    """Return True if any storcli/perccli binary is functional."""
+    """Return True if some storcli/perccli binary reports a controller."""
     from . import config as _cfg
     for name in _TOOL_CANDIDATES:
-        t = _cfg.tool(name)
-        if run([t, "show", "ctrlcount"]):
+        cnt = _ctrlcount(_cfg.tool(name))
+        if cnt and cnt > 0:
             return True
     return False
 
 
 def _list_controllers() -> list[int]:
-    """Return list of controller indices from `storcli show ctrlcount`."""
+    """Return list of controller indices from `perccli show ctrlcount`."""
     t = _tool()
     out = run([t, "show", "ctrlcount"])
     m = re.search(r"Controller Count\s*=\s*(\d+)", out)
@@ -49,32 +82,31 @@ def _list_controllers() -> list[int]:
     return list(range(count))
 
 
+def _ctrl_indices(controller: int | None = None) -> list[int]:
+    """Resolve which controller indices to query, honouring config."""
+    from . import config as _cfg
+    if controller is not None:
+        return [controller]
+    setting = _cfg.controller_index_setting()
+    return _list_controllers() if setting == "all" else [int(setting)]
+
+
 def bay_map(controller: int | None = None) -> dict:
     """Return serial -> 'enc:slot' for all JBOD/RAID-array disks.
 
-    Uses `storcli64 /c<n>/eall/sall show all` and parses the
-    Drive Detailed Information section for SN and EID:Slt.
+    Uses `perccli /c<n>/eall/sall show all` and parses the Drive Detailed
+    Information section for SN and EID:Slt.
     """
-    from . import config as _cfg
     t = _tool()
-    indices: list[int]
-    setting = _cfg.controller_index_setting()
-    if controller is not None:
-        indices = [controller]
-    elif setting == "all":
-        indices = _list_controllers()
-    else:
-        indices = [int(setting)]
-
     mapping: dict[str, str] = {}
-    for idx in indices:
+    for idx in _ctrl_indices(controller):
         out = run([t, f"/c{idx}/eall/sall", "show", "all"])
         _parse_bay_map(out, mapping)
     return mapping
 
 
 def _parse_bay_map(text: str, mapping: dict) -> None:
-    """Parse storcli `show all` output into {serial: 'enc:slot'}."""
+    """Parse perccli `show all` output into {serial: 'enc:slot'}."""
     # Pattern: "Drive /c<n>/e<enc>/s<slot> Device attributes"
     # followed by "SN = <serial>"
     current_slot: str | None = None
@@ -103,11 +135,134 @@ def _lsblk_pairs(cols: str) -> list[dict]:
     return rows
 
 
+# Block-device models that mean "this is a PERC virtual disk, not a real disk".
+_PERC_VD_MARKERS = ("PERC", "MEGARAID", "AVAGO", "LSI", "VIRTUAL DISK")
+
+
+def _is_perc_vd(model: str) -> bool:
+    m = (model or "").upper()
+    return any(mark in m for mark in _PERC_VD_MARKERS)
+
+
+def _parse_vall(text: str) -> tuple[list[dict], list[dict]]:
+    """Parse `perccli /cN/vall show all`.
+
+    Returns (volumes, members):
+      volumes: {"vd","raid","state","size","name"}
+      members: {"bay","did","state","dg","size","intf","med","model","vd","raid"}
+
+    Member rows come from the per-VD 'PDs for VD N' table, e.g.::
+
+        EID:Slt DID State DG     Size Intf Med SED PI SeSz Model              Sp
+        32:0      0 Onln   0 931.0 GB SATA SSD Y   N  512B Samsung SSD 870... U
+
+    Model is multi-word; parse positionally (4 fixed cols, size = 2 tokens,
+    model = middle, Sp = last token).
+    """
+    vols: list[dict] = []
+    members: list[dict] = []
+    cur_vd: str | None = None
+    cur_raid: str | None = None
+    for line in text.splitlines():
+        s = line.strip()
+        mv = re.match(r"/c\d+/v(\d+)\s*:", s)
+        if mv:
+            cur_vd = mv.group(1)
+            continue
+        tok = s.split()
+        # VD summary row: "0/0 RAID1 Optl RW Yes RWBD - OFF 640.0 GB MainSSD"
+        if (len(tok) >= 10 and re.match(r"^\d+/\d+$", tok[0])
+                and tok[1].upper().startswith("RAID")):
+            vd = tok[0].split("/")[1]
+            cur_raid = tok[1]
+            vols.append({"vd": vd, "raid": tok[1], "state": tok[2],
+                         "size": f"{tok[8]} {tok[9]}",
+                         "name": " ".join(tok[10:])})
+            continue
+        # PD row: starts "EID:Slt DID State DG  Size Unit Intf Med ..."
+        if len(tok) >= 12 and re.match(r"^\d+:\d+$", tok[0]):
+            members.append({
+                "bay": tok[0], "did": tok[1], "state": tok[2], "dg": tok[3],
+                "size": f"{tok[4]} {tok[5]}", "intf": tok[6], "med": tok[7],
+                "model": " ".join(tok[11:-1]), "vd": cur_vd, "raid": cur_raid,
+            })
+    return vols, members
+
+
+def _vall_data() -> tuple[list[dict], list[dict]]:
+    """Run perccli vall for every controller; return (volumes, members)."""
+    t = _tool()
+    vols_all: list[dict] = []
+    members_all: list[dict] = []
+    for idx in _ctrl_indices():
+        vols, members = _parse_vall(run([t, f"/c{idx}/vall", "show", "all"]))
+        for v in vols:
+            v["controller"] = idx
+        for m in members:
+            m["controller"] = idx
+        vols_all += vols
+        members_all += members
+    return vols_all, members_all
+
+
 def enumerate_disks() -> list[Disk]:
-    """Return one Disk per physical JBOD block device (same as IT-mode)."""
+    """Return Disks for PERC RAID members + JBOD/direct block devices.
+
+    RAID members live behind a virtual disk and are invisible to lsblk, so they
+    are synthesised from perccli with `dev` pointing at a controller block
+    device and `smart_dtype = "megaraid,<DID>"` (SMART read via passthrough).
+    The virtual-disk block device itself (model 'PERC …') is dropped from the
+    disk rows — it is reported separately by `raid_volumes()`.
+    """
     from . import hba
-    # For JBOD disks, lsblk sees them just like IT-mode — reuse hba logic
-    return hba.enumerate_disks()
+    raw = hba.enumerate_disks()
+    if not have_tool():
+        return raw
+
+    _vols, members = _vall_data()
+    perc_devs = [d for d in raw if _is_perc_vd(d.model)]
+    perc_dev_set = {d.dev for d in perc_devs}
+    # Any block device on the controller is a valid megaraid SMART target.
+    ctrl_dev = (perc_devs[0].dev if perc_devs
+                else (raw[0].dev if raw else "/dev/sda"))
+    # enc:slot -> serial (from eall/sall) so members carry SN before SMART runs.
+    bay_to_sn = {bay: sn for sn, bay in bay_map().items()}
+
+    member_disks: list[Disk] = []
+    for m in members:
+        d = Disk(dev=ctrl_dev)
+        d.bay = m["bay"]
+        d.did = int(m["did"]) if str(m["did"]).isdigit() else None
+        d.smart_dtype = f"megaraid,{m['did']}"
+        d.model = m["model"]
+        d.serial = bay_to_sn.get(m["bay"], "")
+        d.is_ssd = (m["med"].upper() == "SSD")
+        d.iface = m["intf"]
+        d.array_type = "HW"
+        d.array_name = f"vd{m['vd']}/{(m['raid'] or '').lower()}"
+        d.pd_state = m["state"]
+        member_disks.append(d)
+
+    # Keep lsblk disks that are NOT a PERC virtual disk (JBOD/non-RAID + NVMe).
+    raw_kept = [d for d in raw if d.dev not in perc_dev_set]
+    return member_disks + raw_kept
+
+
+def raid_volumes() -> list[dict]:
+    """Return hardware RAID volumes for the volumes table (empty if none)."""
+    if not have_tool():
+        return []
+    vols, members = _vall_data()
+    counts: dict[tuple, int] = {}
+    for m in members:
+        counts[(m.get("controller"), m["vd"])] = \
+            counts.get((m.get("controller"), m["vd"]), 0) + 1
+    out = []
+    for v in vols:
+        v = dict(v)
+        v["members"] = counts.get((v.get("controller"), v["vd"]), 0)
+        out.append(v)
+    return out
 
 
 def _load_bay_map_cfg() -> dict:

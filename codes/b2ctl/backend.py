@@ -2,11 +2,11 @@
 
 Backends:
   ITBackend   -- wraps hba.py  (sas2ircu, IT/HBA mode)
-  RaidBackend -- wraps hba_raid.py (storcli64/perccli64, RAID mode)
+  RaidBackend -- wraps hba_raid.py (perccli, RAID mode + smartctl -d megaraid)
 
 Detection order (mode=auto):
-  1. Try sas2ircu list        -> IT
-  2. Try storcli/perccli show -> RAID
+  1. Try sas2ircu list   -> IT
+  2. Try perccli show    -> RAID
   3. Neither: die with hint
 """
 from __future__ import annotations
@@ -36,6 +36,10 @@ class Backend:
         return False
 
     def enumerate_disks(self) -> list:
+        return []
+
+    def raid_volumes(self) -> list:
+        """Hardware RAID volumes (RAID backend only); [] for IT/HBA."""
         return []
 
 
@@ -114,6 +118,10 @@ class RaidBackend(Backend):
         from . import hba_raid
         return hba_raid.enumerate_disks()
 
+    def raid_volumes(self) -> list:
+        from . import hba_raid
+        return hba_raid.raid_volumes()
+
 
 # --------------------------------------------------------------------------- #
 # Detection + cache
@@ -143,8 +151,8 @@ def _detect_backend() -> Backend:
     if run([sas, "list"]):
         return ITBackend()
     # Binary exists but can't execute? (32-bit sas2ircu needs libc6-i386)
-    # Prefer IT-mode over RAID — crossflashed PERC H710 still responds to
-    # storcli's management plane even in IT/HBA mode, causing false RAID detection.
+    # Prefer IT-mode over RAID when the sas2ircu binary is present — on a
+    # crossflashed PERC the box is IT/HBA even if perccli is also installed.
     _sas_path = _shutil.which(sas) or sas
     if _os.path.isfile(_sas_path):
         print(
@@ -154,14 +162,13 @@ def _detect_backend() -> Backend:
             file=_sys.stderr,
         )
         return ITBackend()
-    # try storcli / perccli variants
-    for tname in ("storcli64", "storcli", "perccli64", "perccli"):
-        t = _cfg.tool(tname)
-        if run([t, "show", "ctrlcount"]):
-            return RaidBackend()
+    # try perccli (the PERC RAID tool); a controller count > 0 means RAID mode
+    from . import hba_raid
+    if hba_raid.have_tool():
+        return RaidBackend()
     die(
         "No HBA/RAID tool found. Install sas2ircu (IT/HBA mode) or "
-        "storcli64/perccli64 (RAID mode), or set tool_paths in "
+        "perccli (RAID mode), or set tool_paths in "
         "/etc/b2ctl/config.json and set controller.mode to 'it' or 'raid'."
     )
     return ITBackend()  # unreachable -- die() exits

@@ -1,4 +1,10 @@
-"""b2ctl.installer — download and install sas2ircu / storcli / perccli."""
+"""b2ctl.installer — download and install sas2ircu (IT) / perccli (RAID).
+
+storcli was dropped: it is the LSI tool, blind to a Dell PERC, and only caused
+false RAID detection. RAID mode uses perccli; IT/HBA mode uses sas2ircu.
+Binaries are copied (cp -f) to /usr/sbin so they survive deletion of the
+download dir or /opt/MegaRAID — matching install.sh.
+"""
 from __future__ import annotations
 
 import os
@@ -11,17 +17,18 @@ import zipfile
 
 _GDRIVE = {
     "sas2ircu": "1rP7f8weCvXEaqWSAj5MDNwMDvK2RXTCt",
-    "storcli":  "1nMbQFD94vdDl6QNjUzRtp1UHlKwDwmYN",
     "perccli":  "1hJt5Sr2xNW4OHCD-AoefiHhjJCeWVWVk",
 }
 _BASE = "https://drive.usercontent.google.com/download?export=download&confirm=t&id="
 _ARCHIVE_NAME = {
     "sas2ircu": "SAS2IRCU_P20.zip",
-    "storcli":  "storcli.zip",
     "perccli":  "perccli.tar.gz",
 }
 # Harmless probe args used to confirm a tool can actually run (any exit code).
-_PROBE = {"sas2ircu": ["list"], "storcli": ["show"], "perccli": ["show"]}
+_PROBE = {"sas2ircu": ["list"], "perccli": ["show"]}
+# Install profiles: which tools + which controller mode each one sets.
+_PROFILE_TOOLS = {"perc": ["perccli"], "flash": ["sas2ircu"]}
+_PROFILE_MODE = {"perc": "raid", "flash": "it"}
 
 
 def _executes(path: str, probe: list[str]) -> bool:
@@ -55,8 +62,18 @@ def download(file_id: str, dest_path: str) -> None:
     print(f" {size // 1024} KB")
 
 
+def _install_to_usr_sbin(src: str, name: str, probe: list[str]) -> tuple[bool, str]:
+    """cp -f a binary to /usr/sbin/<name>, chmod +x, verify it executes."""
+    dest = f"/usr/sbin/{name}"
+    shutil.copy2(src, dest)
+    os.chmod(dest, 0o755)
+    if not _executes(dest, probe):
+        return False, "installed but won't execute (missing runtime libs)"
+    return True, dest
+
+
 def install_sas2ircu(archive: str) -> tuple[bool, str]:
-    """Extract linux_x86_rel/sas2ircu from zip, install to /usr/local/bin/sas2ircu."""
+    """Extract linux_x86_rel/sas2ircu from zip, cp -f to /usr/sbin/sas2ircu."""
     tmp = tempfile.mkdtemp()
     try:
         with zipfile.ZipFile(archive) as zf:
@@ -70,49 +87,11 @@ def install_sas2ircu(archive: str) -> tuple[bool, str]:
                     break
         if not sas:
             return False, "binary not found in archive"
-        dest = "/usr/local/sbin/sas2ircu"
-        shutil.copy2(sas, dest)
-        os.chmod(dest, 0o755)
-        if not _executes(dest, _PROBE["sas2ircu"]):
-            return False, ("installed but won't execute — 32-bit loader missing; "
+        ok, msg = _install_to_usr_sbin(sas, "sas2ircu", _PROBE["sas2ircu"])
+        if not ok:
+            return False, (msg + " — 32-bit loader missing; "
                            "run: apt-get install -y libc6-i386")
-        return True, dest
-    except Exception as exc:
-        return False, str(exc)
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-
-
-def install_storcli(archive: str) -> tuple[bool, str]:
-    """Extract Ubuntu/*.deb from zip, run dpkg -i, symlink storcli64 -> /usr/local/bin/storcli."""
-    tmp = tempfile.mkdtemp()
-    try:
-        with zipfile.ZipFile(archive) as zf:
-            zf.extractall(tmp)
-        deb = None
-        for root, _dirs, files in os.walk(tmp):
-            if os.path.basename(root) == "Ubuntu":
-                for f in files:
-                    if f.endswith(".deb"):
-                        deb = os.path.join(root, f)
-                        break
-            if deb:
-                break
-        if not deb:
-            return False, "Ubuntu .deb not found in archive"
-        r = subprocess.run(["dpkg", "-i", deb], capture_output=True, text=True)
-        if r.returncode != 0:
-            return False, f"dpkg failed: {r.stderr.strip()}"
-        binary = "/opt/MegaRAID/storcli/storcli64"
-        if not os.path.exists(binary):
-            return False, f"dpkg succeeded but {binary} not found"
-        symlink = "/usr/local/bin/storcli"
-        if os.path.lexists(symlink):
-            os.remove(symlink)
-        os.symlink(binary, symlink)
-        if not _executes(symlink, _PROBE["storcli"]):
-            return False, "installed but won't execute (check shared libs)"
-        return True, symlink
+        return True, msg
     except Exception as exc:
         return False, str(exc)
     finally:
@@ -120,7 +99,7 @@ def install_storcli(archive: str) -> tuple[bool, str]:
 
 
 def install_perccli(archive: str) -> tuple[bool, str]:
-    """Extract *.rpm from tar.gz, run alien --scripts -i, symlink perccli64 -> /usr/local/bin/perccli."""
+    """Extract *.rpm from tar.gz, alien -i, cp -f perccli64 -> /usr/sbin/perccli."""
     tmp = tempfile.mkdtemp()
     try:
         with tarfile.open(archive) as tf:
@@ -142,11 +121,7 @@ def install_perccli(archive: str) -> tuple[bool, str]:
         binary = "/opt/MegaRAID/perccli/perccli64"
         if not os.path.exists(binary):
             return False, f"alien succeeded but {binary} not found"
-        symlink = "/usr/local/bin/perccli"
-        if os.path.lexists(symlink):
-            os.remove(symlink)
-        os.symlink(binary, symlink)
-        return True, symlink
+        return _install_to_usr_sbin(binary, "perccli", _PROBE["perccli"])
     except Exception as exc:
         return False, str(exc)
     finally:
@@ -189,7 +164,6 @@ def install_tools(tools: list[str] | None = None) -> None:
     """Download and install tools. tools=None means all missing ones."""
     _install_fn = {
         "sas2ircu": install_sas2ircu,
-        "storcli":  install_storcli,
         "perccli":  install_perccli,
     }
     ensure_prereqs()
@@ -220,3 +194,20 @@ def install_tools(tools: list[str] | None = None) -> None:
                 print(f"  [✗] {name}: {msg}")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def install_profile(profile: str) -> None:
+    """Install the tools for a profile and set the matching controller mode.
+
+    'perc'  -> perccli  + controller.mode=raid
+    'flash' -> sas2ircu + controller.mode=it
+    """
+    from . import config as _cfg
+    tools = _PROFILE_TOOLS.get(profile)
+    if tools is None:
+        print(f"  [✗] unknown profile: {profile}")
+        return
+    install_tools(tools)
+    mode = _PROFILE_MODE[profile]
+    _cfg.set_mode(mode)
+    print(f"  [✔] controller.mode = {mode}  ({_cfg.CONFIG_PATH})")

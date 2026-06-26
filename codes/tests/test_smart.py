@@ -111,5 +111,28 @@ ID# ATTRIBUTE_NAME          FLAG     VALUE WORST THRESH TYPE      UPDATED  WHEN_
         self.assertEqual(d.uncorr, 0)
 
 
+class TestMegaraidDtype(unittest.TestCase):
+    """RAID-mode: smartctl must try -d megaraid,<DID> first when smart_dtype set."""
+
+    def test_smartctl_tries_megaraid_first(self):
+        from unittest.mock import patch
+        import b2ctl.smart as smart
+        seen = []
+
+        def _run(cmd):
+            seen.append(cmd)
+            # Return valid SMART only for the megaraid attempt.
+            if "megaraid,7" in cmd:
+                return "ATTRIBUTE_NAME\nSMART overall-health ... PASSED"
+            return ""
+
+        with patch("b2ctl.smart.run", side_effect=_run), \
+             patch("b2ctl.config.tool", return_value="smartctl"):
+            out = smart._smartctl("/dev/sda", "megaraid,7")
+        assert "ATTRIBUTE_NAME" in out
+        # first attempt used the forced megaraid type
+        assert seen[0] == ["smartctl", "-a", "-d", "megaraid,7", "/dev/sda"]
+
+
 if __name__ == "__main__":
     unittest.main()

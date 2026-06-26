@@ -99,6 +99,12 @@ class Disk:
     level: str = "NORMAL"
     reasons: list = field(default_factory=list)
     spare_replacing: str | None = None
+    # RAID-mode (PERC) fields — empty/None on IT-mode so existing behaviour is unchanged
+    array_type: str = ""           # "HW" (PERC VD member) | "SW" (derived from pool) | ""
+    array_name: str = ""           # HW only, e.g. "vd0/raid1"
+    smart_dtype: str = ""          # smartctl -d arg, e.g. "megaraid,7"
+    did: int | None = None         # megaraid device id
+    pd_state: str = ""             # perccli PD state: Onln/Rbld/JBOD/UGood/Failed
 
     @property
     def in_pool(self) -> bool:
@@ -130,6 +136,13 @@ def assess(d: Disk) -> None:
     if d.vdev_state and d.vdev_state.upper() in _BAD_VDEV:
         sev = "WARNING" if d.vdev_state.upper() == "DEGRADED" else "CRITICAL"
         bump(sev, f"vdev state={d.vdev_state}")
+    elif d.array_type == "HW":
+        # Hardware-RAID member: the controller owns it, so it's "assigned".
+        # Level follows the PERC physical-drive state, not pool membership.
+        st = (d.pd_state or "").upper()
+        if st and st not in ("ONLN", "ONLINE", "OPTL", "OPTIMAL"):
+            sev = "WARNING" if st in ("RBLD", "REBUILD") else "CRITICAL"
+            bump(sev, f"PD state={d.pd_state}")
     elif not d.in_pool and not d.is_spare:
         bump("CONFIG", "unassigned (not in any pool — add to a pool or set as spare)")
 

@@ -58,8 +58,8 @@ def _status_cell(d: Disk) -> str:
 def render_table(disks: list[Disk]) -> str:
     hdr = (f"{'BAY':<6}{'DEV':<10}{'IF':<5}{'MODEL':<24}{'SERIAL':<18}"
            f"{'POWER_ON':<14}{'WEAR(used)':<11}{'END(left)':<11}"
-           f"{'WRITTEN':<19}{'BAD':<6}{'HEALTH':<9}{'POOL':<17}{'STATUS':<10}{'LEVEL'}")
-    lines = ["=" * 178, hdr, "-" * 178]
+           f"{'WRITTEN':<19}{'BAD':<6}{'HEALTH':<9}{'POOL/ARRAY':<21}{'STATUS':<10}{'LEVEL'}")
+    lines = ["=" * 182, hdr, "-" * 182]
     for d in disks:
         wear_used = "N/A" if d.wear_val is None else f"{100 - d.wear_val}%"
         end_left = "N/A" if d.end_left is None else f"{d.end_left:.1f}%"
@@ -70,16 +70,20 @@ def render_table(disks: list[Disk]) -> str:
             written = f"{d.written_tb:.2f}TB{cap}"
         else:
             written = f"{d.written_tb:.2f}TB (HDD)"
-        pool = d.pool or "-"
-        if d.vdev:
-            pool = f"{pool}/{d.vdev}"
+        # POOL cell encodes the array type: SW = ZFS, HW = PERC virtual disk.
+        if d.pool:
+            pool = f"SW:{d.pool}" + (f"/{d.vdev}" if d.vdev else "")
+        elif d.array_type == "HW":
+            pool = f"HW:{d.array_name}"
+        else:
+            pool = "-"
         lines.append(
             f"{(d.bay or '-'):<6}{d.dev.replace('/dev/',''):<10}"
             f"{(d.iface or '?'):<5}{(d.model or '?')[:23]:<24}"
             f"{(d.serial or 'N/A')[:17]:<18}{fmt_poh(d.poh):<14}"
             f"{wear_used:<11}{end_left:<11}{written:<19}{d.realloc:<6}"
-            f"{d.health:<9}{pool[:16]:<17}{_status_cell(d)}{color_level(d.level)}")
-    lines.append("=" * 178)
+            f"{d.health:<9}{pool[:20]:<21}{_status_cell(d)}{color_level(d.level)}")
+    lines.append("=" * 182)
     return "\n".join(lines)
 
 
@@ -93,6 +97,22 @@ def render_pools(pools: list[dict]) -> str:
         lines.append(f"  {tag}{p['name']:<10}{p['size']:<8}{p['alloc']:<8}"
                      f"free={p['free']:<8}{p['health']:<10}cap={p['cap']}{N}"
                      f"{'  <-- not ONLINE' if bad else ''}")
+    return "\n".join(lines)
+
+
+def render_raid_volumes(vols: list[dict]) -> str:
+    """Render the hardware (PERC) RAID volumes table. Empty string if none."""
+    if not vols:
+        return ""
+    lines = ["RAID volumes (hardware):"]
+    for v in vols:
+        bad = not str(v.get("state", "")).lower().startswith("optl")
+        tag = R if bad else G
+        lines.append(
+            f"  {tag}vd{v.get('vd','?'):<3} {str(v.get('raid','?')):<7}"
+            f"{str(v.get('state','?')):<7} {str(v.get('size','?')):<11}"
+            f"members={v.get('members','?')}{N}"
+            f"{('  ' + v['name']) if v.get('name') else ''}")
     return "\n".join(lines)
 
 

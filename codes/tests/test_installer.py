@@ -61,7 +61,32 @@ class TestInstallSas2ircuVerify(unittest.TestCase):
              patch("b2ctl.installer._executes", return_value=True):
             ok, msg = installer.install_sas2ircu(archive)
         self.assertTrue(ok)
-        self.assertEqual(msg, "/usr/local/sbin/sas2ircu")
+        self.assertEqual(msg, "/usr/sbin/sas2ircu")
+
+
+class TestInstallProfile(unittest.TestCase):
+    """--perc/--flash install the right tool subset + set the matching mode."""
+
+    def test_perc_profile(self):
+        with patch("b2ctl.installer.install_tools") as it, \
+             patch("b2ctl.config.set_mode") as sm:
+            installer.install_profile("perc")
+        it.assert_called_once_with(["perccli"])
+        sm.assert_called_once_with("raid")
+
+    def test_flash_profile(self):
+        with patch("b2ctl.installer.install_tools") as it, \
+             patch("b2ctl.config.set_mode") as sm:
+            installer.install_profile("flash")
+        it.assert_called_once_with(["sas2ircu"])
+        sm.assert_called_once_with("it")
+
+    def test_unknown_profile_noops(self):
+        with patch("b2ctl.installer.install_tools") as it, \
+             patch("b2ctl.config.set_mode") as sm:
+            installer.install_profile("bogus")
+        it.assert_not_called()
+        sm.assert_not_called()
 
 
 if __name__ == "__main__":

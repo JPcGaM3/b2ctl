@@ -18,12 +18,18 @@ LBA_BYTES = 512
 WEAR_ATTR_IDS = [177, 233, 202, 231, 173, 169, 232]
 
 
-def _smartctl(dev: str) -> str:
+def _smartctl(dev: str, dtype: str = "") -> str:
     from . import config as _cfg
     _sc = _cfg.tool("smartctl")
-    for dtype in (None, "sat", "scsi"):
-        cmd = [_sc, "-a", dev] if dtype is None \
-            else [_sc, "-a", "-d", dtype, dev]
+    # When a device type is forced (e.g. RAID-mode "megaraid,7"), try it first,
+    # including the SATA-behind-megaraid form, before the raw auto-detect path.
+    attempts: list[str | None] = []
+    if dtype:
+        attempts += [dtype, f"sat+{dtype}"]
+    attempts += [None, "sat", "scsi"]
+    for dt in attempts:
+        cmd = [_sc, "-a", dev] if dt is None \
+            else [_sc, "-a", "-d", dt, dev]
         o = run(cmd)
         if o and ("ATTRIBUTE_NAME" in o or "Health Status" in o
                   or "SMART overall-health" in o):
@@ -33,7 +39,7 @@ def _smartctl(dev: str) -> str:
 
 def read(d: Disk, tbw_table: dict) -> None:
     """Populate SMART-derived fields on a Disk in place."""
-    out = _smartctl(d.dev)
+    out = _smartctl(d.dev, d.smart_dtype)
     if not out:
         d.readable = False
         d.health = "NOREAD"

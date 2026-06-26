@@ -1,7 +1,8 @@
 """b2ctl.config — load /etc/b2ctl/config.json and resolve tool paths.
 
 Config file is OPTIONAL. Missing or malformed -> all defaults apply.
-Never write to /etc/b2ctl/config.json from this module (that is cli.py's job).
+The only writer is set_mode() (used by the install profiles); everything else
+is read-only.
 """
 from __future__ import annotations
 
@@ -15,8 +16,6 @@ CONFIG_PATH = "/etc/b2ctl/config.json"
 _DEFAULTS: dict = {
     "tool_paths": {
         "sas2ircu": "",
-        "storcli": "",
-        "storcli64": "",
         "perccli": "",
         "perccli64": "",
         "smartctl": "",
@@ -99,6 +98,30 @@ def controller_index_setting() -> str:
     return str(_get()["controller"].get("index", "all"))
 
 
+def set_mode(mode: str) -> None:
+    """Persist controller.mode ('it'|'raid'|'auto') to CONFIG_PATH.
+
+    Preserves any other keys already in the file, creates /etc/b2ctl if needed,
+    and clears the in-process cache so the new mode takes effect immediately.
+    """
+    global _cache
+    if mode not in ("it", "raid", "auto"):
+        raise ValueError(f"invalid mode: {mode}")
+    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+    data: dict = {}
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            data = {}
+    data.setdefault("controller", {})["mode"] = mode
+    with open(CONFIG_PATH, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    _cache = None
+
+
 def as_json() -> str:
     """Return current config as formatted JSON string (for `b2ctl config show`)."""
     return json.dumps(_get(), indent=2)
@@ -123,7 +146,7 @@ def validate() -> list[tuple[str, str, str]]:
 
     # tool paths — test-run each binary (file-existence alone misses 32-bit
     # binaries that exist with +x but can't execute without libc6-i386)
-    for name in ("sas2ircu", "storcli", "perccli", "smartctl", "zpool"):
+    for name in ("sas2ircu", "perccli", "smartctl", "zpool"):
         path = tool(name)
         try:
             subprocess.run([path], capture_output=True, timeout=5)
@@ -138,7 +161,7 @@ def validate() -> list[tuple[str, str, str]]:
             results.append((name, "warn", f"found but won't execute  →  {hint}"))
         else:
             hint = (f"run: b2ctl install --tool {name}"
-                    if name in ("sas2ircu", "storcli", "perccli") else "install via apt")
+                    if name in ("sas2ircu", "perccli") else "install via apt")
             results.append((name, "warn", f"not found  →  {hint}"))
 
     # bay_map

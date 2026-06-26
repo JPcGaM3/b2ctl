@@ -8,15 +8,24 @@ LAUNCHER="/usr/local/sbin/b2ctl"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOOLS_DIR="$(dirname "${SRC_DIR}")/tools"
 
+# storcli dropped: LSI tool, blind to a Dell PERC, only caused false RAID
+# detection. RAID = perccli, IT = sas2ircu.
 _GDRIVE_SAS2IRCU="1rP7f8weCvXEaqWSAj5MDNwMDvK2RXTCt"
-_GDRIVE_STORCLI="1nMbQFD94vdDl6QNjUzRtp1UHlKwDwmYN"
 _GDRIVE_PERCCLI="1hJt5Sr2xNW4OHCD-AoefiHhjJCeWVWVk"
 _GDRIVE_BASE="https://drive.usercontent.google.com/download?export=download&confirm=t&id="
 
+# Tool selection + optional controller mode:
+#   --with-tools : sas2ircu + perccli (no mode change)
+#   --perc       : perccli  + controller.mode=raid
+#   --flash      : sas2ircu + controller.mode=it
 WITH_TOOLS=0
+TOOLSET=""       # space-separated subset: "sas2ircu perccli"
+SET_MODE=""      # "raid" | "it" | ""
 for _arg in "$@"; do
     case "$_arg" in
-    --with-tools) WITH_TOOLS=1 ;;
+    --with-tools) WITH_TOOLS=1; TOOLSET="sas2ircu perccli" ;;
+    --perc)       WITH_TOOLS=1; TOOLSET="perccli";  SET_MODE="raid" ;;
+    --flash)      WITH_TOOLS=1; TOOLSET="sas2ircu"; SET_MODE="it" ;;
     *) ;;
     esac
 done
@@ -55,9 +64,12 @@ download_tools() {
         echo "  [✔] $(basename "${_out}")"
     }
 
-    _gdrive_get "${_GDRIVE_SAS2IRCU}" "${_dest}/SAS2IRCU_P20.zip"          || return 1
-    _gdrive_get "${_GDRIVE_STORCLI}"  "${_dest}/storcli.zip" || return 1
-    _gdrive_get "${_GDRIVE_PERCCLI}"  "${_dest}/perccli_7.1-007.0127_linux.tar.gz"       || return 1
+    case " ${TOOLSET} " in
+    *" sas2ircu "*) _gdrive_get "${_GDRIVE_SAS2IRCU}" "${_dest}/SAS2IRCU_P20.zip" || return 1 ;;
+    esac
+    case " ${TOOLSET} " in
+    *" perccli "*)  _gdrive_get "${_GDRIVE_PERCCLI}"  "${_dest}/perccli_7.1-007.0127_linux.tar.gz" || return 1 ;;
+    esac
 }
 
 install_tools() {
@@ -73,6 +85,7 @@ install_tools() {
     apt-get install -y alien unzip libc6-i386 smartmontools zfsutils-linux gdisk util-linux coreutils udev
 
     # ── sas2ircu ──────────────────────────────────────────────────────────────
+    if [[ " ${TOOLSET} " == *" sas2ircu "* ]]; then
     echo "[*] sas2ircu..."
     if [ -f "${_tools}/SAS2IRCU_P20.zip" ]; then
         unzip -q "${_tools}/SAS2IRCU_P20.zip" -d "${_tmp}/sas2ircu" || true
@@ -83,37 +96,19 @@ install_tools() {
         fi
         [ -z "${_sas}" ] && _sas=$(find "${_tmp}/sas2ircu" -path "*x86*" -name "sas2ircu" -type f 2>/dev/null | grep -v '\.exe' | head -1)
         if [ -n "${_sas}" ]; then
-            cp "${_sas}" /usr/local/sbin/sas2ircu
-            chmod +x /usr/local/sbin/sas2ircu
-            echo "  [✔] sas2ircu -> /usr/local/sbin/sas2ircu"
+            cp -f "${_sas}" /usr/sbin/sas2ircu
+            chmod +x /usr/sbin/sas2ircu
+            echo "  [✔] sas2ircu -> /usr/sbin/sas2ircu"
         else
             echo "  [✗] sas2ircu: binary not found in archive"
         fi
     else
         echo "  [✗] sas2ircu: archive not found at ${_tools}/SAS2IRCU_P20.zip"
     fi
-
-    # ── storcli64 ─────────────────────────────────────────────────────────────
-    echo "[*] storcli64..."
-    if [ -f "${_tools}/storcli.zip" ]; then
-        unzip -q "${_tools}/storcli.zip" -d "${_tmp}/storcli" || true
-        local _stor_deb
-        _stor_deb=$(find "${_tmp}/storcli" -path "*/Ubuntu/*.deb" 2>/dev/null | head -1)
-        if [ -n "${_stor_deb}" ]; then
-            if dpkg -i "${_stor_deb}" 2>&1; then
-                ln -sf /opt/MegaRAID/storcli/storcli64 /usr/local/bin/storcli
-                echo "  [✔] storcli64 -> /opt/MegaRAID/storcli/storcli64"
-            else
-                echo "  [✗] storcli64: dpkg install failed"
-            fi
-        else
-            echo "  [✗] storcli64: Ubuntu DEB not found in archive"
-        fi
-    else
-        echo "  [✗] storcli64: archive not found at ${_tools}/storcli.zip"
-    fi
+    fi  # TOOLSET sas2ircu
 
     # ── perccli64 ─────────────────────────────────────────────────────────────
+    if [[ " ${TOOLSET} " == *" perccli "* ]]; then
     echo "[*] perccli64..."
     if [ -f "${_tools}/perccli_7.1-007.0127_linux.tar.gz" ]; then
         mkdir -p "${_tmp}/perc_src"
@@ -122,8 +117,8 @@ install_tools() {
         _perc_rpm=$(find "${_tmp}/perc_src" -name "*.rpm" 2>/dev/null | head -1)
         if [ -n "${_perc_rpm}" ]; then
             if (cd "${_tmp}/perc_src" && alien --scripts -i "${_perc_rpm}" 2>&1); then
-                ln -sf /opt/MegaRAID/perccli/perccli64 /usr/local/bin/perccli
-                echo "  [✔] perccli64 -> /opt/MegaRAID/perccli/perccli64"
+                cp -f /opt/MegaRAID/perccli/perccli64 /usr/sbin/perccli
+                echo "  [✔] perccli64 -> /usr/sbin/perccli"
             else
                 echo "  [✗] perccli64: alien install failed"
             fi
@@ -133,6 +128,7 @@ install_tools() {
     else
         echo "  [✗] perccli64: archive not found at ${_tools}/perccli_7.1-007.0127_linux.tar.gz"
     fi
+    fi  # TOOLSET perccli
 
     echo ""
     echo "Done. Run: b2ctl check"
@@ -182,4 +178,14 @@ if [ "${WITH_TOOLS}" = "1" ]; then
         echo "  [✗] download failed — aborting tool install" >&2
     fi
     rm -rf "${_DL_TMP}"
+fi
+
+# Profile (--perc/--flash) also sets the controller mode in config.json.
+if [ -n "${SET_MODE}" ]; then
+    if PYTHONPATH="${PREFIX}" python3 -c \
+        "import b2ctl.config as c; c.set_mode('${SET_MODE}')" 2>/dev/null; then
+        echo "[+] controller.mode = ${SET_MODE}  (/etc/b2ctl/config.json)"
+    else
+        echo "  [!] failed to set controller.mode=${SET_MODE}" >&2
+    fi
 fi

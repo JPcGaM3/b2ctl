@@ -64,17 +64,14 @@ class TestBackend:
             bk = bk_mod.get_backend()
         assert isinstance(bk, bk_mod.ITBackend)
 
-    def test_get_backend_autodetects_raid_via_storcli(self):
+    def test_get_backend_autodetects_raid_via_perccli(self):
         import b2ctl.backend as bk_mod
+        import b2ctl.hba_raid as raid_mod
         self._auto_mode_cache()
 
-        def _mock_run(cmd):
-            # sas2ircu list → empty; storcli64 show ctrlcount → match
-            if cmd[-1] == "list":
-                return ""
-            return "Number of Controllers = 1"
-
-        with patch("b2ctl.backend.run", side_effect=_mock_run):
+        # sas2ircu list → empty (no IT tool); perccli reports a controller.
+        with patch("b2ctl.backend.run", return_value=""), \
+             patch.object(raid_mod, "have_tool", return_value=True):
             bk = bk_mod.get_backend()
         assert isinstance(bk, bk_mod.RaidBackend)
 

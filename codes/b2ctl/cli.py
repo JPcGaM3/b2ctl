@@ -44,6 +44,9 @@ def _status(args) -> int:
     print(ui.render_table(disks))
     pools = zfs.list_pools()
     print(ui.render_pools(pools))
+    vols = _backend_mod.get_backend().raid_volumes()
+    if vols:
+        print(ui.render_raid_volumes(vols))
     print(ui.render_details(disks, pools))
 
     if args.locate:
@@ -114,13 +117,12 @@ def _check(_args) -> int:
     else:
         print(f"  {warn_mark} Not running as root (some checks may fail)")
 
-    # tool checks with version
+    # tool checks with version. perccli64/perccli are the same tool (64-bit
+    # binary vs copied name) — show one row resolving to whichever exists.
+    import shutil as _shutil
     _TOOL_VERSION_ARGS = {
         "smartctl":  ["--version"],
         "sas2ircu":  ["list"],
-        "storcli64": ["show", "ctrlcount"],
-        "storcli":   ["show", "ctrlcount"],
-        "perccli64": ["show", "ctrlcount"],
         "perccli":   ["show", "ctrlcount"],
         "zpool":     ["version"],
         "wipefs":    ["--version"],
@@ -130,20 +132,23 @@ def _check(_args) -> int:
     }
 
     for tname, ver_args in _TOOL_VERSION_ARGS.items():
-        path = _cfg_mod.tool(tname)
+        if tname == "perccli":
+            path = _shutil.which("perccli") or _shutil.which("perccli64") \
+                or _cfg_mod.tool("perccli")
+        else:
+            path = _cfg_mod.tool(tname)
         out = run([path] + ver_args)
         if out:
             ver = out.splitlines()[0][:60] if out else ""
             print(f"  {ok_mark} {tname:<12} {path:<40} ({ver.strip()})")
         else:
             hint = ""
-            if tname in ("sas2ircu",):
-                _p = _cfg_mod.tool(tname)
-                if os.path.isfile(_p):
+            if tname == "sas2ircu":
+                if os.path.isfile(path):
                     hint = " (binary exists but won't execute — run: apt-get install -y libc6-i386)"
                 else:
                     hint = " (needed for IT/HBA mode)"
-            elif tname in ("storcli64", "storcli", "perccli64", "perccli"):
+            elif tname == "perccli":
                 hint = " (needed for RAID mode)"
             print(f"  {fail_mark} {tname:<12} not found{hint}")
 
@@ -174,10 +179,15 @@ def _install(args) -> int:
     if os.geteuid() != 0:
         print(f"{R}[-] b2ctl install requires root{N}")
         return 1
-    tools = [args.tool] if getattr(args, "tool", None) else None
     print()
     print(f"{C}[b2ctl install]{N}")
-    _installer_mod.install_tools(tools)
+    if getattr(args, "perc", False):
+        _installer_mod.install_profile("perc")
+    elif getattr(args, "flash", False):
+        _installer_mod.install_profile("flash")
+    else:
+        tools = [args.tool] if getattr(args, "tool", None) else None
+        _installer_mod.install_tools(tools)
     print()
     return 0
 
@@ -371,9 +381,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     # install
     inst_p = sub.add_parser("install",
-                            help="download and install tool binaries (sas2ircu/storcli/perccli)")
-    inst_p.add_argument("--tool", choices=["sas2ircu", "storcli", "perccli"],
-                        metavar="TOOL", help="install only this tool (default: all missing)")
+                            help="download and install tool binaries (sas2ircu/perccli)")
+    inst_grp = inst_p.add_mutually_exclusive_group()
+    inst_grp.add_argument("--perc", action="store_true",
+                          help="install perccli + set controller.mode=raid")
+    inst_grp.add_argument("--flash", action="store_true",
+                          help="install sas2ircu + set controller.mode=it")
+    inst_grp.add_argument("--tool", choices=["sas2ircu", "perccli"],
+                          metavar="TOOL", help="install only this tool (default: all missing)")
     inst_p.set_defaults(func=_install)
 
     # update

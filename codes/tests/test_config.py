@@ -81,3 +81,33 @@ class TestConfig:
         cfg_mod._cache = None
         with patch("b2ctl.config.os.path.exists", return_value=False):
             assert cfg_mod.controller_index_setting() == "all"
+
+    def test_set_mode_writes_and_rereads(self):
+        import json
+        import os
+        import tempfile
+        import b2ctl.config as cfg_mod
+        tmp = tempfile.mkdtemp()
+        path = os.path.join(tmp, "config.json")
+        old = cfg_mod.CONFIG_PATH
+        cfg_mod.CONFIG_PATH = path
+        try:
+            cfg_mod._cache = None
+            cfg_mod.set_mode("raid")
+            with open(path) as f:
+                assert json.load(f)["controller"]["mode"] == "raid"
+            assert cfg_mod.controller_mode() == "raid"
+            # preserves existing keys + flips mode
+            cfg_mod.set_mode("it")
+            assert cfg_mod.controller_mode() == "it"
+        finally:
+            cfg_mod.CONFIG_PATH = old
+            cfg_mod._cache = None
+
+    def test_set_mode_rejects_invalid(self):
+        import b2ctl.config as cfg_mod
+        try:
+            cfg_mod.set_mode("bogus")
+            assert False, "expected ValueError"
+        except ValueError:
+            pass

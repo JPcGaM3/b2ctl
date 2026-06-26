@@ -20,11 +20,28 @@ _ARCHIVE_NAME = {
     "storcli":  "storcli.zip",
     "perccli":  "perccli.tar.gz",
 }
+# Harmless probe args used to confirm a tool can actually run (any exit code).
+_PROBE = {"sas2ircu": ["list"], "storcli": ["show"], "perccli": ["show"]}
+
+
+def _executes(path: str, probe: list[str]) -> bool:
+    """True if the binary can exec at all (any exit code counts as 'runs').
+
+    A 32-bit ELF whose loader (/lib/ld-linux.so.2) is missing fails execve with
+    ENOENT, which subprocess surfaces as FileNotFoundError even though the file
+    is present — exactly the 'cannot execute: required file not found' case.
+    """
+    try:
+        subprocess.run([path, *probe], capture_output=True, timeout=10)
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def tool_ok(name: str) -> bool:
-    """Return True if tool binary is present and executable."""
-    return shutil.which(name) is not None
+    """Return True if tool binary is present AND executes."""
+    path = shutil.which(name)
+    return path is not None and _executes(path, _PROBE.get(name, []))
 
 
 def download(file_id: str, dest_path: str) -> None:
@@ -56,6 +73,9 @@ def install_sas2ircu(archive: str) -> tuple[bool, str]:
         dest = "/usr/local/sbin/sas2ircu"
         shutil.copy2(sas, dest)
         os.chmod(dest, 0o755)
+        if not _executes(dest, _PROBE["sas2ircu"]):
+            return False, ("installed but won't execute — 32-bit loader missing; "
+                           "run: apt-get install -y libc6-i386")
         return True, dest
     except Exception as exc:
         return False, str(exc)
@@ -90,6 +110,8 @@ def install_storcli(archive: str) -> tuple[bool, str]:
         if os.path.lexists(symlink):
             os.remove(symlink)
         os.symlink(binary, symlink)
+        if not _executes(symlink, _PROBE["storcli"]):
+            return False, "installed but won't execute (check shared libs)"
         return True, symlink
     except Exception as exc:
         return False, str(exc)
@@ -132,22 +154,35 @@ def install_perccli(archive: str) -> tuple[bool, str]:
 
 
 def ensure_prereqs() -> None:
-    """Install apt prerequisites the tool binaries need.
+    """Install + verify apt prerequisites the tool binaries need.
 
     - alien      : perccli ships only as an RPM; alien converts it to a .deb.
-    - libc6-i386 : sas2ircu is a 32-bit ELF and needs the i386 multiarch runtime.
+    - libc6-i386 : sas2ircu is a 32-bit ELF and needs the i386 multiarch loader.
                    On amd64 Debian/Proxmox the i386 architecture must be
                    registered (dpkg --add-architecture i386) and the cache
                    refreshed before apt can even see libc6-i386 — do that first.
+
+    Verifies the OUTCOME (does the 32-bit loader exist?) rather than trusting
+    apt's exit code, and surfaces the apt error tail when it really failed.
     """
+    print("  [*] ensuring prerequisites (alien, libc6-i386)...")
     subprocess.run(["dpkg", "--add-architecture", "i386"],
                    capture_output=True, check=False)
     subprocess.run(["apt-get", "update", "-qq"],
                    capture_output=True, check=False)
     r = subprocess.run(["apt-get", "install", "-y", "alien", "libc6-i386"],
                        capture_output=True, text=True, check=False)
-    if r.returncode != 0:
-        print(f"  [!] prereq install warning: {r.stderr.strip()[:160]}")
+
+    loader_ok = any(os.path.exists(p) for p in
+                    ("/lib/ld-linux.so.2", "/lib32/ld-linux.so.2"))
+    if not loader_ok:
+        print("  [✗] libc6-i386 not active — sas2ircu (32-bit) will not run.")
+        for ln in (r.stderr or r.stdout or "").strip().splitlines()[-3:]:
+            print(f"        apt: {ln}")
+        print("        fix: dpkg --add-architecture i386 && apt-get update "
+              "&& apt-get install -y libc6-i386")
+    if shutil.which("alien") is None:
+        print("  [✗] alien not installed — perccli install will fail.")
 
 
 def install_tools(tools: list[str] | None = None) -> None:

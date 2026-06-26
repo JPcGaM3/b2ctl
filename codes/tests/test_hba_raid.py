@@ -143,6 +143,18 @@ class TestActions(unittest.TestCase):
         raid._tool_cache = None
         self.assertTrue(st["done"])
 
+    def test_locate_command_is_verb_first(self):
+        seen = []
+        with patch.object(raid, "run_check",
+                          side_effect=lambda c: (seen.append(c), (True, ""))[1]), \
+             patch("b2ctl.config.tool", side_effect=lambda n: n):
+            raid._tool_cache = "perccli"
+            raid.locate("32:0", True)
+            raid.locate("32:0", False)
+        raid._tool_cache = None
+        self.assertEqual(seen[0], ["perccli", "/c0/e32/s0", "start", "locate"])
+        self.assertEqual(seen[1], ["perccli", "/c0/e32/s0", "stop", "locate"])
+
     def test_set_offline_builds_cmd(self):
         seen = {}
         with patch.object(raid, "run_check",

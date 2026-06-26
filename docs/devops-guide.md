@@ -608,7 +608,7 @@ Actions (each `[y/N]`-guarded + audited via `safety.begin_op/end_op`):
 
 | op | command |
 |----|---------|
-| locate | `perccli /cN/eE/sS set locate start|stop` |
+| locate | `perccli /cN/eE/sS start|stop locate` (verb first) |
 | offline / missing | `perccli /cN/eE/sS set offline` → `set missing` |
 | rebuild | `perccli /cN/eE/sS start rebuild`; progress `… show rebuild` (`NN%`) |
 | create VD | `perccli /cN add vd type=raidL drives=e:s,e:s` |

@@ -352,9 +352,12 @@ def _pd(enc_slot: str, controller: int = CONTROLLER) -> str:
 
 
 def locate(enc_slot: str, on: bool, controller: int = CONTROLLER) -> tuple[bool, str]:
-    """Turn the locate LED on/off via perccli. enc_slot e.g. '32:0'."""
+    """Turn the locate LED on/off via perccli. enc_slot e.g. '32:0'.
+
+    perccli syntax is verb-first: `/cC/eE/sS start locate` / `... stop locate`.
+    """
     action = "start" if on else "stop"
-    return run_check([_tool(), _pd(enc_slot, controller), "set", "locate", action])
+    return run_check([_tool(), _pd(enc_slot, controller), action, "locate"])
 
 
 # --------------------------------------------------------------------------- #

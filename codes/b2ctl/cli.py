@@ -67,12 +67,25 @@ def _watch(_args) -> int:
 
 
 def _locate(args) -> int:
-    dev = _resolve_dev(args.target)
-    if not dev:
+    disks = core.scan()
+    d = next((x for x in disks if args.target in
+              (x.bay, x.serial, x.dev, x.dev.replace("/dev/", ""))), None)
+    if d is None:
         print(f"{R}[-] could not resolve '{args.target}' to a disk{N}")
         return 1
-    print(f"{Y}[*] blinking {dev} for {args.seconds}s ...{N}")
-    ok, method = locatemod.blink(dev, args.seconds)
+    # HW RAID members have no per-member block device — drive the LED via perccli.
+    if d.array_type == "HW":
+        from . import hba_raid
+        import time
+        print(f"{Y}[*] locate LED ON for bay {d.bay} ({args.seconds}s)...{N}")
+        ok, out = hba_raid.locate(d.bay, True)
+        if ok:
+            time.sleep(args.seconds)
+            hba_raid.locate(d.bay, False)
+        print((G + "[+] done (via perccli)" if ok else R + f"[-] failed: {out}") + N)
+        return 0 if ok else 1
+    print(f"{Y}[*] blinking {d.dev} for {args.seconds}s ...{N}")
+    ok, method = locatemod.blink(d.dev, args.seconds)
     print((G + f"[+] done (via {method})" if ok
            else R + "[-] failed") + N)
     return 0 if ok else 1
@@ -101,6 +114,27 @@ def _swap(_args) -> int:
 def _demote(_args) -> int:
     watch._cmd_demote(spec.load())
     return 0
+
+
+def _raid_replace(args) -> int:
+    from . import raid_actions
+    return raid_actions.replace(getattr(args, "target", None))
+
+
+def _raid_offline(args) -> int:
+    from . import raid_actions
+    return raid_actions.offline(args.target)
+
+
+def _raid_create(args) -> int:
+    from . import raid_actions
+    drives = [s for s in (args.drives or "").split(",") if s]
+    return raid_actions.create_vd(args.level, drives)
+
+
+def _raid_del(args) -> int:
+    from . import raid_actions
+    return raid_actions.delete_vd(args.vd)
 
 
 def _check(_args) -> int:
@@ -396,6 +430,26 @@ def build_parser() -> argparse.ArgumentParser:
     upd_p.add_argument("--export-bay-map", action="store_true",
                        help="copy bundled bay_map.json to /etc/b2ctl/ and update config")
     upd_p.set_defaults(func=_update)
+
+    # RAID-mode (PERC) actions
+    rr_p = sub.add_parser("raid-replace",
+                          help="guided replace+rebuild of a hardware RAID member")
+    rr_p.add_argument("target", nargs="?", help="bay/serial of the member (prompts if omitted)")
+    rr_p.set_defaults(func=_raid_replace)
+
+    ro_p = sub.add_parser("raid-offline",
+                          help="mark a hardware RAID member offline+missing (prep to pull)")
+    ro_p.add_argument("target", help="bay/serial of the member")
+    ro_p.set_defaults(func=_raid_offline)
+
+    rc_p = sub.add_parser("raid-create", help="create a hardware RAID virtual disk (DESTRUCTIVE)")
+    rc_p.add_argument("--level", required=True, help="raid level, e.g. raid1/raid5")
+    rc_p.add_argument("--drives", required=True, help="comma list of enc:slot, e.g. 32:0,32:1")
+    rc_p.set_defaults(func=_raid_create)
+
+    rd_p = sub.add_parser("raid-del", help="delete a hardware RAID virtual disk (DESTRUCTIVE)")
+    rd_p.add_argument("vd", type=int, help="virtual disk number, e.g. 0")
+    rd_p.set_defaults(func=_raid_del)
 
     return p
 

@@ -345,12 +345,57 @@ def udev_rescue_ghost(serial: str) -> bool:
     return hba.udev_rescue_ghost(serial)
 
 
-def locate(enc_slot: str, on: bool, controller: int = CONTROLLER) -> tuple[bool, str]:
-    """Turn locate LED on/off via storcli.
-
-    enc_slot format: 'enc:slot' e.g. '32:0'
-    """
-    t = _tool()
+def _pd(enc_slot: str, controller: int = CONTROLLER) -> str:
+    """Return the perccli physical-drive selector '/cC/eE/sS' for an enc:slot."""
     enc, slot = enc_slot.split(":")
+    return f"/c{controller}/e{enc}/s{slot}"
+
+
+def locate(enc_slot: str, on: bool, controller: int = CONTROLLER) -> tuple[bool, str]:
+    """Turn the locate LED on/off via perccli. enc_slot e.g. '32:0'."""
     action = "start" if on else "stop"
-    return run_check([t, f"/c{controller}/e{enc}/s{slot}", "set", "locate", action])
+    return run_check([_tool(), _pd(enc_slot, controller), "set", "locate", action])
+
+
+# --------------------------------------------------------------------------- #
+# Mutating PERC actions (perccli). Callers MUST confirm first; each is audited
+# by the cli/watch layer. Defensive output parsing — validate on hardware.
+# --------------------------------------------------------------------------- #
+def set_offline(enc_slot: str, controller: int = CONTROLLER) -> tuple[bool, str]:
+    """Mark a physical drive offline (prepare to fail it out)."""
+    return run_check([_tool(), _pd(enc_slot, controller), "set", "offline"])
+
+
+def set_missing(enc_slot: str, controller: int = CONTROLLER) -> tuple[bool, str]:
+    """Mark an offline drive as missing so it can be pulled."""
+    return run_check([_tool(), _pd(enc_slot, controller), "set", "missing"])
+
+
+def start_rebuild(enc_slot: str, controller: int = CONTROLLER) -> tuple[bool, str]:
+    """Start a rebuild onto the drive in enc:slot."""
+    return run_check([_tool(), _pd(enc_slot, controller), "start", "rebuild"])
+
+
+def rebuild_progress(enc_slot: str, controller: int = CONTROLLER) -> dict:
+    """Parse `perccli /cC/eE/sS show rebuild`.
+
+    Returns {"pct": float, "done": bool}. 'done' is True when the controller
+    reports the drive is no longer in a rebuild ('Not in progress'/100%).
+    """
+    out = run([_tool(), _pd(enc_slot, controller), "show", "rebuild"])
+    m = re.search(r"(\d+(?:\.\d+)?)\s*%", out)
+    pct = float(m.group(1)) if m else 0.0
+    done = ("not in progress" in out.lower()) or pct >= 100.0
+    return {"pct": pct, "done": done}
+
+
+def add_vd(level: str, drives: list[str], controller: int = CONTROLLER) -> tuple[bool, str]:
+    """Create a virtual disk: `perccli /cC add vd type=raidN drives=e:s,e:s`."""
+    drv = ",".join(drives)
+    return run_check([_tool(), f"/c{controller}", "add", "vd",
+                      f"type={level.lower()}", f"drives={drv}"])
+
+
+def del_vd(vd: int, controller: int = CONTROLLER) -> tuple[bool, str]:
+    """Delete a virtual disk (DESTRUCTIVE): `perccli /cC/vV del force`."""
+    return run_check([_tool(), f"/c{controller}/v{vd}", "del", "force"])

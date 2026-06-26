@@ -88,5 +88,36 @@ class TestCliRollbackPlaceholders(unittest.TestCase):
         mock_begin.assert_not_called()
 
 
+class TestRaidCommands(unittest.TestCase):
+    """RAID subcommands parse and destructive ops respect the confirm guard."""
+
+    def test_parser_has_raid_subcommands(self):
+        import b2ctl.cli as cli
+        p = cli.build_parser()
+        for cmd in ("raid-replace", "raid-offline", "raid-create", "raid-del"):
+            ns = p.parse_args([cmd] + (["32:0"] if cmd in ("raid-offline",) else
+                                       (["0"] if cmd == "raid-del" else
+                                        (["--level", "raid1", "--drives", "32:0,32:1"]
+                                         if cmd == "raid-create" else []))))
+            assert hasattr(ns, "func")
+
+    def test_delete_vd_cancelled_does_not_call_perccli(self):
+        import b2ctl.raid_actions as ra
+        with patch("builtins.input", return_value="n"), \
+             patch("b2ctl.hba_raid.del_vd") as del_mock:
+            rc = ra.delete_vd(0)
+        assert rc == 1
+        del_mock.assert_not_called()
+
+    def test_create_vd_requires_second_confirm(self):
+        import b2ctl.raid_actions as ra
+        # first confirm yes, second no -> cancelled, no perccli
+        with patch("builtins.input", side_effect=["y", "n"]), \
+             patch("b2ctl.hba_raid.add_vd") as add_mock:
+            rc = ra.create_vd("raid1", ["32:0", "32:1"])
+        assert rc == 1
+        add_mock.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

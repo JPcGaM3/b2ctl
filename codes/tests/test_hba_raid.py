@@ -120,5 +120,39 @@ class TestEnumerate(unittest.TestCase):
         self.assertEqual(out[0]["members"], 2)
 
 
+class TestActions(unittest.TestCase):
+
+    def test_pd_selector(self):
+        self.assertEqual(raid._pd("32:0"), "/c0/e32/s0")
+        self.assertEqual(raid._pd("8:5", controller=1), "/c1/e8/s5")
+
+    def test_rebuild_progress_in_progress(self):
+        with patch.object(raid, "run", return_value="Rebuild Progress on Drive = 42.5%"), \
+             patch("b2ctl.config.tool", side_effect=lambda n: n):
+            raid._tool_cache = "perccli"
+            st = raid.rebuild_progress("32:0")
+        raid._tool_cache = None
+        self.assertAlmostEqual(st["pct"], 42.5)
+        self.assertFalse(st["done"])
+
+    def test_rebuild_progress_done(self):
+        with patch.object(raid, "run", return_value="Status = Not in progress"), \
+             patch("b2ctl.config.tool", side_effect=lambda n: n):
+            raid._tool_cache = "perccli"
+            st = raid.rebuild_progress("32:0")
+        raid._tool_cache = None
+        self.assertTrue(st["done"])
+
+    def test_set_offline_builds_cmd(self):
+        seen = {}
+        with patch.object(raid, "run_check",
+                          side_effect=lambda c: (seen.setdefault("cmd", c), (True, ""))[1]), \
+             patch("b2ctl.config.tool", side_effect=lambda n: n):
+            raid._tool_cache = "perccli"
+            raid.set_offline("32:1")
+        raid._tool_cache = None
+        self.assertEqual(seen["cmd"], ["perccli", "/c0/e32/s1", "set", "offline"])
+
+
 if __name__ == "__main__":
     unittest.main()

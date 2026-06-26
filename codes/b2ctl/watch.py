@@ -137,7 +137,7 @@ def _assign_free_disk(d, tbw, all_disks=None) -> None:
     choice = _ask("  action> ")
 
     if choice == "1":
-        print(G + f"  ✔ Blinking {d.bay if d.array_type == 'HW' else d.dev}..." + N)
+        print(G + f"  ✔ Blinking {d.bay if locate.is_perc_pd(d) else d.dev}..." + N)
         locate.blink_disk(d, locate.DEFAULT_SECONDS)
     elif choice == "2":
         pool = _pick_pool()
@@ -379,7 +379,7 @@ def _cmd_locate(tbw) -> None:
     if chosen.dev == "-":
         print(f"{R}  cannot locate a GHOST disk (OS rejected it, no /dev node){N}")
         return
-    where = f"bay {chosen.bay}" if chosen.array_type == "HW" else chosen.dev
+    where = f"bay {chosen.bay}" if locate.is_perc_pd(chosen) else chosen.dev
     print(f"{Y}  blinking {where} for {locate.DEFAULT_SECONDS}s ...{N}")
     ok, method = locate.blink_disk(chosen)
     print((G + f"  ✔ done (via {method})" if ok else R + "  ✗ failed") + N)

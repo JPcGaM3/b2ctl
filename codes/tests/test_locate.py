@@ -20,6 +20,19 @@ class TestBlinkDisk(unittest.TestCase):
         assert loc.call_args_list[0].args == ("32:0", True)
         assert loc.call_args_list[1].args == ("32:0", False)
 
+    def test_ugood_perc_drive_uses_perccli(self):
+        # A UGood spare (array_type="" but pd_state set + a bay) is still a PERC
+        # PD sharing /dev/sda — must blink its slot LED via perccli, not dd.
+        d = Disk(dev="/dev/sda")
+        d.pd_state = "UGood"
+        d.bay = "32:4"
+        with patch("b2ctl.hba_raid.locate", return_value=(True, "")) as loc, \
+             patch("time.sleep"):
+            ok, method = locate.blink_disk(d, seconds=5)
+        assert ok and method == "perccli"
+        assert loc.call_args_list[0].args == ("32:4", True)
+        assert loc.call_args_list[1].args == ("32:4", False)
+
     def test_direct_disk_uses_dd(self):
         d = Disk(dev="/dev/nvme0n1")            # array_type "" by default
         with patch("b2ctl.locate._dd_read") as dd:

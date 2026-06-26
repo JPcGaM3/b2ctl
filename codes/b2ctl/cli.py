@@ -73,7 +73,7 @@ def _locate(args) -> int:
     if d is None:
         print(f"{R}[-] could not resolve '{args.target}' to a disk{N}")
         return 1
-    where = f"bay {d.bay}" if d.array_type == "HW" else d.dev
+    where = f"bay {d.bay}" if locatemod.is_perc_pd(d) else d.dev
     print(f"{Y}[*] blinking {where} for {args.seconds}s ...{N}")
     ok, method = locatemod.blink_disk(d, args.seconds)
     print((G + f"[+] done (via {method})" if ok else R + "[-] failed") + N)

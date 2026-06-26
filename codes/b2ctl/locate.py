@@ -36,14 +36,26 @@ def blink(dev: str, seconds: int = DEFAULT_SECONDS) -> tuple[bool, str]:
     return True, "dd"
 
 
+def is_perc_pd(disk) -> bool:
+    """True if this Disk is a PERC physical drive (member OR Unconfigured-Good).
+
+    Such disks share the VD block device (/dev/sdX) and are addressed by their
+    enc:slot bay, not by a block device. `pd_state` is set for every perccli PD
+    (members 'Onln', spares 'UGood', etc.); `array_type=='HW'` for VD members.
+    """
+    return bool(disk.bay) and (getattr(disk, "array_type", "") == "HW"
+                               or bool(getattr(disk, "pd_state", "")))
+
+
 def blink_disk(disk, seconds: int = DEFAULT_SECONDS) -> tuple[bool, str]:
     """Blink a Disk's bay LED, routed by backend.
 
-    HW-RAID members have no per-member block device (they share the VD's
-    /dev/sdX), so a dd read would blink the wrong thing — light the slot LED via
-    perccli (by enc:slot) instead. Everything else uses the dd activity read.
+    PERC physical drives (VD members and Unconfigured-Good spares) have no
+    per-member block device — they share the VD's /dev/sdX — so a dd read would
+    blink the wrong bay. Light the slot LED via perccli (by enc:slot). Everything
+    else uses the dd activity read on the device.
     """
-    if getattr(disk, "array_type", "") == "HW" and disk.bay:
+    if is_perc_pd(disk):
         import time
         from . import hba_raid
         ok, _ = hba_raid.locate(disk.bay, True)

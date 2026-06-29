@@ -794,3 +794,24 @@ raidz1 (และ mirror) ยังทำงานได้แม้ดิสก
 
 > ⚠️ ระหว่าง DEGRADED / resilver ไม่มี redundancy — ถ้ามีดิสก์ลูกที่สองเสียในช่วงนี้ข้อมูลหาย
 > b2ctl จะไม่ยอมให้ offline ลูกที่สองระหว่างนี้
+
+## ป้ายชื่อ bay — `bay_map.json`
+
+`/etc/b2ctl/bay_map.json` เป็น list ของ **panel** ที่อธิบาย chassis:
+
+- **front** (`type: sas`) — backplane หลัง PERC (RAID) หรือ PERC ที่ flash เป็น
+  `sas2ircu` บายเป็น `enc:slot` ถ้า controller รายงาน slot สลับ ให้ตั้ง
+  `reverse_slots`+`slots_per_enclosure` หรือ `map` ตรง ๆ (`{"32:0": "32:7"}`)
+  เทียบตำแหน่งด้วย `b2ctl locate <serial>`
+- **back** (`type: nvme`) — กล่อง PCIe/M.2 SSD (มีได้หลายอัน) NVMe ไม่มี enc:slot
+  เลยโชว์ **PCIe address** (เช่น `d8:00.0`) เปลี่ยนเป็นชื่อ bay ที่อ่านง่ายได้ด้วย `map`
+  ของ panel back:
+
+```json
+{ "panel": "back", "type": "nvme",
+  "map": [ {"bdf": "d8:00.0", "bay": "PCIe2:0"},
+           {"bdf": "d9:00.0", "bay": "PCIe2:1"} ] }
+```
+
+หา `bdf` ของแต่ละตัวจาก `b2ctl status` (คอลัมน์ BAY) หรือ
+`cat /sys/class/nvme/nvme0/address`

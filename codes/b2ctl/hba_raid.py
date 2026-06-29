@@ -12,7 +12,6 @@ storcli was dropped — it is blind to a PERC and only caused false detection.
 from __future__ import annotations
 
 import glob
-import json
 import os
 import re
 
@@ -312,51 +311,22 @@ def raid_volumes() -> list[dict]:
     return out
 
 
-def _load_bay_map_cfg() -> dict:
-    """Load bay_map.json remapping config."""
-    from . import config as _cfg
-    path = _cfg.bay_map_path()
-    if os.path.exists(path):
-        try:
-            with open(path) as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
-
-
-def _remap(raw_bay: str, cfg: dict) -> str:
-    """Same remap logic as hba.py."""
-    if not cfg:
-        return raw_bay
-    table = cfg.get("map")
-    if table and raw_bay in table:
-        return table[raw_bay]
-    if cfg.get("reverse_slots"):
-        n = int(cfg.get("slots_per_enclosure", 8))
-        try:
-            enc, slot = raw_bay.split(":")
-            return f"{enc}:{(n - 1) - int(slot)}"
-        except (ValueError, AttributeError):
-            return raw_bay
-    return raw_bay
-
-
 def attach_bays(disks: list[Disk], controller: int | None = None, bm=None) -> None:
-    """Fill disk.bay from storcli, same algorithm as hba.attach_bays."""
+    """Fill disk.bay from perccli, same algorithm as hba.attach_bays."""
+    from . import baymap
     if not have_tool():
         return
-    cfg = _load_bay_map_cfg()
+    panels = baymap.load()
     if bm is None:
         bm = bay_map(controller)
     for d in disks:
         if d.serial:
             if d.serial in bm:
-                d.bay = _remap(bm[d.serial], cfg)
+                d.bay = baymap.remap_slot(bm[d.serial], panels)
             else:
                 for bm_serial, bay_val in bm.items():
                     if d.serial.startswith(bm_serial) or bm_serial.startswith(d.serial):
-                        d.bay = _remap(bay_val, cfg)
+                        d.bay = baymap.remap_slot(bay_val, panels)
                         break
 
 

@@ -129,3 +129,10 @@ class TestArrayColumn:
     def test_render_raid_volumes_empty(self):
         from b2ctl import ui
         assert ui.render_raid_volumes([]) == ""
+
+    def test_nvme_bay_renders_pcie_label(self):
+        from b2ctl import ui
+        d = _disk(dev="/dev/nvme0n1")
+        d.bay = "PCIe2:0"
+        out = ui.render_table([d])
+        assert "PCIe2:0" in out and "nvme0n1" in out

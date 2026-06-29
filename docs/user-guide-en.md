@@ -805,3 +805,24 @@ every bay is full, and there is **no hot spare**, `[o]ffload` it:
 
 > ⚠️ While DEGRADED / resilvering there is no redundancy — a second disk failure
 > in that window loses data. b2ctl won't let you offline a second disk meanwhile.
+
+## Bay labels — `bay_map.json`
+
+`/etc/b2ctl/bay_map.json` is a list of **panels** describing your chassis:
+
+- **front** (`type: sas`) — the backplane behind the PERC (RAID) or the
+  PERC-flashed `sas2ircu` HBA. Bays are `enc:slot`. If the controller reports
+  scrambled slots, set `reverse_slots`+`slots_per_enclosure`, or an explicit
+  `map` (`{"32:0": "32:7"}`). Calibrate with `b2ctl locate <serial>`.
+- **back** (`type: nvme`) — a PCIe/M.2 SSD enclosure (one or more). NVMe has no
+  enclosure:slot, so its BAY shows the **PCIe address** (e.g. `d8:00.0`). Relabel
+  it to a friendly bay with the back panel's `map`:
+
+```json
+{ "panel": "back", "type": "nvme",
+  "map": [ {"bdf": "d8:00.0", "bay": "PCIe2:0"},
+           {"bdf": "d9:00.0", "bay": "PCIe2:1"} ] }
+```
+
+Find each drive's `bdf` in `b2ctl status` (its BAY) or `cat
+/sys/class/nvme/nvme0/address`.

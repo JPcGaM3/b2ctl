@@ -47,6 +47,11 @@ a guarded `zpool offline` (pool → DEGRADED, gated by `zfs.can_offline`), then
 replaces a new disk inserted in the same bay (`zpool replace` + resilver). Refuses
 if the vdev isn't fully redundant (won't fault the pool).
 
+**bay_map.json** is now a **panel list** parsed by the shared `b2ctl.baymap`
+module (front `type:sas` enc:slot remap; back `type:nvme` `map:[{bdf,bay}]`).
+NVMe drives show their **PCIe address** (`/sys/class/nvme/<ctrl>/address`) as the
+BAY, relabel-able via a back panel. Old flat-dict bay_map files are ignored.
+
 ## 2. Environment (read carefully — it dictates every command)
 
 - 2× Dell R620, **Proxmox VE 9.2** (Debian 13, ZFS 2.4).

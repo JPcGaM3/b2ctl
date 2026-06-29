@@ -8,23 +8,16 @@ from b2ctl import hba
 from b2ctl.common import Disk
 
 
-class TestHbaBayMapping:
-    """Tests for bay remapping logic."""
+class TestHbaNvmePcie:
+    """NVMe bay = PCIe BDF from sysfs (remap logic now lives in baymap)."""
 
-    def test_remap_with_explicit_map(self):
-        cfg = {"map": {"1:0": "1:7", "1:7": "1:0"}}
-        assert hba._remap("1:0", cfg) == "1:7"
-        assert hba._remap("1:7", cfg) == "1:0"
+    def test_nvme_pcie_parses_address(self):
+        from unittest.mock import patch, mock_open
+        with patch("builtins.open", mock_open(read_data="0000:d8:00.0\n")):
+            assert hba._nvme_pcie("nvme0n1") == "d8:00.0"
 
-    def test_remap_with_reverse_slots(self):
-        cfg = {"reverse_slots": True, "slots_per_enclosure": 8}
-        assert hba._remap("1:0", cfg) == "1:7"
-        assert hba._remap("1:3", cfg) == "1:4"
-        assert hba._remap("1:7", cfg) == "1:0"
-
-    def test_remap_no_config_identity(self):
-        assert hba._remap("1:4", {}) == "1:4"
-        assert hba._remap("1:0", {}) == "1:0"
+    def test_nvme_pcie_non_nvme(self):
+        assert hba._nvme_pcie("sda") is None
 
 
 class TestHbaBayMapDisplay(unittest.TestCase):
@@ -85,7 +78,7 @@ class TestHbaBmReuse:
 
     @patch("b2ctl.hba.bay_map")
     @patch("b2ctl.hba.have_sas2ircu", return_value=True)
-    @patch("b2ctl.hba._load_bay_map", return_value={})
+    @patch("b2ctl.baymap.load", return_value=[])
     def test_attach_bays_reuses_provided_bm(self, _load, _has, mock_bm):
         d = Disk(dev="/dev/sda", serial="SN001")
         hba.attach_bays([d], bm={"SN001": "1:0"})
@@ -94,7 +87,7 @@ class TestHbaBmReuse:
 
     @patch("b2ctl.hba.bay_map", return_value={})
     @patch("b2ctl.hba.have_sas2ircu", return_value=True)
-    @patch("b2ctl.hba._load_bay_map", return_value={})
+    @patch("b2ctl.baymap.load", return_value=[])
     def test_attach_bays_default_calls_bay_map(self, _load, _has, mock_bm):
         d = Disk(dev="/dev/sda", serial="SN001")
         hba.attach_bays([d])
@@ -102,7 +95,7 @@ class TestHbaBmReuse:
 
     @patch("b2ctl.hba.bay_map")
     @patch("b2ctl.hba.have_sas2ircu", return_value=True)
-    @patch("b2ctl.hba._load_bay_map", return_value={})
+    @patch("b2ctl.baymap.load", return_value=[])
     def test_get_ghost_disks_reuses_provided_bm(self, _load, _has, mock_bm):
         d = Disk(dev="/dev/sda", serial="SN001")
         ghosts = hba.get_ghost_disks([d], bm={"SN999": "1:7"})

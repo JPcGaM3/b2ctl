@@ -653,6 +653,19 @@ Pools destroyed **outside** b2ctl (manual `zpool destroy`) leave a stale cron;
 `b2ctl watch` **prunes orphan crons** at startup (`prune_orphan_crons` deletes
 `b2ctl-*` files whose pool is absent from `zpool list`).
 
+### bay_map.json (panel schema) + NVMe PCIe bay
+
+`b2ctl.baymap` is the single parser/remapper (used by both `hba` and
+`hba_raid`). `bay_map.json` is a **list of panels**:
+
+- `type: sas` (front) — `enc:slot` remap via `reverse_slots`/`slots_per_enclosure`
+  or an explicit `map` dict; from `sas2ircu DISPLAY` / `perccli … show all`.
+- `type: nvme` (back, 1+) — `map: [{bdf, bay}]`; the raw bay is the PCIe BDF read
+  from `/sys/class/nvme/<ctrl>/address` (domain stripped), set in
+  `hba.enumerate_disks`.
+
+The pre-0.8 flat dict format is no longer read (logged + ignored → identity).
+
 ### Spare-less offload (offline → degrade → replace in place)
 
 `[o]ffload` on a pool member, when there is **no AVAIL spare**:

@@ -11,7 +11,6 @@ stable /dev/disk/by-id names, maps each disk to its physical bay via
 from __future__ import annotations
 
 import glob
-import json
 import os
 import re
 
@@ -32,9 +31,24 @@ def _lsblk_pairs(cols: str) -> list[dict]:
     return rows
 
 
+def _nvme_pcie(name: str) -> str | None:
+    """PCIe BDF for an nvme namespace, e.g. 'nvme0n1' -> 'd8:00.0' (domain dropped)."""
+    m = re.match(r"(nvme\d+)", name)
+    if not m:
+        return None
+    try:
+        with open(f"/sys/class/nvme/{m.group(1)}/address") as f:
+            addr = f.read().strip()
+    except OSError:
+        return None
+    return addr.split(":", 1)[1] if addr.startswith("0000:") else addr
+
+
 def enumerate_disks() -> list[Disk]:
     """Return one Disk per physical block device (sd*/nvme*)."""
+    from . import baymap
     byid = _by_id_index()
+    panels = baymap.load()
     disks: list[Disk] = []
     for row in _lsblk_pairs("NAME,SIZE,SERIAL,MODEL,TRAN,ROTA,TYPE"):
         name = row.get("NAME", "")
@@ -51,6 +65,12 @@ def enumerate_disks() -> list[Disk]:
         d.iface = (row.get("TRAN") or "").strip().upper()
         d.is_ssd = (row.get("ROTA") == "0")
         d.by_id = byid.get(os.path.realpath(dev), "")
+        # NVMe has no enclosure:slot — use its PCIe address (relabel-able via the
+        # back/type=nvme panel in bay_map.json).
+        if name.startswith("nvme"):
+            bdf = _nvme_pcie(name)
+            if bdf:
+                d.bay = baymap.remap_nvme(bdf, panels)
         disks.append(d)
     return disks
 
@@ -126,27 +146,29 @@ def attach_bays(disks: list[Disk], controller: int = CONTROLLER, bm=None) -> Non
     bay is display-only here (LEDs are driven by device, not slot — see
     locate.py), so we remap purely for the human label using bay_map.json.
     """
+    from . import baymap
     if not have_sas2ircu():
         return
-    cfg = _load_bay_map()
+    panels = baymap.load()
     if bm is None:
         bm = bay_map(controller)
     for d in disks:
         if d.serial:
             if d.serial in bm:
-                d.bay = _remap(bm[d.serial], cfg)
+                d.bay = baymap.remap_slot(bm[d.serial], panels)
             else:
                 for bm_serial, bay in bm.items():
                     if d.serial.startswith(bm_serial) or bm_serial.startswith(d.serial):
-                        d.bay = _remap(bay, cfg)
+                        d.bay = baymap.remap_slot(bay, panels)
                         break
 
 
 def get_ghost_disks(disks: list[Disk], controller: int = CONTROLLER, bm=None) -> list[Disk]:
     """Find physical disks that the HBA sees but Linux rejected (no block dev)."""
+    from . import baymap
     if not have_sas2ircu():
         return []
-    cfg = _load_bay_map()
+    panels = baymap.load()
     if bm is None:
         bm = bay_map(controller)
     os_serials = [d.serial for d in disks if d.serial]
@@ -159,7 +181,7 @@ def get_ghost_disks(disks: list[Disk], controller: int = CONTROLLER, bm=None) ->
                 break
         if not matched:
             d = Disk(dev="-")
-            d.bay = _remap(raw_bay, cfg)
+            d.bay = baymap.remap_slot(raw_bay, panels)
             d.serial = serial
             d.model = "(Ghost / OS Rejected)"
             d.health = "GHOST"
@@ -223,41 +245,4 @@ def udev_rescue_ghost(serial: str) -> bool:
     return False
 
 
-def _load_bay_map() -> dict:
-    from . import config as _cfg
-    path = _cfg.bay_map_path()
-    if os.path.exists(path):
-        try:
-            with open(path) as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
-
-
-def _remap(raw_bay: str, cfg: dict) -> str:
-    """Translate a raw 'enclosure:slot' to the physical label.
-
-    cfg supports either an explicit table::
-
-        {"map": {"1:0": "1:7", "1:7": "1:0", ...}}
-
-    or a reversal rule (clean mirror-reversed backplane)::
-
-        {"reverse_slots": true, "slots_per_enclosure": 8}
-
-    No config -> identity (unchanged).
-    """
-    if not cfg:
-        return raw_bay
-    table = cfg.get("map")
-    if table and raw_bay in table:
-        return table[raw_bay]
-    if cfg.get("reverse_slots"):
-        n = int(cfg.get("slots_per_enclosure", 8))
-        try:
-            enc, slot = raw_bay.split(":")
-            return f"{enc}:{(n - 1) - int(slot)}"
-        except (ValueError, AttributeError):
-            return raw_bay
-    return raw_bay
+# bay_map.json parsing + remap now live in b2ctl.baymap (shared by both backends).

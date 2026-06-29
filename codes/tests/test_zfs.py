@@ -261,22 +261,33 @@ class TestZfsCreatePool(unittest.TestCase):
         mock_run_check.return_value = (True, "")
         ok, out = zfs.create_pool("tank", "mirror", ["/dev/sda", "/dev/sdb"])
         self.assertTrue(ok)
-        mock_run_check.assert_called_once_with([
-            "zpool", "create", "-f", "-o", "ashift=12", "-O", "compression=lz4",
-            "-O", "atime=off", "-O", "xattr=sa", "-o", "autotrim=on", "tank",
-            "mirror", "/dev/sda", "/dev/sdb"
-        ], dry_run=False)
+        cmd = mock_run_check.call_args[0][0]
+        for flag, kv in (("-o", "ashift=12"), ("-o", "autotrim=on"),
+                         ("-O", "compression=lz4"), ("-O", "atime=off"),
+                         ("-O", "xattr=sa"), ("-O", "dnodesize=auto"),
+                         ("-O", "acltype=posixacl"), ("-O", "recordsize=128K")):
+            self.assertIn(kv, cmd)
+            self.assertEqual(cmd[cmd.index(kv) - 1], flag)
+        self.assertEqual(cmd[-4:], ["tank", "mirror", "/dev/sda", "/dev/sdb"])
 
     @patch('b2ctl.zfs.run_check')
     def test_create_pool_stripe(self, mock_run_check):
         mock_run_check.return_value = (True, "")
         ok, out = zfs.create_pool("tank", "stripe", ["/dev/sda", "/dev/sdb"])
         self.assertTrue(ok)
-        mock_run_check.assert_called_once_with([
-            "zpool", "create", "-f", "-o", "ashift=12", "-O", "compression=lz4",
-            "-O", "atime=off", "-O", "xattr=sa", "-o", "autotrim=on", "tank",
-            "/dev/sda", "/dev/sdb"
-        ], dry_run=False)
+        cmd = mock_run_check.call_args[0][0]
+        self.assertNotIn("stripe", cmd)          # stripe = no raid keyword
+        self.assertEqual(cmd[-3:], ["tank", "/dev/sda", "/dev/sdb"])
+
+    @patch('b2ctl.zfs.run_check')
+    def test_create_pool_custom_opts(self, mock_run_check):
+        mock_run_check.return_value = (True, "")
+        zfs.create_pool("tank", "mirror", ["/dev/sda", "/dev/sdb"],
+                        fs_opts={"compression": "zstd", "recordsize": "16K"})
+        cmd = mock_run_check.call_args[0][0]
+        self.assertIn("compression=zstd", cmd)
+        self.assertIn("recordsize=16K", cmd)
+        self.assertNotIn("compression=lz4", cmd)
 
 
 # ========================================================================== #

@@ -324,8 +324,25 @@ def has_zfs_label(dev: str) -> bool:
     return len(lines) > 0
 
 
-def create_pool(name: str, raid_type: str, devs: list[str], *, dry_run: bool = False) -> tuple[bool, str]:
-    cmd = ["zpool", "create", "-f", "-o", "ashift=12", "-O", "compression=lz4", "-O", "atime=off", "-O", "xattr=sa", "-o", "autotrim=on", name]
+# SSD-optimised pool/dataset defaults. pool-level go to `zpool -o`, dataset-level
+# to `-O`. dnodesize=auto + acltype=posixacl are the standard Linux complements
+# to xattr=sa; recordsize is workload-tunable per dataset later.
+DEFAULT_POOL_OPTS = {"ashift": "12", "autotrim": "on"}
+DEFAULT_FS_OPTS = {"compression": "lz4", "atime": "off", "xattr": "sa",
+                   "dnodesize": "auto", "acltype": "posixacl", "recordsize": "128K"}
+
+
+def create_pool(name: str, raid_type: str, devs: list[str], *,
+                pool_opts: dict | None = None, fs_opts: dict | None = None,
+                dry_run: bool = False) -> tuple[bool, str]:
+    po = DEFAULT_POOL_OPTS if pool_opts is None else pool_opts
+    fo = DEFAULT_FS_OPTS if fs_opts is None else fs_opts
+    cmd = ["zpool", "create", "-f"]
+    for k, v in po.items():
+        cmd += ["-o", f"{k}={v}"]
+    for k, v in fo.items():
+        cmd += ["-O", f"{k}={v}"]
+    cmd.append(name)
     if raid_type != "stripe":
         cmd.append(raid_type)
     cmd.extend(devs)

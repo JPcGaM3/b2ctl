@@ -273,6 +273,32 @@ class TestWatchCreate:
         assert "need at least" in captured.out
         mock_zfs.create_pool.assert_not_called()
 
+    @patch("b2ctl.watch.ui")
+    @patch("b2ctl.watch.zfs")
+    @patch("b2ctl.watch.core")
+    @patch("b2ctl.watch._confirm", return_value=True)
+    @patch("b2ctl.watch._ask")
+    def test_create_pool_prompts_props_and_passes_defaults(self, mock_ask, _mc,
+                                                           mock_core, mock_zfs, mock_ui):
+        from b2ctl.watch import _cmd_create
+        import b2ctl.zfs as real_zfs
+        d1 = _disk(pool=None, vdev=None, vdev_state=None, dev="/dev/sda", by_id="/d/a")
+        d2 = _disk(pool=None, vdev=None, vdev_state=None, dev="/dev/sdb",
+                   serial="S2", by_id="/d/b")
+        mock_core.scan.return_value = [d1, d2]
+        mock_zfs.MIN_DISKS = real_zfs.MIN_DISKS
+        mock_zfs.DEFAULT_POOL_OPTS = real_zfs.DEFAULT_POOL_OPTS
+        mock_zfs.DEFAULT_FS_OPTS = real_zfs.DEFAULT_FS_OPTS
+        mock_zfs.has_zfs_label.return_value = False
+        mock_zfs.create_pool.return_value = (True, "")
+        # pick "1 2", name, raid type, then Enter (blank) for all 8 property prompts
+        mock_ask.side_effect = ["1 2", "tank", "mirror"] + [""] * 8
+        _cmd_create({})
+        mock_zfs.create_pool.assert_called_once()
+        kwargs = mock_zfs.create_pool.call_args.kwargs
+        assert kwargs["pool_opts"] == real_zfs.DEFAULT_POOL_OPTS
+        assert kwargs["fs_opts"] == real_zfs.DEFAULT_FS_OPTS
+
     @patch("b2ctl.watch.zfs")
     @patch("b2ctl.watch.core")
     @patch("b2ctl.watch._ask")

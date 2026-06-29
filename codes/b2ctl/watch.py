@@ -493,7 +493,20 @@ def _cmd_create(tbw) -> None:
     if len(devs) < min_disks:
         print(f"{R}  error: need at least {min_disks} disks for {raid_type}{N}")
         return
-    
+
+    # Pool properties — Enter accepts the recommended SSD default.
+    print(f"{C}  pool properties (press Enter for the recommended SSD default):{N}")
+    _HINTS = {"recordsize": "128K general | DB 16K (PG 8K) | media 1M | "
+                            "VM 64-128K; per-dataset, changeable later"}
+    pool_opts = dict(zfs.DEFAULT_POOL_OPTS)
+    fs_opts = dict(zfs.DEFAULT_FS_OPTS)
+    for k in pool_opts:
+        pool_opts[k] = _ask(f"    {k} [{pool_opts[k]}]> ") or pool_opts[k]
+    for k in fs_opts:
+        if k in _HINTS:
+            print(f"      ({_HINTS[k]})")
+        fs_opts[k] = _ask(f"    {k} [{fs_opts[k]}]> ") or fs_opts[k]
+
     dirty = [available[i] for i in indices if zfs.has_zfs_label(available[i].by_id or available[i].dev)]
     if dirty:
         print(f"{Y}  WARNING: The following disks already contain data/labels:{N}")
@@ -504,8 +517,11 @@ def _cmd_create(tbw) -> None:
         for disk in dirty:
             zfs.wipe(disk.by_id or disk.dev, dry_run=_DRY_RUN)
 
+    props = " ".join(f"{k}={v}" for k, v in {**pool_opts, **fs_opts}.items())
+    print(f"{C}  -> {props}{N}")
     if _confirm(f"create pool '{name}' ({raid_type}) with {len(devs)} disks?"):
-        ok, out = zfs.create_pool(name, raid_type, devs, dry_run=_DRY_RUN)
+        ok, out = zfs.create_pool(name, raid_type, devs, pool_opts=pool_opts,
+                                  fs_opts=fs_opts, dry_run=_DRY_RUN)
         print((G + "  ✔ pool created" if ok else R + f"  ✗ failed: {out}") + N)
 
 

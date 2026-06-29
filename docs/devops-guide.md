@@ -627,3 +627,28 @@ Actions (each `[y/N]`-guarded + audited via `safety.begin_op/end_op`):
 (same flags on `./install.sh`). Binaries `cp -f` to `/usr/sbin` so they survive
 deletion of `/opt/MegaRAID` or the download dir. `config.set_mode()` is the only
 writer of `/etc/b2ctl/config.json`.
+
+---
+
+## ZFS pool lifecycle + maintenance cron
+
+`create` (`[n]ew-pool` / `b2ctl create`) prompts each pool property with an
+SSD-optimal default (`ashift=12`, `compression=lz4`, `atime=off`, `xattr=sa`,
+`dnodesize=auto`, `acltype=posixacl`, `recordsize=128K`) and an **autotrim
+choice**:
+
+- **off (Monthly)** — `autotrim=off` + writes a per-pool cron
+  `/etc/cron.d/b2ctl-<pool>` (root, absolute zpool path):
+  ```
+  24 0 1-7  * * root [ "$(date +\%w)" -eq 0 ] && /usr/sbin/zpool trim <pool>    # 1st Sunday
+  24 0 8-14 * * root [ "$(date +\%w)" -eq 0 ] && /usr/sbin/zpool scrub <pool>   # 2nd Sunday
+  ```
+- **on** — `autotrim=on` (continuous); no cron written.
+
+`destroy` (`[x]` / `b2ctl destroy <pool>`) runs `zpool destroy <pool>` behind a
+double-confirm (must type the pool name; ALL-DATA-LOST warning; audited via
+`safety.begin_op/end_op`) and then removes `/etc/cron.d/b2ctl-<pool>`.
+
+Pools destroyed **outside** b2ctl (manual `zpool destroy`) leave a stale cron;
+`b2ctl watch` **prunes orphan crons** at startup (`prune_orphan_crons` deletes
+`b2ctl-*` files whose pool is absent from `zpool list`).

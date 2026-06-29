@@ -291,13 +291,40 @@ class TestWatchCreate:
         mock_zfs.DEFAULT_FS_OPTS = real_zfs.DEFAULT_FS_OPTS
         mock_zfs.has_zfs_label.return_value = False
         mock_zfs.create_pool.return_value = (True, "")
-        # pick "1 2", name, raid type, then Enter (blank) for all 8 property prompts
+        mock_zfs.install_pool_cron.return_value = (True, "/etc/cron.d/b2ctl-tank")
+        # pick "1 2", name, raid type, then Enter for ashift + autotrim choice + 6 fs
         mock_ask.side_effect = ["1 2", "tank", "mirror"] + [""] * 8
         _cmd_create({})
-        mock_zfs.create_pool.assert_called_once()
         kwargs = mock_zfs.create_pool.call_args.kwargs
-        assert kwargs["pool_opts"] == real_zfs.DEFAULT_POOL_OPTS
+        # autotrim default choice = off (Monthly) -> cron installed
+        assert kwargs["pool_opts"]["ashift"] == "12"
+        assert kwargs["pool_opts"]["autotrim"] == "off"
         assert kwargs["fs_opts"] == real_zfs.DEFAULT_FS_OPTS
+        mock_zfs.install_pool_cron.assert_called_once_with("tank", dry_run=False)
+
+    @patch("b2ctl.watch.ui")
+    @patch("b2ctl.watch.zfs")
+    @patch("b2ctl.watch.core")
+    @patch("b2ctl.watch._confirm", return_value=True)
+    @patch("b2ctl.watch._ask")
+    def test_create_pool_autotrim_on_skips_cron(self, mock_ask, _mc, mock_core,
+                                                mock_zfs, mock_ui):
+        from b2ctl.watch import _cmd_create
+        import b2ctl.zfs as real_zfs
+        d1 = _disk(pool=None, vdev=None, vdev_state=None, dev="/dev/sda", by_id="/d/a")
+        d2 = _disk(pool=None, vdev=None, vdev_state=None, dev="/dev/sdb",
+                   serial="S2", by_id="/d/b")
+        mock_core.scan.return_value = [d1, d2]
+        mock_zfs.MIN_DISKS = real_zfs.MIN_DISKS
+        mock_zfs.DEFAULT_POOL_OPTS = real_zfs.DEFAULT_POOL_OPTS
+        mock_zfs.DEFAULT_FS_OPTS = real_zfs.DEFAULT_FS_OPTS
+        mock_zfs.has_zfs_label.return_value = False
+        mock_zfs.create_pool.return_value = (True, "")
+        # ashift blank, autotrim choice "2" (on), 6 fs blank
+        mock_ask.side_effect = ["1 2", "tank", "mirror", "", "2"] + [""] * 6
+        _cmd_create({})
+        assert mock_zfs.create_pool.call_args.kwargs["pool_opts"]["autotrim"] == "on"
+        mock_zfs.install_pool_cron.assert_not_called()
 
     @patch("b2ctl.watch.zfs")
     @patch("b2ctl.watch.core")
@@ -599,6 +626,40 @@ class TestAssignRaidAware(unittest.TestCase):
         watch._cmd_assign({})
         assign_mock.assert_called_once()
         perc_mock.assert_not_called()
+
+
+class TestWatchDestroy(unittest.TestCase):
+    """destroy: zpool destroy + remove cron, gated by name-confirm."""
+
+    @patch("b2ctl.watch.ui")
+    @patch("b2ctl.watch.safety")
+    @patch("b2ctl.watch.zfs")
+    @patch("b2ctl.watch.core")
+    @patch("b2ctl.watch._confirm", return_value=True)
+    @patch("b2ctl.watch._ask", return_value="tank")   # type the pool name
+    def test_destroy_confirmed_destroys_and_removes_cron(self, _ask, _mc, mock_core,
+                                                         mock_zfs, _safety, mock_ui):
+        from b2ctl.watch import _cmd_destroy
+        mock_zfs.list_pools.return_value = [{"name": "tank", "size": "1T", "health": "ONLINE"}]
+        mock_core.scan.return_value = []
+        mock_zfs.destroy_pool.return_value = (True, "")
+        mock_zfs.remove_pool_cron.return_value = (True, "/etc/cron.d/b2ctl-tank")
+        _cmd_destroy({}, target="tank")
+        mock_zfs.destroy_pool.assert_called_once_with("tank", dry_run=False)
+        mock_zfs.remove_pool_cron.assert_called_once_with("tank", dry_run=False)
+
+    @patch("b2ctl.watch.ui")
+    @patch("b2ctl.watch.zfs")
+    @patch("b2ctl.watch.core")
+    @patch("b2ctl.watch._confirm", return_value=True)
+    @patch("b2ctl.watch._ask", return_value="wrongname")
+    def test_destroy_name_mismatch_aborts(self, _ask, _mc, mock_core, mock_zfs, mock_ui):
+        from b2ctl.watch import _cmd_destroy
+        mock_zfs.list_pools.return_value = [{"name": "tank", "size": "1T", "health": "ONLINE"}]
+        mock_core.scan.return_value = []
+        _cmd_destroy({}, target="tank")
+        mock_zfs.destroy_pool.assert_not_called()
+        mock_zfs.remove_pool_cron.assert_not_called()
 
 
 if __name__ == "__main__":

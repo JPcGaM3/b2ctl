@@ -766,3 +766,26 @@ progress bar. Related: `b2ctl raid-offline <bay>` (just fail it out + LED),
 
 > Note: on a 2×M.2 NVMe card, if only one NVMe shows, enable **PCIe bifurcation
 > (x4x4)** for that slot in the BIOS — that is a hardware setting, not b2ctl.
+
+---
+
+## Creating a ZFS pool (`[n]ew-pool`)
+
+After you pick disks, name, and raid level, b2ctl asks for each pool property
+with an SSD-optimal default — **press Enter to accept**, or type to override
+(`ashift`, `compression`, `atime`, `xattr`, `dnodesize`, `acltype`,
+`recordsize`). `recordsize` is workload-tunable (128K general, DB 16K, media 1M,
+VM 64–128K) and can be changed per-dataset later.
+
+**autotrim** is a choice:
+- **off (Monthly)** *(recommended)* — installs a monthly maintenance schedule for
+  the pool: `zpool trim` on the 1st Sunday + `zpool scrub` on the 2nd Sunday
+  (cron at `/etc/cron.d/b2ctl-<pool>`).
+- **on** — continuous trimming (ZFS handles it); no cron.
+
+## Destroying a ZFS pool (`[x]` or `b2ctl destroy <pool>`)
+
+Destroys the pool with `zpool destroy` — **ALL DATA IS LOST**. You must confirm
+and then **type the pool name** to proceed. b2ctl also removes that pool's
+maintenance cron. (If you destroy a pool yourself with `zpool destroy`, b2ctl
+cleans up the leftover cron the next time you open `b2ctl watch`.)

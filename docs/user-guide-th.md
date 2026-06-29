@@ -757,3 +757,24 @@ controller **rebuild** พร้อมแถบความคืบหน้า
 
 > หมายเหตุ: การ์ด NVMe 2×M.2 ถ้าโชว์แค่ตัวเดียว ต้องเปิด **PCIe bifurcation (x4x4)**
 > ใน BIOS — เป็นเรื่องฮาร์ดแวร์ ไม่ใช่ b2ctl
+
+---
+
+## สร้าง ZFS pool (`[n]ew-pool`)
+
+หลังเลือกดิสก์/ตั้งชื่อ/เลือก raid level แล้ว b2ctl จะถามค่า property ทีละตัว โดยมีค่า
+default ที่เหมาะกับ SSD อยู่แล้ว — **กด Enter เพื่อใช้ค่า default** หรือพิมพ์เพื่อเปลี่ยน
+(`ashift`, `compression`, `atime`, `xattr`, `dnodesize`, `acltype`, `recordsize`)
+`recordsize` ปรับตาม workload ได้ (ทั่วไป 128K, DB 16K, media 1M, VM 64–128K) และ
+เปลี่ยนภายหลังราย dataset ได้
+
+**autotrim** เป็นตัวเลือก:
+- **off (Monthly)** *(แนะนำ)* — ติดตั้ง schedule รายเดือนให้ pool: `zpool trim`
+  อาทิตย์แรก + `zpool scrub` อาทิตย์ที่สอง (cron ที่ `/etc/cron.d/b2ctl-<pool>`)
+- **on** — trim ต่อเนื่องโดย ZFS เอง; ไม่สร้าง cron
+
+## ลบ ZFS pool (`[x]` หรือ `b2ctl destroy <pool>`)
+
+ลบ pool ด้วย `zpool destroy` — **ข้อมูลหายทั้งหมด** ต้องยืนยันและ**พิมพ์ชื่อ pool**
+เพื่อดำเนินการ b2ctl จะลบ cron ของ pool นั้นให้ด้วย (ถ้าลบ pool เองด้วย `zpool destroy`
+b2ctl จะเก็บกวาด cron ที่ค้างให้ตอนเปิด `b2ctl watch` ครั้งถัดไป)

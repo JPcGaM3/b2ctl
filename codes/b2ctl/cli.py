@@ -21,7 +21,7 @@ from . import installer as _installer_mod
 from .common import need_root, run, R, Y, G, C, N
 from . import ui
 
-__version__ = "0.6.0-itmode"
+__version__ = "0.7.0-itmode"
 
 
 def _resolve_dev(target: str, disks=None):
@@ -92,6 +92,11 @@ def _replace(_args) -> int:
 
 def _create(_args) -> int:
     watch._cmd_create(spec.load())
+    return 0
+
+
+def _destroy(args) -> int:
+    watch._cmd_destroy(spec.load(), target=getattr(args, "pool", None))
     return 0
 
 
@@ -370,6 +375,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     cr = sub.add_parser("create", help="create a new zfs pool")
     cr.set_defaults(func=_create)
+
+    ds = sub.add_parser("destroy", help="destroy a zfs pool (DESTRUCTIVE) + remove its cron")
+    ds.add_argument("pool", nargs="?", help="pool name (prompts if omitted)")
+    ds.set_defaults(func=_destroy)
 
     sw = sub.add_parser("swap", help="swap wearing disk onto spare")
     sw.set_defaults(func=_swap)

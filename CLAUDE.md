@@ -33,6 +33,15 @@ lifecycle actions.
 storcli was removed (LSI tool, blind to a PERC, caused false detection).
 The old perccli `ssd_health.py` script is the visual reference for the layout.
 
+**ZFS pool lifecycle (v0.7.0):** `create` prompts each pool property with
+SSD-optimal defaults (ashift=12, lz4, atime=off, xattr=sa, dnodesize=auto,
+acltype=posixacl, recordsize=128K) + an autotrim choice; `off (Monthly)` writes a
+per-pool cron `/etc/cron.d/b2ctl-<pool>` (1st-Sun `zpool trim` + 2nd-Sun
+`zpool scrub`), `on` = continuous (no cron). `destroy` (`[x]` / `b2ctl destroy`)
+runs `zpool destroy` (double-confirm + type-name) and removes that cron; `watch`
+prunes orphan crons (pools gone) at startup. Hardware-RAID actions (perccli) are
+gated to RAID mode via `raid_actions._require_raid()`.
+
 ## 2. Environment (read carefully — it dictates every command)
 
 - 2× Dell R620, **Proxmox VE 9.2** (Debian 13, ZFS 2.4).

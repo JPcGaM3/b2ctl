@@ -500,8 +500,12 @@ def _cmd_create(tbw) -> None:
                             "VM 64-128K; per-dataset, changeable later"}
     pool_opts = dict(zfs.DEFAULT_POOL_OPTS)
     fs_opts = dict(zfs.DEFAULT_FS_OPTS)
-    for k in pool_opts:
-        pool_opts[k] = _ask(f"    {k} [{pool_opts[k]}]> ") or pool_opts[k]
+    # ashift (generic), then autotrim as an explicit choice.
+    pool_opts["ashift"] = _ask(f"    ashift [{pool_opts['ashift']}]> ") or pool_opts["ashift"]
+    print("    autotrim: [1] off — monthly TRIM+SCRUB via cron (recommended)")
+    print("              [2] on  — continuous (ZFS handles trim; no cron)")
+    want_cron = (_ask("    choose [1]> ") or "1") != "2"
+    pool_opts["autotrim"] = "off" if want_cron else "on"
     for k in fs_opts:
         if k in _HINTS:
             print(f"      ({_HINTS[k]})")
@@ -523,6 +527,50 @@ def _cmd_create(tbw) -> None:
         ok, out = zfs.create_pool(name, raid_type, devs, pool_opts=pool_opts,
                                   fs_opts=fs_opts, dry_run=_DRY_RUN)
         print((G + "  ✔ pool created" if ok else R + f"  ✗ failed: {out}") + N)
+        if ok and want_cron:
+            okc, outc = zfs.install_pool_cron(name, dry_run=_DRY_RUN)
+            print((G + f"  ✔ monthly trim+scrub cron -> {outc}" if okc
+                   else Y + f"  [!] cron not installed: {outc}") + N)
+
+
+def _cmd_destroy(tbw, target=None) -> None:
+    pools = zfs.list_pools()
+    if not pools:
+        print(f"{Y}  no ZFS pools to destroy{N}")
+        return
+    pool = target
+    if pool is None:
+        for i, p in enumerate(pools, 1):
+            print(f"    [{i}] {p['name']} ({p['size']}, {p['health']})")
+        sel = _ask("  destroy which #> ")
+        try:
+            pool = pools[int(sel) - 1]["name"]
+        except (ValueError, IndexError):
+            print(f"{Y}  cancelled{N}"); return
+    elif pool not in [p["name"] for p in pools]:
+        print(f"{R}  no such pool '{pool}'{N}"); return
+
+    members = [d for d in core.scan(tbw) if d.pool == pool]
+    if members:
+        print(f"{C}  members:{N}")
+        for d in members:
+            print(f"    - {ui.disk_label(d)}")
+    print(f"{R}  [!] destroying '{pool}' ERASES ALL DATA on it. This cannot be undone.{N}")
+    if not _confirm(f"destroy pool '{pool}'?"):
+        print("  cancelled"); return
+    if _ask(f"  type the pool name '{pool}' to confirm> ") != pool:
+        print(f"{Y}  name did not match — cancelled{N}"); return
+
+    op_id = safety.begin_op("destroy", "", "", "", pool, pool,
+                            [["zpool", "destroy", pool]], dry_run=_DRY_RUN)
+    ok, out = zfs.destroy_pool(pool, dry_run=_DRY_RUN)
+    if ok:
+        okc, outc = zfs.remove_pool_cron(pool, dry_run=_DRY_RUN)
+        print((G + f"  ✔ pool '{pool}' destroyed; cron removed" if okc
+               else G + f"  ✔ pool '{pool}' destroyed" + Y + f" (cron: {outc})") + N)
+    else:
+        print(f"{R}  ✗ failed: {out}{N}")
+    safety.end_op(op_id, ok, out, "" if ok else out, 0 if ok else 1, dry_run=_DRY_RUN)
 
 
 def _cmd_swap(tbw) -> None:
@@ -590,11 +638,14 @@ def _cmd_demote(tbw) -> None:
 
 
 _MENU = (f"{C}[r]{N}efresh  {C}[a]{N}ssign  {C}[o]{N}ffload  {C}[s]{N}wap  {C}[d]{N}emote  {C}[t]{N}oggle-dryrun  "
-         f"{C}[n]{N}ew-pool  {C}[l]{N}ocate  {C}[q]{N}uit   (or hot-plug)")
+         f"{C}[n]{N}ew-pool  {C}[x]{N}destroy-pool  {C}[l]{N}ocate  {C}[q]{N}uit   (or hot-plug)")
 
 
 def run() -> int:
     tbw = spec.load()
+    # Clean up cron files for pools destroyed outside b2ctl (manual zpool destroy).
+    for p in zfs.prune_orphan_crons():
+        print(f"{Y}  removed stale cron {p} (pool no longer exists){N}")
     _cmd_refresh(tbw)
     print("\n" + _MENU)
     baseline = _block_devs()
@@ -623,6 +674,8 @@ def run() -> int:
                 _toggle_dry_run()
             elif cmd == "n":
                 _cmd_create(tbw)
+            elif cmd == "x":
+                _cmd_destroy(tbw)
             elif cmd == "l":
                 _cmd_locate(tbw)
             else:

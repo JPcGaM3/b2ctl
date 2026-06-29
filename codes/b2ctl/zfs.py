@@ -8,6 +8,7 @@ through run_check so callers can surface success/failure.
 
 from __future__ import annotations
 
+import glob
 import os
 import re
 import subprocess
@@ -347,4 +348,75 @@ def create_pool(name: str, raid_type: str, devs: list[str], *,
         cmd.append(raid_type)
     cmd.extend(devs)
     return run_check(cmd, dry_run=dry_run)
+
+
+def destroy_pool(pool: str, *, dry_run: bool = False) -> tuple[bool, str]:
+    """`zpool destroy <pool>` — DESTRUCTIVE. Caller must confirm."""
+    return run_check(["zpool", "destroy", pool], dry_run=dry_run)
+
+
+# --------------------------------------------------------------------------- #
+# Per-pool maintenance cron (monthly TRIM 1st Sunday + SCRUB 2nd Sunday)
+# --------------------------------------------------------------------------- #
+def _cron_path(pool: str) -> str:
+    return "/etc/cron.d/b2ctl-" + re.sub(r"[^A-Za-z0-9_-]", "_", pool)
+
+
+def install_pool_cron(pool: str, *, dry_run: bool = False) -> tuple[bool, str]:
+    """Write /etc/cron.d/b2ctl-<pool>: monthly TRIM (1st Sun) + SCRUB (2nd Sun).
+
+    Calls zpool directly. The 1-7 / 8-14 day-of-month windows combined with
+    `date +%w == 0` lock each run to the first / second Sunday. zpool's absolute
+    path is resolved so cron's minimal PATH still finds it.
+    """
+    from . import config as _cfg
+    zpool = _cfg.tool("zpool")
+    path = _cron_path(pool)
+    content = (
+        f"# b2ctl ZFS maintenance for pool '{pool}' — auto-generated\n"
+        "PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin\n"
+        "# TRIM: first Sunday of each month\n"
+        f'24 0 1-7 * * root [ "$(date +\\%w)" -eq 0 ] && {zpool} trim {pool}\n'
+        "# SCRUB: second Sunday of each month\n"
+        f'24 0 8-14 * * root [ "$(date +\\%w)" -eq 0 ] && {zpool} scrub {pool}\n'
+    )
+    if dry_run:
+        return True, f"[dry-run] would write {path}"
+    try:
+        os.makedirs("/etc/cron.d", exist_ok=True)
+        with open(path, "w") as f:
+            f.write(content)
+        os.chmod(path, 0o644)
+        return True, path
+    except OSError as exc:
+        return False, str(exc)
+
+
+def remove_pool_cron(pool: str, *, dry_run: bool = False) -> tuple[bool, str]:
+    """Remove a pool's maintenance cron (no-op if absent)."""
+    path = _cron_path(pool)
+    if dry_run:
+        return True, f"[dry-run] would remove {path}"
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+        return True, path
+    except OSError as exc:
+        return False, str(exc)
+
+
+def prune_orphan_crons(*, dry_run: bool = False) -> list[str]:
+    """Delete b2ctl-<pool> crons whose pool no longer exists. Returns paths removed."""
+    live = {_cron_path(p["name"]) for p in list_pools()}
+    removed: list[str] = []
+    for path in glob.glob("/etc/cron.d/b2ctl-*"):
+        if path in live:
+            continue
+        if not dry_run:
+            try:
+                os.remove(path)
+            except OSError:
+                continue
+        removed.append(path)
+    return removed
 

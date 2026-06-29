@@ -289,6 +289,55 @@ class TestZfsCreatePool(unittest.TestCase):
         self.assertIn("recordsize=16K", cmd)
         self.assertNotIn("compression=lz4", cmd)
 
+    @patch('b2ctl.zfs.run_check')
+    def test_destroy_pool(self, mock_run_check):
+        mock_run_check.return_value = (True, "")
+        zfs.destroy_pool("tank")
+        mock_run_check.assert_called_once_with(["zpool", "destroy", "tank"], dry_run=False)
+
+
+class TestZfsPoolCron(unittest.TestCase):
+
+    def test_install_pool_cron_content(self):
+        from unittest.mock import patch, mock_open
+        m = mock_open()
+        with patch("b2ctl.config.tool", return_value="/usr/sbin/zpool"), \
+             patch("b2ctl.zfs.os.makedirs"), patch("b2ctl.zfs.os.chmod"), \
+             patch("builtins.open", m):
+            ok, path = zfs.install_pool_cron("tank")
+        assert ok and path == "/etc/cron.d/b2ctl-tank"
+        written = "".join(c.args[0] for c in m().write.call_args_list)
+        assert "/usr/sbin/zpool trim tank" in written
+        assert "/usr/sbin/zpool scrub tank" in written
+        assert "24 0 1-7 * *" in written and "24 0 8-14 * *" in written
+        assert "\\%w" in written           # cron-escaped date format
+
+    def test_install_pool_cron_dry_run(self):
+        from unittest.mock import patch
+        with patch("b2ctl.config.tool", return_value="/usr/sbin/zpool"), \
+             patch("builtins.open") as o:
+            ok, msg = zfs.install_pool_cron("tank", dry_run=True)
+        assert ok and "dry-run" in msg
+        o.assert_not_called()
+
+    def test_remove_pool_cron(self):
+        from unittest.mock import patch
+        with patch("b2ctl.zfs.os.path.exists", return_value=True), \
+             patch("b2ctl.zfs.os.remove") as rm:
+            ok, path = zfs.remove_pool_cron("tank")
+        assert ok and path == "/etc/cron.d/b2ctl-tank"
+        rm.assert_called_once_with("/etc/cron.d/b2ctl-tank")
+
+    def test_prune_orphan_crons(self):
+        from unittest.mock import patch
+        files = ["/etc/cron.d/b2ctl-tank", "/etc/cron.d/b2ctl-ghost"]
+        with patch("b2ctl.zfs.list_pools", return_value=[{"name": "tank"}]), \
+             patch("b2ctl.zfs.glob.glob", return_value=files), \
+             patch("b2ctl.zfs.os.remove") as rm:
+            removed = zfs.prune_orphan_crons()
+        assert removed == ["/etc/cron.d/b2ctl-ghost"]
+        rm.assert_called_once_with("/etc/cron.d/b2ctl-ghost")
+
 
 # ========================================================================== #
 # can_detach guard + demote_to_spare orchestration

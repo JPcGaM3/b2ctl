@@ -178,7 +178,7 @@ class TestActions(unittest.TestCase):
     def test_locate_command_is_verb_first(self):
         seen = []
         with patch.object(raid, "run_check",
-                          side_effect=lambda c: (seen.append(c), (True, ""))[1]), \
+                          side_effect=lambda c, **k: (seen.append(c), (True, ""))[1]), \
              patch("b2ctl.config.tool", side_effect=lambda n: n):
             raid._tool_cache = "perccli"
             raid.locate("32:0", True)
@@ -190,7 +190,7 @@ class TestActions(unittest.TestCase):
     def test_set_offline_builds_cmd(self):
         seen = {}
         with patch.object(raid, "run_check",
-                          side_effect=lambda c: (seen.setdefault("cmd", c), (True, ""))[1]), \
+                          side_effect=lambda c, **k: (seen.setdefault("cmd", c), (True, ""))[1]), \
              patch("b2ctl.config.tool", side_effect=lambda n: n):
             raid._tool_cache = "perccli"
             raid.set_offline("32:1")
@@ -206,7 +206,7 @@ class TestActions(unittest.TestCase):
     def _capture(self, fn):
         seen = []
         with patch.object(raid, "run_check",
-                          side_effect=lambda c: (seen.append(c), (True, ""))[1]), \
+                          side_effect=lambda c, **k: (seen.append(c), (True, ""))[1]), \
              patch("b2ctl.config.tool", side_effect=lambda n: n):
             raid._tool_cache = "perccli"
             fn()

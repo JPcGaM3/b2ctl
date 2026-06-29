@@ -34,6 +34,12 @@ def _require_raid() -> bool:
     return True
 
 
+def _dry() -> bool:
+    """Current --dry-run / [t]oggle state (shared with the watch loop)."""
+    from . import watch
+    return watch._DRY_RUN
+
+
 def _hw_members(disks) -> list:
     return [d for d in disks if d.array_type == "HW"]
 
@@ -90,25 +96,31 @@ def replace(target: str | None = None) -> int:
         print("cancelled")
         return 1
 
+    dr = _dry()
     cmds = [["perccli", hba_raid._pd(d.bay), "set", "offline"],
             ["perccli", hba_raid._pd(d.bay), "set", "missing"]]
     op_id = safety.begin_op("raid_replace", d.serial, d.bay, d.dev,
-                            d.array_name, d.array_name, cmds)
-    ok, out = hba_raid.set_offline(d.bay)
+                            d.array_name, d.array_name, cmds, dry_run=dr)
+    ok, out = hba_raid.set_offline(d.bay, dry_run=dr)
     if ok:
-        ok, out = hba_raid.set_missing(d.bay)
+        ok, out = hba_raid.set_missing(d.bay, dry_run=dr)
     if not ok:
-        safety.end_op(op_id, False, "", out, 1)
+        safety.end_op(op_id, False, "", out, 1, dry_run=dr)
         print(f"{R}[-] failed: {out}{N}")
         return 1
 
-    hba_raid.locate(d.bay, True)
+    hba_raid.locate(d.bay, True, dry_run=dr)
     print(f"{Y}[!] LED ON at bay {d.bay} — pull that drive, insert the replacement.{N}")
     try:
         input("press Enter once the new drive is inserted... ")
     except (EOFError, KeyboardInterrupt):
         print()
 
+    if dr:
+        hba_raid.locate(d.bay, False, dry_run=dr)
+        safety.end_op(op_id, True, "", "", 0, dry_run=dr)
+        print(f"{Y}[dry-run] would start rebuild on {d.bay} and wait for resilver{N}")
+        return 0
     st = hba_raid.rebuild_progress(d.bay)
     if not st["done"] and st["pct"] == 0.0:
         hba_raid.start_rebuild(d.bay)
@@ -133,16 +145,17 @@ def offline(target: str) -> int:
                     "this removes redundancy until rebuilt"):
         print("cancelled")
         return 1
+    dr = _dry()
     cmds = [["perccli", hba_raid._pd(d.bay), "set", "offline"],
             ["perccli", hba_raid._pd(d.bay), "set", "missing"]]
     op_id = safety.begin_op("raid_offline", d.serial, d.bay, d.dev,
-                            d.array_name, d.array_name, cmds)
-    ok, out = hba_raid.set_offline(d.bay)
+                            d.array_name, d.array_name, cmds, dry_run=dr)
+    ok, out = hba_raid.set_offline(d.bay, dry_run=dr)
     if ok:
-        ok, out = hba_raid.set_missing(d.bay)
-    safety.end_op(op_id, ok, "", out, 0 if ok else 1)
+        ok, out = hba_raid.set_missing(d.bay, dry_run=dr)
+    safety.end_op(op_id, ok, "", out, 0 if ok else 1, dry_run=dr)
     if ok:
-        hba_raid.locate(d.bay, True)
+        hba_raid.locate(d.bay, True, dry_run=dr)
         print(f"{G}[+] {d.bay} offline+missing; LED ON — pull it. "
               f"Stop LED later with: b2ctl locate {d.bay} off{N}")
     else:
@@ -165,12 +178,13 @@ def create_vd(level: str, drives: list[str]) -> int:
     if not _confirm("Are you absolutely sure? (second confirm)"):
         print("cancelled")
         return 1
+    dr = _dry()
     cmds = [["perccli", "/c0", "add", "vd", hba_raid._raid_token(level),
              f"drives={','.join(drives)}"]]
     op_id = safety.begin_op("raid_create", "", ",".join(drives), "",
-                            level, level, cmds)
-    ok, out = hba_raid.add_vd(level, drives)
-    safety.end_op(op_id, ok, out, "" if ok else out, 0 if ok else 1)
+                            level, level, cmds, dry_run=dr)
+    ok, out = hba_raid.add_vd(level, drives, dry_run=dr)
+    safety.end_op(op_id, ok, out, "" if ok else out, 0 if ok else 1, dry_run=dr)
     print((G + "[+] VD created" if ok else R + f"[-] failed: {out}") + N)
     return 0 if ok else 1
 
@@ -194,15 +208,18 @@ def assign_perc(d, candidates: list) -> int:
 
     if choice == "1":
         from . import locate as _loc
-        _loc.blink_disk(d)
+        if _dry():
+            print(f"{Y}[dry-run] would blink LED at bay {d.bay} via perccli{N}")
+        else:
+            _loc.blink_disk(d)
         return 0
 
     if choice == "2":
         if not _confirm(f"set {disk_label(d)} to JBOD (expose to the OS for ZFS)?"):
             print("cancelled")
             return 1
-        ok, out = hba_raid.set_jbod(d.bay)
-        if ok:
+        ok, out = hba_raid.set_jbod(d.bay, dry_run=_dry())
+        if ok and not _dry():
             import subprocess
             subprocess.run(["udevadm", "settle", "--timeout=10"], check=False)
             print(f"{G}  ✔ {d.bay} set to JBOD — it should now appear as /dev/sdX.\n"
@@ -233,11 +250,12 @@ def assign_perc(d, candidates: list) -> int:
         if not _confirm(f"add {disk_label(d)} as a hot spare ({tgt})?"):
             print("cancelled")
             return 1
+        dr = _dry()
         cmds = [["perccli", hba_raid._pd(d.bay), "add", "hotsparedrive"]
                 + ([f"DGs={dg}"] if dg else [])]
-        op_id = safety.begin_op("raid_hotspare", d.serial, d.bay, d.dev, tgt, tgt, cmds)
-        ok, out = hba_raid.add_hotspare(d.bay, dg or None)
-        safety.end_op(op_id, ok, out, "" if ok else out, 0 if ok else 1)
+        op_id = safety.begin_op("raid_hotspare", d.serial, d.bay, d.dev, tgt, tgt, cmds, dry_run=dr)
+        ok, out = hba_raid.add_hotspare(d.bay, dg or None, dry_run=dr)
+        safety.end_op(op_id, ok, out, "" if ok else out, 0 if ok else 1, dry_run=dr)
         print((G + "  ✔ hot spare added" if ok else R + f"  ✗ failed: {out}") + N)
         return 0 if ok else 1
 
@@ -255,9 +273,10 @@ def delete_vd(vd: int) -> int:
     if not _confirm(f"Type-y again to confirm permanent deletion of vd{vd}:"):
         print("cancelled")
         return 1
+    dr = _dry()
     cmds = [["perccli", f"/c0/v{vd}", "del", "force"]]
-    op_id = safety.begin_op("raid_del_vd", "", "", "", f"vd{vd}", f"vd{vd}", cmds)
-    ok, out = hba_raid.del_vd(int(vd))
-    safety.end_op(op_id, ok, out, "" if ok else out, 0 if ok else 1)
+    op_id = safety.begin_op("raid_del_vd", "", "", "", f"vd{vd}", f"vd{vd}", cmds, dry_run=dr)
+    ok, out = hba_raid.del_vd(int(vd), dry_run=dr)
+    safety.end_op(op_id, ok, out, "" if ok else out, 0 if ok else 1, dry_run=dr)
     print((G + f"[+] vd{vd} deleted" if ok else R + f"[-] failed: {out}") + N)
     return 0 if ok else 1

@@ -614,6 +614,10 @@ Actions (each `[y/N]`-guarded + audited via `safety.begin_op/end_op`):
 | create VD | `perccli /cN add vd type=raidL drives=e:s,e:s` |
 | delete VD | `perccli /cN/vV del force` |
 
+> All perccli mutating actions honor `--dry-run` / the watch `[t]oggle` (preview
+> the command, no mutation) — the `dry_run` flag is threaded `raid_actions` →
+> `hba_raid.*` → `run_check`, same as the ZFS actions.
+>
 > Mutating ops + the rebuild-progress parser are **defensive** — validate on the
 > R640. ADR: b2ctl is now **dual-backend** (IT/HBA via sas2ircu + ZFS; RAID via
 > perccli + `smartctl -d megaraid`). On HW RAID the **controller** owns the

@@ -353,32 +353,37 @@ def _pd(enc_slot: str, controller: int = CONTROLLER) -> str:
     return f"/c{controller}/e{enc}/s{slot}"
 
 
-def locate(enc_slot: str, on: bool, controller: int = CONTROLLER) -> tuple[bool, str]:
+def locate(enc_slot: str, on: bool, controller: int = CONTROLLER, *,
+           dry_run: bool = False) -> tuple[bool, str]:
     """Turn the locate LED on/off via perccli. enc_slot e.g. '32:0'.
 
     perccli syntax is verb-first: `/cC/eE/sS start locate` / `... stop locate`.
     """
     action = "start" if on else "stop"
-    return run_check([_tool(), _pd(enc_slot, controller), action, "locate"])
+    return run_check([_tool(), _pd(enc_slot, controller), action, "locate"],
+                     dry_run=dry_run)
 
 
 # --------------------------------------------------------------------------- #
 # Mutating PERC actions (perccli). Callers MUST confirm first; each is audited
 # by the cli/watch layer. Defensive output parsing — validate on hardware.
 # --------------------------------------------------------------------------- #
-def set_offline(enc_slot: str, controller: int = CONTROLLER) -> tuple[bool, str]:
+def set_offline(enc_slot: str, controller: int = CONTROLLER, *,
+                dry_run: bool = False) -> tuple[bool, str]:
     """Mark a physical drive offline (prepare to fail it out)."""
-    return run_check([_tool(), _pd(enc_slot, controller), "set", "offline"])
+    return run_check([_tool(), _pd(enc_slot, controller), "set", "offline"], dry_run=dry_run)
 
 
-def set_missing(enc_slot: str, controller: int = CONTROLLER) -> tuple[bool, str]:
+def set_missing(enc_slot: str, controller: int = CONTROLLER, *,
+                dry_run: bool = False) -> tuple[bool, str]:
     """Mark an offline drive as missing so it can be pulled."""
-    return run_check([_tool(), _pd(enc_slot, controller), "set", "missing"])
+    return run_check([_tool(), _pd(enc_slot, controller), "set", "missing"], dry_run=dry_run)
 
 
-def start_rebuild(enc_slot: str, controller: int = CONTROLLER) -> tuple[bool, str]:
+def start_rebuild(enc_slot: str, controller: int = CONTROLLER, *,
+                  dry_run: bool = False) -> tuple[bool, str]:
     """Start a rebuild onto the drive in enc:slot."""
-    return run_check([_tool(), _pd(enc_slot, controller), "start", "rebuild"])
+    return run_check([_tool(), _pd(enc_slot, controller), "start", "rebuild"], dry_run=dry_run)
 
 
 def rebuild_progress(enc_slot: str, controller: int = CONTROLLER) -> dict:
@@ -402,16 +407,18 @@ def _raid_token(level: str) -> str:
     return "r" + lv.lstrip("r")
 
 
-def add_vd(level: str, drives: list[str], controller: int = CONTROLLER) -> tuple[bool, str]:
+def add_vd(level: str, drives: list[str], controller: int = CONTROLLER, *,
+           dry_run: bool = False) -> tuple[bool, str]:
     """Create a virtual disk: `perccli /cC add vd rN drives=e:s,e:s`.
 
     perccli takes the level as r0/r1/r5/... (not type=raidN).
     """
     return run_check([_tool(), f"/c{controller}", "add", "vd",
-                      _raid_token(level), f"drives={','.join(drives)}"])
+                      _raid_token(level), f"drives={','.join(drives)}"], dry_run=dry_run)
 
 
-def add_hotspare(enc_slot: str, dg=None, controller: int = CONTROLLER) -> tuple[bool, str]:
+def add_hotspare(enc_slot: str, dg=None, controller: int = CONTROLLER, *,
+                 dry_run: bool = False) -> tuple[bool, str]:
     """Add a drive as a hot spare: `perccli /cC/eE/sS add hotsparedrive [DGs=<dg>]`.
 
     dg=None -> global spare; dg=<n> -> dedicated to that drive group.
@@ -419,17 +426,19 @@ def add_hotspare(enc_slot: str, dg=None, controller: int = CONTROLLER) -> tuple[
     cmd = [_tool(), _pd(enc_slot, controller), "add", "hotsparedrive"]
     if dg is not None and str(dg) != "":
         cmd.append(f"DGs={dg}")
-    return run_check(cmd)
+    return run_check(cmd, dry_run=dry_run)
 
 
-def set_jbod(enc_slot: str, controller: int = CONTROLLER) -> tuple[bool, str]:
+def set_jbod(enc_slot: str, controller: int = CONTROLLER, *,
+             dry_run: bool = False) -> tuple[bool, str]:
     """Expose a drive to the OS for software RAID/ZFS: `perccli /cC/eE/sS set jbod`.
 
     The drive leaves the controller's RAID management and appears as /dev/sdX.
     """
-    return run_check([_tool(), _pd(enc_slot, controller), "set", "jbod"])
+    return run_check([_tool(), _pd(enc_slot, controller), "set", "jbod"], dry_run=dry_run)
 
 
-def del_vd(vd: int, controller: int = CONTROLLER) -> tuple[bool, str]:
+def del_vd(vd: int, controller: int = CONTROLLER, *,
+           dry_run: bool = False) -> tuple[bool, str]:
     """Delete a virtual disk (DESTRUCTIVE): `perccli /cC/vV del force`."""
-    return run_check([_tool(), f"/c{controller}/v{vd}", "del", "force"])
+    return run_check([_tool(), f"/c{controller}/v{vd}", "del", "force"], dry_run=dry_run)

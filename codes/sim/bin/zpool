@@ -233,6 +233,20 @@ def cmd_create(args, state):
     return 0
 
 
+def cmd_destroy(args, state):
+    a = _strip_flags(args)               # destroy <pool>
+    if not a:
+        return 1
+    name = a[0]
+    before = len(state["pools"])
+    state["pools"] = [p for p in state["pools"] if p.get("name") != name]
+    if len(state["pools"]) == before:
+        print(f"cannot open '{name}': no such pool", file=sys.stderr)
+        return 1
+    S.save(state)
+    return 0
+
+
 def cmd_labelclear(args, state):
     a = _strip_flags(args)
     if a:
@@ -252,7 +266,8 @@ def main():
     table = {
         "list": cmd_list, "status": cmd_status, "replace": cmd_replace,
         "add": cmd_add, "attach": cmd_attach, "detach": cmd_detach,
-        "remove": cmd_remove, "create": cmd_create, "labelclear": cmd_labelclear,
+        "remove": cmd_remove, "create": cmd_create, "destroy": cmd_destroy,
+        "labelclear": cmd_labelclear,
     }
     if sub == "version":
         print("zfs-2.4.2-sim"); return 0

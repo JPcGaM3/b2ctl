@@ -120,6 +120,20 @@ class TestRaidCommands(unittest.TestCase):
         assert rc == 1
         add_mock.assert_not_called()
 
+    def test_create_vd_honors_dry_run(self):
+        # --dry-run / [t]oggle must reach the perccli wrapper (no real mutation).
+        import b2ctl.raid_actions as ra
+        import b2ctl.watch as watch
+        watch._DRY_RUN = True
+        try:
+            with patch("b2ctl.raid_actions._require_raid", return_value=True), \
+                 patch("builtins.input", side_effect=["y", "y"]), \
+                 patch("b2ctl.hba_raid.add_vd", return_value=(True, "")) as add_mock:
+                ra.create_vd("raid1", ["32:0", "32:1"])
+            add_mock.assert_called_once_with("raid1", ["32:0", "32:1"], dry_run=True)
+        finally:
+            watch._DRY_RUN = False
+
     def test_raid_action_refused_in_it_mode(self):
         import b2ctl.raid_actions as ra
 
@@ -142,7 +156,7 @@ class TestRaidCommands(unittest.TestCase):
              patch("subprocess.run"):
             rc = ra.assign_perc(d, [d])
         assert rc == 0
-        jbod_mock.assert_called_once_with("32:4")
+        jbod_mock.assert_called_once_with("32:4", dry_run=False)
 
     def test_assign_perc_create_path_calls_add_vd(self):
         import b2ctl.raid_actions as ra
@@ -154,7 +168,7 @@ class TestRaidCommands(unittest.TestCase):
              patch("builtins.input", side_effect=["3", "1 2", "raid1", "y", "y"]), \
              patch("b2ctl.hba_raid.add_vd", return_value=(True, "")) as add_mock:
             ra.assign_perc(d, [d, d2])
-        add_mock.assert_called_once_with("raid1", ["32:4", "32:5"])
+        add_mock.assert_called_once_with("raid1", ["32:4", "32:5"], dry_run=False)
 
 
 if __name__ == "__main__":

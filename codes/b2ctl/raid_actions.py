@@ -24,6 +24,16 @@ def _confirm(msg: str) -> bool:
         return False
 
 
+def _require_raid() -> bool:
+    """Hardware-RAID (perccli) actions only apply in RAID mode."""
+    from . import backend
+    if backend.get_backend().name != "raid":
+        print(f"{R}[-] hardware-RAID actions require RAID mode (perccli). "
+              f"This box is IT/HBA — use the ZFS actions (assign/new-pool) instead.{N}")
+        return False
+    return True
+
+
 def _hw_members(disks) -> list:
     return [d for d in disks if d.array_type == "HW"]
 
@@ -56,6 +66,8 @@ def _wait_rebuild(bay: str) -> bool:
 
 def replace(target: str | None = None) -> int:
     """Guided replace+rebuild of a hardware RAID member."""
+    if not _require_raid():
+        return 1
     disks = core.scan(spec.load())
     members = _hw_members(disks)
     if not members:
@@ -110,6 +122,8 @@ def replace(target: str | None = None) -> int:
 
 def offline(target: str) -> int:
     """Mark a member offline + missing and light its LED (prep to pull)."""
+    if not _require_raid():
+        return 1
     disks = core.scan(spec.load())
     d = _pick_member(disks, target)
     if d is None:
@@ -138,6 +152,8 @@ def offline(target: str) -> int:
 
 def create_vd(level: str, drives: list[str]) -> int:
     """Create a virtual disk (wipes the member drives)."""
+    if not _require_raid():
+        return 1
     if not level or not drives:
         print(f"{R}[-] need --level and --drives{N}")
         return 1
@@ -166,6 +182,8 @@ def assign_perc(d, candidates: list) -> int:
     (create a volume / add as a hot spare), plus locate. `candidates` is the list
     of other available UGood drives (for building a multi-disk volume).
     """
+    if not _require_raid():
+        return 1
     print(f"  {C}PERC drive {disk_label(d)} [{d.pd_state}]{N}")
     print("    [1] Locate LED (blink the bay)")
     print("    [2] Use for ZFS / software RAID  (set JBOD — exposes it as /dev/sdX)")
@@ -228,6 +246,8 @@ def assign_perc(d, candidates: list) -> int:
 
 def delete_vd(vd: int) -> int:
     """Delete a virtual disk (DESTRUCTIVE — all data lost)."""
+    if not _require_raid():
+        return 1
     print(f"{R}[!] deleting vd{vd} ERASES ALL DATA on that volume.{N}")
     if not _confirm(f"Delete vd{vd}?"):
         print("cancelled")

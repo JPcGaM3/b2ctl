@@ -296,6 +296,36 @@ class TestZfsCreatePool(unittest.TestCase):
         mock_run_check.assert_called_once_with(["zpool", "destroy", "tank"], dry_run=False)
 
 
+class TestZfsOffline(unittest.TestCase):
+
+    @patch('b2ctl.zfs.run_check')
+    def test_offline_cmd(self, mock_rc):
+        mock_rc.return_value = (True, "")
+        zfs.offline("tank", "/dev/disk/by-id/x")
+        mock_rc.assert_called_once_with(
+            ["zpool", "offline", "tank", "/dev/disk/by-id/x"], dry_run=False)
+
+    def _topo(self, states):
+        # states: {token: state} for a raidz1-0 vdev in pool tank
+        return {t: {"pool": "tank", "vdev": "raidz1-0", "token": t, "state": s}
+                for t, s in states.items()}
+
+    def test_can_offline_true_when_all_others_online(self):
+        topo = self._topo({"a": "ONLINE", "b": "ONLINE", "c": "ONLINE"})
+        with patch("b2ctl.zfs.topology", return_value=topo):
+            assert zfs.can_offline("tank", "a") is True
+
+    def test_can_offline_false_when_another_member_down(self):
+        topo = self._topo({"a": "ONLINE", "b": "OFFLINE", "c": "ONLINE"})
+        with patch("b2ctl.zfs.topology", return_value=topo):
+            assert zfs.can_offline("tank", "a") is False
+
+    def test_can_offline_false_for_stripe(self):
+        topo = {"a": {"pool": "tank", "vdev": "tank", "token": "a", "state": "ONLINE"}}
+        with patch("b2ctl.zfs.topology", return_value=topo):
+            assert zfs.can_offline("tank", "a") is False
+
+
 class TestZfsPoolCron(unittest.TestCase):
 
     def test_install_pool_cron_content(self):

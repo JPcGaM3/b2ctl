@@ -42,6 +42,11 @@ runs `zpool destroy` (double-confirm + type-name) and removes that cron; `watch`
 prunes orphan crons (pools gone) at startup. Hardware-RAID actions (perccli) are
 gated to RAID mode via `raid_actions._require_raid()`.
 
+**Spare-less offload:** `[o]ffload` with no AVAIL spare on a redundant vdev does
+a guarded `zpool offline` (pool → DEGRADED, gated by `zfs.can_offline`), then
+replaces a new disk inserted in the same bay (`zpool replace` + resilver). Refuses
+if the vdev isn't fully redundant (won't fault the pool).
+
 ## 2. Environment (read carefully — it dictates every command)
 
 - 2× Dell R620, **Proxmox VE 9.2** (Debian 13, ZFS 2.4).

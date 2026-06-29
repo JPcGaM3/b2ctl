@@ -628,6 +628,46 @@ class TestAssignRaidAware(unittest.TestCase):
         perc_mock.assert_not_called()
 
 
+class TestOfflineReplace(unittest.TestCase):
+    """Spare-less offload: offline (degrade) + replace-in-place, guarded."""
+
+    @patch("b2ctl.watch.ui")
+    @patch("b2ctl.watch.zfs")
+    @patch("b2ctl.watch.core")
+    def test_refuses_when_not_redundant(self, mock_core, mock_zfs, mock_ui):
+        from b2ctl.watch import _offline_and_replace
+        d = _disk(pool="tank", vdev="raidz1-0", by_id="/d/a", pool_token="/d/a")
+        mock_zfs.can_offline.return_value = False
+        _offline_and_replace(d, {})
+        mock_zfs.offline.assert_not_called()
+
+    @patch("b2ctl.watch.locate")
+    @patch("b2ctl.watch.ui")
+    @patch("b2ctl.watch._wait_resilver")
+    @patch("b2ctl.watch.run_check", return_value=(True, ""))
+    @patch("b2ctl.watch._confirm_op", return_value=True)
+    @patch("b2ctl.watch._ask", return_value="")
+    @patch("b2ctl.watch.safety")
+    @patch("b2ctl.watch.zfs")
+    @patch("b2ctl.watch.core")
+    def test_happy_path_offlines_then_replaces(self, mock_core, mock_zfs, _safety,
+                                               _ask, _confirm, mock_rc, _wait, mock_ui, _loc):
+        from b2ctl.watch import _offline_and_replace
+        old = _disk(pool="tank", vdev="raidz1-0", bay="1:4",
+                    by_id="/d/old", pool_token="/d/old", serial="OLD")
+        new = _disk(pool=None, vdev=None, vdev_state=None, bay="1:4",
+                    dev="/dev/sdz", by_id="/d/new", serial="NEW")
+        new.pool_token = None
+        mock_zfs.can_offline.return_value = True
+        mock_zfs.offline.return_value = (True, "")
+        mock_core.scan.return_value = [new]
+        _offline_and_replace(old, {})
+        mock_zfs.offline.assert_called_once_with("tank", "/d/old", dry_run=False)
+        # replace runs via run_check with the resolved new by-id
+        mock_rc.assert_called_once_with(
+            ["zpool", "replace", "-f", "tank", "/d/old", "/d/new"], dry_run=False)
+
+
 class TestWatchDestroy(unittest.TestCase):
     """destroy: zpool destroy + remove cron, gated by name-confirm."""
 

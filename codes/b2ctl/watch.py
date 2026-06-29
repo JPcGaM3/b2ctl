@@ -363,11 +363,17 @@ def _cmd_offload(tbw) -> None:
             return
 
     spares = [x for x in disks if x.vdev == "spares" and x.vdev_state == "AVAIL" and x.pool == d.pool]
-    if not spares:
-        print(f"{Y}  pool '{d.pool}' has no AVAIL spare to offload onto — add one first{N}")
+    if spares:
+        if _replace_onto_spare(d, spares[0]):
+            _assign_free_disk(d, tbw)
         return
-    if _replace_onto_spare(d, spares[0]):
-        _assign_free_disk(d, tbw)
+    # No spare: offline (degrade) + replace a new disk in the same bay, but only
+    # if the vdev is redundant enough that offlining won't fail the pool.
+    if zfs.can_offline(d.pool, _pool_dev(d)):
+        _offline_and_replace(d, tbw)
+    else:
+        print(f"{Y}  no AVAIL spare, and offlining {ui.disk_label(d)} would risk "
+              f"failing '{d.pool}' — add a spare or fix redundancy first{N}")
 
 
 def _cmd_locate(tbw) -> None:
@@ -417,10 +423,14 @@ def _detach_if_lingers(pool: str, old_token: str) -> None:
                else R + f"  ✗ detach failed: {out_d}") + N)
 
 
-def _replace_onto_spare(d, spare) -> bool:
+def _replace_member(d, new, *, detach_old=False, pull_led=False) -> bool:
+    """Replace pool member `d` with disk `new` (its pool_token/by_id), then
+    resilver. Shared by spare-replace and spare-less in-place replace.
+    """
     pool = d.pool
-    cmds = [["zpool", "replace", "-f", pool, _pool_dev(d), spare.pool_token or spare.by_id]]
-    if not _confirm_op("replace", d, spare, pool, d.vdev, cmds):
+    new_dev = getattr(new, "pool_token", None) or new.by_id or new.dev
+    cmds = [["zpool", "replace", "-f", pool, _pool_dev(d), new_dev]]
+    if not _confirm_op("replace", d, new, pool, d.vdev, cmds):
         return False
     op_id = safety.begin_op("replace", d.serial, d.bay, _pool_dev(d), pool, d.vdev, cmds, dry_run=_DRY_RUN)
     ok, out = run_check(cmds[0], dry_run=_DRY_RUN)
@@ -428,16 +438,55 @@ def _replace_onto_spare(d, spare) -> bool:
         print(R + f"  ✗ failed: {out}" + N)
         safety.end_op(op_id, False, "", out, 1, dry_run=_DRY_RUN)
         return False
-    print(G + "  ✔ replace started — resilvering onto spare" + N)
+    print(G + "  ✔ replace started — resilvering" + N)
     if not _DRY_RUN:
         _wait_resilver(pool)
-    _detach_if_lingers(pool, _pool_dev(d))
-
-    if not _DRY_RUN:
-        print(f"{Y}  please pull bay {d.bay or '?'} ... blinking LED{N}")
-        locate.blink_disk(d, locate.DEFAULT_SECONDS)
+    if detach_old:
+        _detach_if_lingers(pool, _pool_dev(d))
+        if not _DRY_RUN:
+            print(f"{Y}  please pull bay {d.bay or '?'} ... blinking LED{N}")
+            locate.blink_disk(d, locate.DEFAULT_SECONDS)
     safety.end_op(op_id, True, out, "", 0, dry_run=_DRY_RUN)
     return True
+
+
+def _replace_onto_spare(d, spare) -> bool:
+    return _replace_member(d, spare, detach_old=True, pull_led=True)
+
+
+def _offline_and_replace(d, tbw) -> None:
+    """Spare-less offload: offline a member (pool -> DEGRADED), then replace it
+    with a new disk inserted in the SAME bay. Guarded so it can't fail the pool.
+    """
+    pool = d.pool
+    if not zfs.can_offline(pool, _pool_dev(d)):
+        print(f"{R}  refuse: '{pool}' is not fully redundant right now — offlining "
+              f"{ui.disk_label(d)} could fail the pool. Fix the other disk first.{N}")
+        return
+    print(f"{Y}  '{pool}' will go DEGRADED (online, NO redundancy) until the new "
+          f"disk finishes resilvering.{N}")
+    cmds = [["zpool", "offline", pool, _pool_dev(d)]]
+    if not _confirm_op("offline", d, None, pool, d.vdev, cmds):
+        return
+    op_id = safety.begin_op("offline", d.serial, d.bay, _pool_dev(d), pool, d.vdev, cmds, dry_run=_DRY_RUN)
+    ok, out = zfs.offline(pool, _pool_dev(d), dry_run=_DRY_RUN)
+    safety.end_op(op_id, ok, "", "" if ok else out, 0 if ok else 1, dry_run=_DRY_RUN)
+    if not ok:
+        print(R + f"  ✗ offline failed: {out}" + N)
+        return
+    print(G + f"  ✔ {ui.disk_label(d)} offlined — pool DEGRADED" + N)
+    if not _DRY_RUN:
+        print(f"{Y}  pull bay {d.bay or '?'} and insert the replacement into the SAME bay.{N}")
+        locate.blink_disk(d, locate.DEFAULT_SECONDS)
+    _ask("  press Enter once the new disk is inserted> ")
+    new = next((x for x in core.scan(tbw)
+                if x.bay == d.bay and not x.in_pool and x.dev != "-"
+                and x.serial != d.serial and not x.smart_dtype), None)
+    if not new:
+        print(f"{Y}  no new disk seen in bay {d.bay or '?'}. Insert it, then use "
+              f"[r]eplace (the member stays OFFLINE meanwhile).{N}")
+        return
+    _replace_member(d, new)
 
 
 def _cmd_replace(tbw) -> None:

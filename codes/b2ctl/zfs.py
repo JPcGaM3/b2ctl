@@ -244,6 +244,28 @@ def can_detach(pool: str, dev_token: str) -> bool:
     return True
 
 
+def offline(pool: str, dev: str, *, dry_run: bool = False):
+    """`zpool offline <pool> <dev>` — take a member offline (pool -> DEGRADED)."""
+    return run_check(["zpool", "offline", pool, dev], dry_run=dry_run)
+
+
+def can_offline(pool: str, dev_token: str) -> bool:
+    """True if offlining dev keeps the pool importable.
+
+    The disk's vdev must be redundant (raidz/mirror) AND every OTHER member
+    currently ONLINE — so going to DEGRADED is safe. False for stripe/single
+    (no redundancy) or an already-degraded vdev (offlining a 2nd could fail it).
+    """
+    topo = topology()
+    vdev = next((e["vdev"] for e in topo.values()
+                 if e["pool"] == pool and e["token"] == dev_token), None)
+    if not vdev or ("raidz" not in vdev and "mirror" not in vdev):
+        return False
+    others = [e for e in topo.values()
+              if e["pool"] == pool and e["vdev"] == vdev and e["token"] != dev_token]
+    return bool(others) and all(e["state"] == "ONLINE" for e in others)
+
+
 def demote_to_spare(pool: str, dev_token: str, *, dry_run: bool = False) -> tuple[bool, str]:
     ok, out = detach(pool, dev_token, dry_run=dry_run)
     if not ok:

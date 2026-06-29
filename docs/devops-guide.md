@@ -652,3 +652,16 @@ double-confirm (must type the pool name; ALL-DATA-LOST warning; audited via
 Pools destroyed **outside** b2ctl (manual `zpool destroy`) leave a stale cron;
 `b2ctl watch` **prunes orphan crons** at startup (`prune_orphan_crons` deletes
 `b2ctl-*` files whose pool is absent from `zpool list`).
+
+### Spare-less offload (offline → degrade → replace in place)
+
+`[o]ffload` on a pool member, when there is **no AVAIL spare**:
+
+- `zfs.can_offline(pool, dev)` gate — the member's vdev must be redundant
+  (raidz/mirror) and every OTHER member ONLINE. Refuses on a stripe/single or an
+  already-degraded vdev (so a second offline can't fault the pool).
+- `zpool offline <pool> <dev>` → pool **DEGRADED** (online, no redundancy); LED on.
+- Operator pulls the bay, inserts a new disk in the SAME bay; b2ctl matches it by
+  bay (`not in_pool`, `smart_dtype==""`) and runs `zpool replace -f <pool> <old>
+  <new-by-id>` + resilver. Audited as `offline` then `replace`
+  (`safety.begin_op/end_op`; rollback hint `offline`→`zpool online`).

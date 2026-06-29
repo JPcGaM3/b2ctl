@@ -789,3 +789,19 @@ Destroys the pool with `zpool destroy` — **ALL DATA IS LOST**. You must confir
 and then **type the pool name** to proceed. b2ctl also removes that pool's
 maintenance cron. (If you destroy a pool yourself with `zpool destroy`, b2ctl
 cleans up the leftover cron the next time you open `b2ctl watch`.)
+
+## Replacing a failing disk with NO spare (`[o]ffload`)
+
+raidz1 (and mirrors) keep running with one disk missing. If a disk is failing,
+every bay is full, and there is **no hot spare**, `[o]ffload` it:
+
+1. b2ctl checks the pool is **fully redundant right now** (all other members
+   healthy). If not, it **refuses** — offlining a second disk could fail the pool.
+2. It runs `zpool offline` — the pool goes **DEGRADED but stays online** (no
+   redundancy until you finish), and lights the bay LED.
+3. **Pull that bay and insert the new disk into the SAME bay**, then press Enter.
+4. b2ctl `zpool replace`s the new disk in and shows the resilver progress; when
+   it finishes the pool is back to **ONLINE**.
+
+> ⚠️ While DEGRADED / resilvering there is no redundancy — a second disk failure
+> in that window loses data. b2ctl won't let you offline a second disk meanwhile.

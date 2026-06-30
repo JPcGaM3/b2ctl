@@ -890,3 +890,7 @@ every bay is full, and there is **no hot spare**, `[o]ffload` it:
   link (run `ls /dev/disk/by-id/ | grep nvme`); it survives the card moving slots.
 - **`bdf`** still works — find it in `b2ctl status` (the BAY) or `cat
   /sys/class/nvme/nvme0/address`.
+
+> NVMe drives appear in the table and in `[a]ssign` / `[b]urnin` like any other
+> disk — only the BAY column differs (no enclosure:slot). The bay label is
+> display-only; getting it wrong is cosmetic, never dangerous.

@@ -648,3 +648,47 @@ b2ctl> n
   - raid type ต้องมี disk พอ: `mirror`≥2, `raidz1`≥3, `raidz2`≥4 (ไม่พอ → `error: need at least N disks`); พิมพ์ผิด → `invalid raid type`
   - `stripe` = ไม่มี redundancy (disk เดียวก็ได้ แต่เสีย = ข้อมูลหายหมด)
   - ⚠️ ตัวอย่างนี้สร้าง pool ชื่อ `tutorial` บน disk ว่าง (1:7) — ถ้าทดสอบเสร็จลบด้วย `zpool destroy tutorial`
+
+---
+
+## Section 8 — NVMe: ดูตัวดิสก์ + เปลี่ยนชื่อ bay (`bay_map.json`)
+
+simulator มี NVMe 2 ลูก (Samsung 990 EVO Plus 4TB) อยู่แล้ว ลองดู:
+
+```
+python3 sim/simctl init
+python3 sim/run status
+```
+
+จะเห็น 2 แถวล่างสุด:
+```
+PCIe2:0 nvme0n1   NVME Samsung SSD 990 EVO Plu S7U9NU0Y401069K   2h(~0.0y)   0%   100.0%  0.00TB/2400TBW   0  PASSED   -   CONFIG
+PCIe2:1 nvme1n1   NVME Samsung SSD 990 EVO Plu S7U9NU0Y400872E   10h(~0.0y)  0%   100.0%  0.00TB/2400TBW   0  PASSED   -   CONFIG
+```
+
+- **แปลว่า:** NVMe ขึ้นในตารางเหมือน disk อื่นทุกอย่าง (health, wear, endurance) `POOL/ARRAY` เป็น `-` เพราะยังไม่ได้อยู่ pool ไหน → `CONFIG` (unassigned)
+- คอลัมน์ **BAY** = `PCIe2:0` / `PCIe2:1` มาจากการ map ใน `bay_map.json` (sim ตั้งไว้ให้แล้ว)
+
+### เปลี่ยนชื่อ bay เอง
+NVMe ไม่มี enc:slot เลยตั้งชื่อ bay เองได้ใน `bay_map.json` (panel `back`/`type:nvme`)
+match ได้ 3 แบบ — **ลำดับ by-id > serial > bdf**:
+
+```json
+{ "panel": "back", "type": "nvme",
+  "map": [ {"serial": "S7U9NU0Y401069K", "bay": "PCIe2:0"},
+           {"serial": "S7U9NU0Y400872E", "bay": "PCIe2:1"} ] }
+```
+
+- **`serial`** ง่ายสุด — copy จากคอลัมน์ **SERIAL** ในตารางได้เลย (ใช้ในตัวอย่างนี้)
+- **`by-id`** = substring ของ `/dev/disk/by-id/nvme-<model>_<serial>` (บนเครื่องจริง: `ls /dev/disk/by-id/ | grep nvme`) — ไม่เปลี่ยนแม้ย้าย slot การ์ด
+- **`bdf`** = PCIe address (เช่น `d8:00.0`) บนเครื่องจริงดูได้จาก `cat /sys/class/nvme/nvme0/address`
+
+ลองแก้ `bay` ใน `sim/bay_map.json` (เช่นเป็น `NVMe-A` / `NVMe-B`) แล้วรัน `python3 sim/run status` ใหม่ — คอลัมน์ BAY จะเปลี่ยนตาม **ไม่ต้องแตะอย่างอื่น**
+
+> 💡 บนเครื่องจริงไฟล์อยู่ที่ `/etc/b2ctl/bay_map.json` แก้แล้วรัน `b2ctl status` ดูผลได้เลย (เป็นแค่ป้ายชื่อ — ปลอดภัย ไม่กระทบดิสก์)
+
+### burn-in NVMe ก่อนใช้
+```
+python3 sim/run burnin nvme0n1 --short
+```
+→ รัน SMART self-test แล้วสรุป **PASS/WARN/FAIL** (อ่านอย่างเดียว ไม่เขียนดิสก์) ใช้คัดดิสก์ใหม่/มือสองก่อนเข้า pool

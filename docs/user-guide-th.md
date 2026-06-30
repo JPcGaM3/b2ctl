@@ -845,3 +845,6 @@ raidz1 (และ mirror) ยังทำงานได้แม้ดิสก
   (`ls /dev/disk/by-id/ | grep nvme`) ไม่เปลี่ยนแม้ย้าย slot การ์ด
 - **`bdf`** ยังใช้ได้ — หาได้จาก `b2ctl status` (คอลัมน์ BAY) หรือ
   `cat /sys/class/nvme/nvme0/address`
+
+> NVMe ขึ้นในตารางและใช้ `[a]ssign` / `[b]urnin` ได้เหมือน disk อื่นทุกอย่าง —
+> ต่างแค่คอลัมน์ BAY (ไม่มี enc:slot) ป้าย bay เป็นแค่ชื่อแสดงผล ตั้งผิดก็ไม่อันตราย

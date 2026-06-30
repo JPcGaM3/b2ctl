@@ -237,7 +237,11 @@ Ghost disks are detected by `hba.get_ghost_disks()`. They are drives seen by the
 
 A single `select.select([sys.stdin], [], [], 2.0)` loop:
 
-1. Print table + pools + details once (`_cmd_refresh`).
+1. Print table + pools + **hardware RAID volumes** + details once
+   (`_cmd_refresh`). The volumes table (`ui.render_raid_volumes` from
+   `backend.get_backend().raid_volumes()`) is rendered the same way as the CLI
+   `status` path — so a RAID-mode box shows its `vd0` volume in `watch` too
+   (IT mode: `raid_volumes()` is `[]`, nothing extra printed).
 2. Snapshot block devices (`_block_devs()` via `lsblk -P NAME,TYPE`).
 3. Each iteration:
    - If stdin is ready → read a line → dispatch `r/a/o/s/d/n/t/l/q`.

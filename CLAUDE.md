@@ -219,10 +219,13 @@ the path). Run the suite with `cd codes && python3 -m pytest tests/ -q`.
 
 Beyond unit tests there is a **stateful simulation harness at `codes/sim/`** —
 the "fake binaries on PATH" idea made stateful: run the *real* b2ctl against a
-fake 6-disk server (`state.json`) on a laptop, no hardware/SSH/root.
-`python3 sim/simctl init && python3 sim/run status`; change state with
-`sim/simctl pull|insert|dirty|mode|show`. Covers both backends (IT/RAID) and the
-whole lifecycle; sim audit/snapshots land in `sim/var/` (never `/var/log/b2ctl`).
+fake 8-disk server (6 SATA/SAS + **2 NVMe**, `state.json`) on a laptop, no
+hardware/SSH/root. `python3 sim/simctl init && python3 sim/run status`; change
+state with `sim/simctl pull|insert|dirty|mode|show`. Covers both backends
+(IT/RAID) and the whole lifecycle incl. cache/log/raid10/burnin/destroy; the NVMe
+bay is relabelled by **serial** via `sim/bay_map.json` (the `by-id` key needs real
+`/dev/disk/by-id`, so it is hardware-only). sim audit/snapshots land in `sim/var/`
+(never `/var/log/b2ctl`).
 b2ctl itself is unmodified (sim = fake binaries + a launcher). See `sim/README.md`.
 
 ## 9. Safety rules (non-negotiable)

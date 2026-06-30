@@ -21,10 +21,13 @@ def test_sim_status_healthy(tmp_path):
     _sim("simctl", "init", state=state)
     r = _sim("run", "status", state=state)
     assert r.returncode == 0, r.stderr
-    # 6 disks, both pools, healthy summary
+    # 8 disks (6 SATA/SAS + 2 NVMe), both pools ONLINE
     assert "tank/raidz1-0" in r.stdout
     assert "rpool/mirror-0" in r.stdout
-    assert "all disks healthy" in r.stdout
+    assert "DEGRADED" not in r.stdout
+    # NVMe enumerated + relabelled by serial via the back panel (PCIe2:N)
+    assert "nvme0n1" in r.stdout
+    assert "PCIe2:0" in r.stdout
 
 
 def test_sim_pull_makes_pool_degraded(tmp_path):

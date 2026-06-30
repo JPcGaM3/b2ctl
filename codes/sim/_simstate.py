@@ -43,6 +43,14 @@ def default_state() -> dict:
                   poh=18281, lba_written=19_360_000_000),
             _disk("sde", "S74ZNS0W582280E", "Samsung SSD 870 EVO 1TB", 1, 7,
                   poh=18281, lba_written=1_970_000_000),
+            # 2x NVMe (back PCIe panel) — no enc:slot; the bay comes from
+            # bay_map.json (serial -> PCIe2:N). Unassigned, like a fresh card.
+            _disk("nvme0n1", "S7U9NU0Y401069K", "Samsung SSD 990 EVO Plus 4TB",
+                  None, None, size=4_000_787_030_016, tran="nvme",
+                  poh=2, wear=100, lba_written=0),
+            _disk("nvme1n1", "S7U9NU0Y400872E", "Samsung SSD 990 EVO Plus 4TB",
+                  None, None, size=4_000_787_030_016, tran="nvme",
+                  poh=10, wear=100, lba_written=0),
         ],
         "pools": [
             {"name": "rpool", "type": "mirror", "members": ["sdf", "sda"],

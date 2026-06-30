@@ -27,6 +27,8 @@ def main():
         for d in state["disks"]:
             if not d.get("present"):
                 continue
+            if d.get("tran") == "nvme":
+                continue                 # NVMe isn't behind the SAS HBA
             print("Device is a Hard disk")
             print(f"  Enclosure #                             : {d['enc']}")
             print(f"  Slot #                                  : {d['slot']}")

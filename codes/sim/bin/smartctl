@@ -31,6 +31,26 @@ def main():
 
     print("smartctl 7.5 2025-04-30 r5714 [x86_64-linux-sim] (local build)")
     print("")
+    # NVMe drives report in a different format (smart._parse_nvme keys on
+    # "NVMe" + "SMART/Health Information").
+    if d.get("tran") == "nvme" or dev.startswith("/dev/nvme"):
+        print("=== START OF INFORMATION SECTION ===")
+        print(f"Model Number:                       {d['model']}")
+        print(f"Serial Number:                      {d['serial']}")
+        print("=== START OF SMART DATA SECTION ===")
+        print("SMART overall-health self-assessment test result: PASSED")
+        print("")
+        print("SMART/Health Information (NVMe Log 0x02)")
+        print(f"Percentage Used:                    {max(0, 100 - d['wear'])}%")
+        print(f"Power On Hours:                     {d['poh']:,}")
+        print(f"Data Units Written:                 {d['lba_written'] // 1000:,}")
+        print("Media and Data Integrity Errors:    0")
+        print("")
+        print("Self-test Log (NVMe Log 0x06)")
+        print("Num  Test_Description  Status                       Power_on_Hours")
+        print(f"   0  Extended          Completed without error                {d['poh']}")
+        return 0
+
     print("=== START OF INFORMATION SECTION ===")
     print(f"Device Model:     {d['model']}")
     print(f"Serial Number:    {d['serial']}")

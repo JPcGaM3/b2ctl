@@ -1,1 +1,10 @@
-[]
+[
+  { "panel": "front", "type": "sas", "map": {},
+    "_comment": "Sim keeps identity slot==bay (no reverse_slots), so simctl bays match the table." },
+  { "panel": "back", "type": "nvme",
+    "map": [
+      { "serial": "S7U9NU0Y401069K", "bay": "PCIe2:0" },
+      { "serial": "S7U9NU0Y400872E", "bay": "PCIe2:1" }
+    ],
+    "_comment": "Demo: relabel NVMe by serial (copied from the SERIAL column). On real hardware 'by-id' also works; the raw label is the PCIe BDF." }
+]

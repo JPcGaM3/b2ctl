@@ -462,24 +462,39 @@ A tmpdir is created via `mktemp -d` and cleaned on EXIT via `trap`.
 **Error handling:** missing archive or failed extraction prints `[✗] <tool>: reason`
 and continues. Never aborts the b2ctl package install above it.
 
-### §7.2 `b2ctl install` — post-install tool management
+### §7.2 `b2ctl install` — 1:1 mirror of `./install.sh`
 
-After b2ctl is installed, tool binaries can be installed or reinstalled without re-running `install.sh`:
+`b2ctl install` (`cli.py::_install` → `b2ctl/installer.py`) reproduces the
+`./install.sh` contract, flag-for-flag. The package itself is already deployed (we
+are running from it), so the no-flag form does **not** redeploy — it reports
+status. Everything else matches:
 
-```bash
-sudo b2ctl install                  # install all missing tools
-sudo b2ctl install --tool sas2ircu  # install one specific tool
-```
+| `b2ctl install …` | `installer` call | tools | mode | root |
+|-------------------|------------------|-------|------|:----:|
+| *(no flag)* | `install_base()` | — (report only, no download) | — | no |
+| `--with-tools` | `install_tools(["sas2ircu","perccli"])` | both | — | yes |
+| `--perc` | `install_profile("perc")` | perccli | `raid` | yes |
+| `--flash` | `install_profile("flash")` | sas2ircu | `it` | yes |
+| `--tool TOOL` | `install_tools([TOOL])` | one | — | yes |
 
-Implemented in `b2ctl/installer.py`. Each tool is independent — one failure does not abort others.
+The flags are an `argparse` mutually-exclusive group. `install_base()` needs no
+root (it only reads `tool_ok()` + `config.controller_mode()`); the acting branches
+check `os.geteuid()==0` individually. Each tool is independent — one failure does
+not abort others.
 
 | tool | archive | method | binary path |
 |------|---------|--------|------------|
-| sas2ircu | SAS2IRCU_P20.zip (zip) | `cp + chmod` | `/usr/local/bin/sas2ircu` |
-| storcli | storcli.zip (zip) | `dpkg -i Ubuntu/*.deb` | `/opt/MegaRAID/storcli/storcli64` → `/usr/local/bin/storcli` |
-| perccli | perccli.tar.gz | `alien --scripts -i *.rpm` | `/opt/MegaRAID/perccli/perccli64` → `/usr/local/bin/perccli` |
+| sas2ircu | SAS2IRCU_P20.zip (zip) | unzip `*x86*_rel/sas2ircu` → `cp -f` + chmod | `/usr/sbin/sas2ircu` |
+| perccli | perccli.tar.gz | `alien --scripts -i *.rpm` → `cp -f perccli64` | `/usr/sbin/perccli` |
 
-Downloads use `urllib.request` (stdlib) from Google Drive. Size validation: < 1 KB = HTML error page → aborts with `[✗]`. Temp dir cleaned up via `try/finally`.
+`install_tools()` first runs `ensure_prereqs()` (`dpkg --add-architecture i386`,
+`apt-get install -y alien libc6-i386`, verifying the 32-bit loader actually
+exists). Downloads use `urllib.request` (stdlib) from Google Drive; < 1 KB = HTML
+error page → `[✗]`. Temp dir cleaned via `try/finally`.
+
+> `./install.sh` (no flag) installs **only** the b2ctl package — no `apt`, no
+> downloads. The apt prerequisites are installed by `install_tools()` only when a
+> tool is actually being added (`--with-tools`/`--perc`/`--flash`).
 
 ### §7.3 `b2ctl update` — config validation and bay_map export
 

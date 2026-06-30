@@ -58,20 +58,28 @@ sudo ./install.sh
 
 Copies the package to `/opt/b2ctl`, creates the `b2ctl` launcher at
 `/usr/local/sbin/b2ctl`, and creates `/var/log/b2ctl/snapshots/` for the audit
-system.
+system. A plain `./install.sh` installs **only b2ctl** — no downloads, no `apt`,
+no internet needed.
 
-**Install tool binaries at the same time (recommended on a fresh server):**
+**The four install forms (same for `./install.sh` and `b2ctl install`):**
 
-```bash
-cd codes
-sudo ./install.sh --with-tools
-```
+| command | what it installs |
+|---------|------------------|
+| `./install.sh` · `b2ctl install` | **only b2ctl** (package + launcher); no tools, no download |
+| `./install.sh --with-tools` · `b2ctl install --with-tools` | b2ctl **+ both** tools (sas2ircu + perccli) from Google Drive |
+| `./install.sh --perc` · `b2ctl install --perc` | b2ctl + **perccli** + `controller.mode=raid` (Dell PERC RAID box) |
+| `./install.sh --flash` · `b2ctl install --flash` | b2ctl + **sas2ircu** + `controller.mode=it` (crossflashed HBA box) |
 
-The `--with-tools` flag automatically **downloads** `sas2ircu`, `storcli64`, and
-`perccli64` archives from Google Drive, extracts the binaries, and places them in
-`/usr/local/sbin/`. Downloads are deleted on completion. Each tool installs
-independently — if a download or extraction fails it prints `[✗]` and continues.
-Requires `curl` or `wget` (both available by default on Proxmox VE).
+- `./install.sh` deploys the package; `b2ctl install` (no flag) just reports tool
+  status + the current mode (b2ctl is already installed) — otherwise the flags
+  behave identically on both.
+- `--with-tools` **downloads** the tool archives from Google Drive, extracts the
+  binaries to `/usr/sbin/`, and installs their apt prerequisites
+  (`libc6-i386` for the 32-bit sas2ircu, `alien` for perccli). Downloads are
+  deleted on completion; each tool installs independently (`[✗]` + continue on
+  failure). Requires `curl` or `wget` (both default on Proxmox VE).
+- Pick `--perc` **or** `--flash` to match your hardware — it installs just that
+  backend's tool and sets the controller mode in `/etc/b2ctl/config.json`.
 
 **Dependencies:**
 
@@ -729,8 +737,10 @@ ESP partition **manually**. b2ctl does not touch Proxmox boot config.
 | `b2ctl config show` | print current effective config as JSON |
 | `b2ctl config init` | write `/etc/b2ctl/config.json` with auto-detected defaults |
 | `b2ctl version` | print version string |
-| `sudo b2ctl install` | download and install sas2ircu, storcli, perccli from Google Drive (skips already-installed) |
-| `sudo b2ctl install --tool sas2ircu` | install only one tool (`sas2ircu`, `storcli`, or `perccli`) |
+| `b2ctl install` | report tool + mode status (no download — same as `./install.sh`) |
+| `sudo b2ctl install --with-tools` | download + install **both** tools (sas2ircu + perccli) |
+| `sudo b2ctl install --perc` / `--flash` | install that backend's tool + set the mode (raid/it) |
+| `sudo b2ctl install --tool sas2ircu` | install only one tool (`sas2ircu` or `perccli`) |
 | `b2ctl update` | validate config, check tool paths, report missing tools |
 | `sudo b2ctl update --export-bay-map` | copy bundled bay_map.json to /etc/b2ctl/ and update config |
 

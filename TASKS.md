@@ -12,6 +12,23 @@
 > - `b2ctl locate <serial>` → exactly one bay's LED/activity blinks ~5s.
 > - If a bay number is still off, edit `bay_map.json` (reverse rule or explicit map).
 
+## FIX — install-command parity [DONE, v0.8.3-itmode]
+
+`./install.sh` and `b2ctl install` now share one contract (no-flag = b2ctl only /
+`--with-tools` = both tools / `--perc`/`--flash` = profile+mode):
+- install.sh: dropped the eager `libc6-i386` apt step → plain `./install.sh` does
+  no apt/download (deps install only via `install_tools` when a tool is added).
+- installer.py: `install_base()` (no-download status report). cli.py: added
+  `--with-tools`, base dispatch, root checked only in acting branches.
+- +5 tests (254 pass); docs (user-guide en/th, devops §7.2, CLAUDE §3) updated.
+
+## FEATURE — NVMe bay_map by by-id/serial + sim NVMe + watch RAID-volumes [DONE, v0.8.1-0.8.2]
+
+- baymap.remap_nvme matches NVMe by by-id/serial/bdf (precedence by-id>serial>bdf);
+  `_by_id_index` prefers nvme-<model>_<serial> over nvme-eui.
+- watch `_cmd_refresh` renders the hardware RAID volumes table (parity with status).
+- sim: +2 NVMe disks, NVMe-format smartctl, serial-keyed PCIe bay in sim/bay_map.json.
+
 ## FEATURE — ZFS aux vdevs (SLOG/L2ARC) + RAID10 + burn-in [DONE, v0.8.0-itmode]
 
 Spec: `prompts/FEATURE_aux-vdevs-burnin.md`. For the R740XD central ZFS/NFS

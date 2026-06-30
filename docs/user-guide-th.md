@@ -49,16 +49,25 @@ cd b2ctl/codes
 sudo ./install.sh
 ```
 
-ติดตั้งพร้อม tool binaries (แนะนำสำหรับเซิร์ฟเวอร์ใหม่):
+`./install.sh` เปล่า ๆ = ลง **เฉพาะ b2ctl** (package + launcher) ไม่โหลด tool ไม่
+แตะ `apt` ไม่ต้องต่อเน็ต
 
-```bash
-cd codes
-sudo ./install.sh --with-tools
-```
+**รูปแบบติดตั้ง 4 แบบ (เหมือนกันทั้ง `./install.sh` และ `b2ctl install`):**
 
-Flag `--with-tools` จะ **ดาวน์โหลด** `sas2ircu`, `storcli64`, และ `perccli64`
-จาก Google Drive โดยอัตโนมัติ ติดตั้งลงใน `/usr/local/sbin/` แล้วลบไฟล์ที่ดาวน์โหลดออก
-ต้องการ `curl` หรือ `wget` (มีติดตั้งมาแล้วใน Proxmox VE)
+| คำสั่ง | ลงอะไร |
+|--------|--------|
+| `./install.sh` · `b2ctl install` | **เฉพาะ b2ctl** ไม่มี tool ไม่โหลด |
+| `./install.sh --with-tools` · `b2ctl install --with-tools` | b2ctl **+ tool ทั้งคู่** (sas2ircu + perccli) จาก Google Drive |
+| `./install.sh --perc` · `b2ctl install --perc` | b2ctl + **perccli** + `controller.mode=raid` (เครื่อง Dell PERC RAID) |
+| `./install.sh --flash` · `b2ctl install --flash` | b2ctl + **sas2ircu** + `controller.mode=it` (เครื่อง crossflashed HBA) |
+
+- `./install.sh` deploy package; `b2ctl install` (ไม่มี flag) แค่รายงานสถานะ tool +
+  mode ปัจจุบัน (b2ctl ลงไปแล้ว) — flag อื่น ๆ ทำงานเหมือนกันทั้งสองทาง
+- `--with-tools` **ดาวน์โหลด** archive จาก Google Drive แตกลง `/usr/sbin/` + ลง apt
+  prerequisite (`libc6-i386` สำหรับ sas2ircu 32-bit, `alien` สำหรับ perccli) ลบไฟล์
+  โหลดทิ้งเมื่อเสร็จ; ต้องมี `curl`/`wget` (มีใน Proxmox VE)
+- เลือก `--perc` **หรือ** `--flash` ตามฮาร์ดแวร์ — ลงเฉพาะ tool ของ backend นั้น +
+  ตั้ง mode ใน `/etc/b2ctl/config.json`
 
 ### สิ่งที่ต้องมีในเครื่องก่อน:
 
@@ -688,8 +697,10 @@ b2ctl rollback 20260617-143022-replace
 | `sudo b2ctl log --last N` | ดู N operation ล่าสุด |
 | `sudo b2ctl rollback <op_id>` | ย้อนกลับ operation ก่อนหน้า (พร้อม confirm) |
 | `sudo b2ctl version` | แสดงเวอร์ชัน |
-| `sudo b2ctl install` | ดาวน์โหลดและติดตั้ง sas2ircu, storcli, perccli จาก Google Drive (ข้ามตัวที่ติดตั้งแล้ว) |
-| `sudo b2ctl install --tool sas2ircu` | ติดตั้งเฉพาะ tool ที่ระบุ (`sas2ircu`, `storcli`, หรือ `perccli`) |
+| `b2ctl install` | รายงานสถานะ tool + mode (ไม่โหลดอะไร = เหมือน `./install.sh`) |
+| `sudo b2ctl install --with-tools` | ดาวน์โหลด + ติดตั้ง sas2ircu **และ** perccli จาก Google Drive |
+| `sudo b2ctl install --perc` / `--flash` | ลง tool ของ backend นั้น + ตั้ง mode (raid/it) |
+| `sudo b2ctl install --tool sas2ircu` | ติดตั้งเฉพาะ tool ที่ระบุ (`sas2ircu` หรือ `perccli`) |
 | `b2ctl update` | ตรวจสอบ config และ tool ทั้งหมด แสดงสถานะ |
 | `sudo b2ctl update --export-bay-map` | คัดลอก bay_map.json ไปยัง /etc/b2ctl/ เพื่อแก้ไขได้อิสระ |
 

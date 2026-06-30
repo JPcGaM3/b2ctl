@@ -121,6 +121,13 @@ docs/
 Run on the box as root (no `sudo` on Proxmox): `b2ctl status`, `b2ctl watch`,
 `b2ctl locate <bay> on|off`, `b2ctl swap`, `b2ctl version`.
 
+**Install parity (v0.8.3):** `./install.sh` and `b2ctl install` share one
+contract — no-flag = **b2ctl only** (`install.sh` deploys the package, `b2ctl
+install` reports tool/mode status; no apt, no download); `--with-tools` = both
+tools (sas2ircu+perccli) from Google Drive; `--perc` = perccli+mode=raid;
+`--flash` = sas2ircu+mode=it. apt prereqs (libc6-i386/alien) install only when a
+tool is actually added.
+
 ## 4. Conventions (follow these — they are the user's house style)
 
 - **Code & all output: English**, minimal comments. The user converses in

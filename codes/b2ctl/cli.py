@@ -21,7 +21,7 @@ from . import installer as _installer_mod
 from .common import need_root, run, R, Y, G, C, N
 from . import ui
 
-__version__ = "0.8.2-itmode"
+__version__ = "0.8.3-itmode"
 
 
 def _resolve_dev(target: str, disks=None):
@@ -256,19 +256,41 @@ def _check(_args) -> int:
 
 
 def _install(args) -> int:
-    """Download and install tool binaries from Google Drive."""
-    if os.geteuid() != 0:
-        print(f"{R}[-] b2ctl install requires root{N}")
-        return 1
+    """`b2ctl install` — 1:1 mirror of `./install.sh`:
+
+      (no flag)     base report (no download, no root)   == ./install.sh
+      --with-tools  download + install sas2ircu+perccli   == ./install.sh --with-tools
+      --perc        perccli  + controller.mode=raid       == ./install.sh --perc
+      --flash       sas2ircu + controller.mode=it         == ./install.sh --flash
+      --tool TOOL   install just that one tool
+    """
     print()
     print(f"{C}[b2ctl install]{N}")
+
+    def _need_root() -> bool:
+        if os.geteuid() != 0:
+            print(f"{R}[-] this install action requires root{N}")
+            return False
+        return True
+
     if getattr(args, "perc", False):
+        if not _need_root():
+            return 1
         _installer_mod.install_profile("perc")
     elif getattr(args, "flash", False):
+        if not _need_root():
+            return 1
         _installer_mod.install_profile("flash")
+    elif getattr(args, "with_tools", False):
+        if not _need_root():
+            return 1
+        _installer_mod.install_tools(["sas2ircu", "perccli"])
+    elif getattr(args, "tool", None):
+        if not _need_root():
+            return 1
+        _installer_mod.install_tools([args.tool])
     else:
-        tools = [args.tool] if getattr(args, "tool", None) else None
-        _installer_mod.install_tools(tools)
+        _installer_mod.install_base()          # no download, no root needed
     print()
     return 0
 
@@ -499,6 +521,8 @@ def build_parser() -> argparse.ArgumentParser:
     inst_p = sub.add_parser("install",
                             help="download and install tool binaries (sas2ircu/perccli)")
     inst_grp = inst_p.add_mutually_exclusive_group()
+    inst_grp.add_argument("--with-tools", dest="with_tools", action="store_true",
+                          help="download + install both tools (sas2ircu + perccli)")
     inst_grp.add_argument("--perc", action="store_true",
                           help="install perccli + set controller.mode=raid")
     inst_grp.add_argument("--flash", action="store_true",

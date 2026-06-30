@@ -89,5 +89,29 @@ class TestInstallProfile(unittest.TestCase):
         sm.assert_not_called()
 
 
+class TestInstallBase(unittest.TestCase):
+    """`b2ctl install` (no flag) = base report, no download (mirrors ./install.sh)."""
+
+    def test_base_reports_and_downloads_nothing(self):
+        import io
+        import contextlib
+        with patch("b2ctl.installer.tool_ok", return_value=True), \
+             patch("b2ctl.config.controller_mode", return_value="it"), \
+             patch("b2ctl.installer.download") as dl, \
+             patch("b2ctl.installer.install_tools") as it, \
+             patch("b2ctl.installer.ensure_prereqs") as ep:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                installer.install_base()
+            out = buf.getvalue()
+        self.assertIn("sas2ircu", out)
+        self.assertIn("perccli", out)
+        self.assertIn("controller.mode = it", out)
+        self.assertIn("--with-tools", out)
+        dl.assert_not_called()
+        it.assert_not_called()
+        ep.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

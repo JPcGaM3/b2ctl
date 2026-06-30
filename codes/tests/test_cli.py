@@ -210,5 +210,38 @@ class TestAuxAndBurninCommands(unittest.TestCase):
         mock_add.assert_called_once_with("tank", ["/dev/disk/by-id/x"], dry_run=False)
 
 
+class TestInstallParity(unittest.TestCase):
+    """`b2ctl install` mirrors ./install.sh: base / --with-tools / --perc / --flash."""
+
+    def test_with_tools_flag_parses(self):
+        import b2ctl.cli as cli
+        ns = cli.build_parser().parse_args(["install", "--with-tools"])
+        assert ns.with_tools is True
+
+    def test_with_tools_and_perc_mutually_exclusive(self):
+        import b2ctl.cli as cli
+        with self.assertRaises(SystemExit):
+            cli.build_parser().parse_args(["install", "--with-tools", "--perc"])
+
+    def test_dispatch_with_tools_installs_both(self):
+        import b2ctl.cli as cli
+        with patch("os.geteuid", return_value=0), \
+             patch("b2ctl.installer.install_tools") as it, \
+             patch("b2ctl.installer.install_base") as ib:
+            args = cli.build_parser().parse_args(["install", "--with-tools"])
+            args.func(args)
+        it.assert_called_once_with(["sas2ircu", "perccli"])
+        ib.assert_not_called()
+
+    def test_dispatch_no_flag_is_base(self):
+        import b2ctl.cli as cli
+        with patch("b2ctl.installer.install_base") as ib, \
+             patch("b2ctl.installer.install_tools") as it:
+            args = cli.build_parser().parse_args(["install"])
+            args.func(args)
+        ib.assert_called_once_with()
+        it.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

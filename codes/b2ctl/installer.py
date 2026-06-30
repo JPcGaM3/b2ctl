@@ -196,6 +196,21 @@ def install_tools(tools: list[str] | None = None) -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def install_base() -> None:
+    """No-download status report — the CLI mirror of a plain `./install.sh`.
+
+    b2ctl is already installed (we are running from it), so there is nothing to
+    deploy and nothing to download. Show which tools are present and the current
+    controller mode, and point at the flags that actually add tools.
+    """
+    from . import config as _cfg
+    print("  b2ctl package: installed")
+    for t in ("sas2ircu", "perccli"):
+        print(f"  {'[ok]' if tool_ok(t) else '[--]'} {t}")
+    print(f"  controller.mode = {_cfg.controller_mode()}")
+    print("  add tools:  b2ctl install --with-tools | --perc | --flash")
+
+
 def install_profile(profile: str) -> None:
     """Install the tools for a profile and set the matching controller mode.
 

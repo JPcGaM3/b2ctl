@@ -153,15 +153,10 @@ exec env PYTHONPATH="${PREFIX}" python3 -m b2ctl "\$@"
 EOF
 chmod +x "${LAUNCHER}"
 
-# sas2ircu (IT/HBA mode) is a 32-bit ELF needing libc6-i386. A RAID-only
-# (--perc) install uses perccli for bays/LEDs, so skip the sas2ircu bits there.
-if [ "${SET_MODE}" != "raid" ]; then
-    echo "[*] installing sas2ircu runtime dependency (32-bit ELF needs libc6-i386)"
-    dpkg --add-architecture i386 >/dev/null 2>&1 || true
-    apt-get update -qq >/dev/null 2>&1 || true
-    apt-get install -y libc6-i386 >/dev/null 2>&1 || \
-        echo "  [!] libc6-i386 install failed — sas2ircu will not execute"
-fi
+# A plain `./install.sh` installs ONLY the b2ctl package — no apt, no downloads.
+# Tool runtime deps (libc6-i386 for the 32-bit sas2ircu, alien for perccli) are
+# installed by install_tools() further down, and only when a tool is actually
+# being installed (--with-tools / --perc / --flash).
 
 echo "[*] checking dependencies"
 for bin in smartctl zpool lsblk; do

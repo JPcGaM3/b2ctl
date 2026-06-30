@@ -102,3 +102,40 @@ class TestHbaBmReuse:
         mock_bm.assert_not_called()
         assert len(ghosts) == 1
         assert ghosts[0].serial == "SN999"
+
+
+class TestByIdIndexNvmePreference(unittest.TestCase):
+    """NVMe model link (nvme-<model>_<serial>) preferred over nvme-eui.<hex>."""
+
+    @patch("b2ctl.hba.os.path.realpath")
+    @patch("b2ctl.hba.os.listdir")
+    @patch("b2ctl.hba.os.path.isdir", return_value=True)
+    def test_prefers_model_link_over_eui(self, _isdir, mock_ls, mock_real):
+        mock_ls.return_value = ["nvme-eui.0025385991b1c0f4",
+                                "nvme-Samsung_SSD_990_EVO_Plus_4TB_S7XX12345"]
+        mock_real.side_effect = lambda p: "/dev/nvme0n1"   # both point at same dev
+        idx = hba._by_id_index()
+        self.assertTrue(idx["/dev/nvme0n1"].endswith(
+            "nvme-Samsung_SSD_990_EVO_Plus_4TB_S7XX12345"))
+
+
+class TestEnumerateNvmeByIdBay(unittest.TestCase):
+    """NVMe bay set from a by-id map entry even when there is no PCIe BDF."""
+
+    @patch("b2ctl.hba._nvme_pcie", return_value=None)
+    @patch("b2ctl.baymap.load")
+    @patch("b2ctl.hba._by_id_index")
+    @patch("b2ctl.hba._lsblk_pairs")
+    def test_nvme_bay_from_by_id(self, mock_lsblk, mock_byid, mock_load, _pcie):
+        mock_lsblk.return_value = [{
+            "NAME": "nvme0n1", "TYPE": "disk", "SIZE": "0",
+            "SERIAL": "S7XX12345", "MODEL": "Samsung SSD 990 EVO Plus 4TB",
+            "TRAN": "nvme", "ROTA": "0"}]
+        link = "/dev/disk/by-id/nvme-Samsung_SSD_990_EVO_Plus_4TB_S7XX12345"
+        mock_byid.return_value = {"/dev/nvme0n1": link}
+        mock_load.return_value = [{"panel": "back", "type": "nvme",
+            "map": [{"by-id": "nvme-Samsung_SSD_990_EVO_Plus_4TB_S7XX12345",
+                     "bay": "PCIe2:0"}]}]
+        with patch("b2ctl.hba.os.path.realpath", return_value="/dev/nvme0n1"):
+            disks = hba.enumerate_disks()
+        self.assertEqual(disks[0].bay, "PCIe2:0")

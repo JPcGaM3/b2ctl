@@ -36,6 +36,32 @@ class TestRemapNvme(unittest.TestCase):
         self.assertEqual(baymap.remap_nvme("da:00.0", [_BACK]), "da:00.0")
         self.assertEqual(baymap.remap_nvme("d8:00.0", []), "d8:00.0")
 
+    def test_maps_by_id_substring(self):
+        panel = {"panel": "back", "type": "nvme",
+                 "map": [{"by-id": "nvme-Samsung_SSD_990_EVO_Plus_4TB_S7XX", "bay": "PCIe2:0"}]}
+        full = "/dev/disk/by-id/nvme-Samsung_SSD_990_EVO_Plus_4TB_S7XX12345"
+        self.assertEqual(baymap.remap_nvme("", [panel], by_id=full), "PCIe2:0")
+
+    def test_maps_by_serial(self):
+        panel = {"panel": "back", "type": "nvme",
+                 "map": [{"serial": "S7XXNS0W123", "bay": "PCIe2:5"}]}
+        self.assertEqual(baymap.remap_nvme("", [panel], serial="S7XXNS0W123"), "PCIe2:5")
+
+    def test_precedence_by_id_over_bdf(self):
+        # a by-id entry matches this drive; a later bdf entry also would —
+        # the by-id entry (listed first, higher precedence) wins.
+        panel = {"panel": "back", "type": "nvme",
+                 "map": [{"by-id": "nvme-Model_SERA", "bay": "BY-ID-BAY"},
+                         {"bdf": "d8:00.0", "bay": "BDF-BAY"}]}
+        bay = baymap.remap_nvme("d8:00.0", [panel],
+                                by_id="/dev/disk/by-id/nvme-Model_SERA-1")
+        self.assertEqual(bay, "BY-ID-BAY")
+
+    def test_bdf_still_matches_when_no_by_id(self):
+        panel = {"panel": "back", "type": "nvme",
+                 "map": [{"bdf": "d8:00.0", "bay": "BDF-BAY"}]}
+        self.assertEqual(baymap.remap_nvme("d8:00.0", [panel], serial="X"), "BDF-BAY")
+
 
 class TestLoad(unittest.TestCase):
 

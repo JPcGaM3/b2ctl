@@ -11,6 +11,6 @@
     "panel": "back",
     "type": "nvme",
     "map": [],
-    "_comment": "Back PCIe SSD enclosure(s) (NVMe). Relabel each drive's PCIe address to a custom bay, e.g. map: [ {\"bdf\": \"d8:00.0\", \"bay\": \"PCIe2:0\"}, {\"bdf\": \"d9:00.0\", \"bay\": \"PCIe2:1\"} ]. A drive's bdf shows as its BAY in `b2ctl status`, or: cat /sys/class/nvme/nvme0/address . One or more back panels are allowed."
+    "_comment": "Back PCIe SSD enclosure(s) (NVMe). Relabel each drive to a custom bay by 'by-id' (substring of /dev/disk/by-id/nvme-<model>_<serial>), 'serial' (the SERIAL column in `b2ctl status` — easiest), or PCIe 'bdf'. Precedence: by-id > serial > bdf. e.g. map: [ {\"by-id\": \"nvme-Samsung_SSD_990_EVO_Plus_4TB_S7..\", \"bay\": \"PCIe2:0\"}, {\"serial\": \"S7XXNS0W123\", \"bay\": \"PCIe2:1\"}, {\"bdf\": \"d8:00.0\", \"bay\": \"PCIe2:2\"} ]. A drive's bdf: cat /sys/class/nvme/nvme0/address . One or more back panels are allowed."
   }
 ]

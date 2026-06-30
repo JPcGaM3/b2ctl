@@ -7,12 +7,15 @@ Schema (a list of physical panels):
         "reverse_slots": true, "slots_per_enclosure": 8,
         "map": {} },                       # optional enc:slot -> label overrides
       { "panel": "back", "type": "nvme",
-        "map": [ {"bdf": "d8:00.0", "bay": "PCIe2:0"}, ... ] }
+        "map": [ {"by-id": "nvme-Samsung_SSD_990_EVO_Plus_4TB_S7..", "bay": "PCIe2:0"},
+                 {"serial": "S7XXNS0W123", "bay": "PCIe2:1"},
+                 {"bdf": "d8:00.0", "bay": "PCIe2:2"} ] }
     ]
 
 front (type=sas) covers the PERC backplane and the PERC-flashed sas2ircu HBA
-(both addressed as enc:slot). back (type=nvme) maps a drive's PCIe BDF to a
-custom bay label; one or more back panels are allowed.
+(both addressed as enc:slot). back (type=nvme) maps a drive to a custom bay
+label by `by-id`, `serial`, or PCIe `bdf` (precedence by-id > serial > bdf);
+one or more back panels are allowed.
 """
 from __future__ import annotations
 
@@ -61,10 +64,21 @@ def remap_slot(enc_slot: str, panels: list) -> str:
     return enc_slot
 
 
-def remap_nvme(bdf: str, panels: list) -> str:
-    """Remap a PCIe BDF via a back (type=nvme) panel's map list, else identity."""
+def remap_nvme(bdf: str, panels: list, *, by_id: str = "", serial: str = "") -> str:
+    """Remap an NVMe drive's bay via a back (type=nvme) panel.
+
+    A map entry may key on `by-id` (substring of /dev/disk/by-id/nvme-…),
+    `serial`, or `bdf`; precedence by-id > serial > bdf. First matching entry
+    wins. Returns the entry's `bay`, else the bdf (identity)."""
     for p in _panels(panels, "nvme"):
         for d in (p.get("map") or []):
-            if d.get("bdf") == bdf:
+            tgt = d.get("by-id")
+            if tgt and by_id and tgt in by_id:
+                return d.get("bay", bdf)
+            tgt = d.get("serial")
+            if tgt and serial and (tgt == serial or tgt in serial):
+                return d.get("bay", bdf)
+            tgt = d.get("bdf")
+            if tgt and bdf and tgt == bdf:
                 return d.get("bay", bdf)
     return bdf

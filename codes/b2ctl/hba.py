@@ -68,9 +68,10 @@ def enumerate_disks() -> list[Disk]:
         # NVMe has no enclosure:slot — use its PCIe address (relabel-able via the
         # back/type=nvme panel in bay_map.json).
         if name.startswith("nvme"):
-            bdf = _nvme_pcie(name)
-            if bdf:
-                d.bay = baymap.remap_nvme(bdf, panels)
+            bdf = _nvme_pcie(name) or ""
+            bay = baymap.remap_nvme(bdf, panels, by_id=d.by_id, serial=d.serial)
+            if bay:
+                d.bay = bay
         disks.append(d)
     return disks
 
@@ -81,7 +82,11 @@ def _by_id_index() -> dict:
     bydir = "/dev/disk/by-id"
     if not os.path.isdir(bydir):
         return index
-    rank = {"ata-": 0, "scsi-SATA": 1, "wwn-": 2, "scsi-": 3}
+    # NVMe exposes two links; prefer nvme-<model>_<serial> over nvme-eui.<hex>
+    # so d.by_id is the human-readable one (used as a bay_map.json key). Order
+    # matters: "nvme-eui." must be tested before "nvme-".
+    rank = {"ata-": 0, "scsi-SATA": 1, "wwn-": 2, "scsi-": 3,
+            "nvme-eui.": 5, "nvme-": 4}
 
     def score(name: str) -> int:
         for pfx, s in rank.items():

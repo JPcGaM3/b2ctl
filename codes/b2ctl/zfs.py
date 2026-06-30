@@ -213,6 +213,22 @@ def add_mirror(pool: str, dev_a: str, dev_b: str, *, dry_run: bool = False):
     return run_check(["zpool", "add", "-f", pool, "mirror", dev_a, dev_b], dry_run=dry_run)
 
 
+def add_cache(pool: str, devs: list[str], *, dry_run: bool = False):
+    """Add L2ARC cache device(s). Loss is harmless (cache miss); not mirrored."""
+    return run_check(["zpool", "add", "-f", pool, "cache", *devs], dry_run=dry_run)
+
+
+def add_log(pool: str, devs: list[str], *, dry_run: bool = False):
+    """Add a SLOG (separate ZIL). 2+ devs -> mirrored log; caller warns on PLP."""
+    spec = (["mirror", *devs] if len(devs) > 1 else list(devs))
+    return run_check(["zpool", "add", "-f", pool, "log", *spec], dry_run=dry_run)
+
+
+def remove_vdev(pool: str, dev: str, *, dry_run: bool = False):
+    """Remove an aux vdev (cache/log/spare leaf) by token. `zpool remove`."""
+    return run_check(["zpool", "remove", pool, dev], dry_run=dry_run)
+
+
 def attach(pool: str, existing: str, new: str, *, dry_run: bool = False):
     return run_check(["zpool", "attach", "-f", pool, existing, new], dry_run=dry_run)
 
@@ -336,7 +352,7 @@ def wipe(dev: str, *, dry_run: bool = False):
     return run_check(["sgdisk", "--zap-all", dev], dry_run=dry_run)
 
 
-MIN_DISKS = {"stripe": 1, "mirror": 2, "raidz1": 3, "raidz2": 4}
+MIN_DISKS = {"stripe": 1, "mirror": 2, "raid10": 4, "raidz1": 3, "raidz2": 4}
 
 def has_zfs_label(dev: str) -> bool:
     """True if `dev` already carries a ZFS label / known signature."""
@@ -365,10 +381,18 @@ def create_pool(name: str, raid_type: str, devs: list[str], *,
         cmd += ["-o", f"{k}={v}"]
     for k, v in fo.items():
         cmd += ["-O", f"{k}={v}"]
+    if raid_type == "raid10":
+        if len(devs) < 4 or len(devs) % 2:
+            return False, "raid10 needs an even number of disks (>= 4)"
+        vdev_args: list[str] = []
+        for i in range(0, len(devs), 2):
+            vdev_args += ["mirror", devs[i], devs[i + 1]]
+    elif raid_type == "stripe":
+        vdev_args = list(devs)
+    else:                       # mirror / raidz1 / raidz2 / raidz3
+        vdev_args = [raid_type, *devs]
     cmd.append(name)
-    if raid_type != "stripe":
-        cmd.append(raid_type)
-    cmd.extend(devs)
+    cmd.extend(vdev_args)
     return run_check(cmd, dry_run=dry_run)
 
 

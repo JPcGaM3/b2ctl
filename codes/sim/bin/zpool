@@ -90,6 +90,14 @@ def _render_status(state, pool):
             st = "ONLINE" if _present(state, m) else "REMOVED"
             lines.append(f"{indent_member}/dev/{m:<24} {st}")
 
+    for aux in ("log", "cache"):
+        devs = pool.get(aux, [])
+        if devs:
+            lines.append(f"\t{aux}")
+            for dv in devs:
+                st = "ONLINE" if _present(state, dv) else "REMOVED"
+                lines.append(f"\t    /dev/{dv:<24} {st}")
+
     if pool["spares"]:
         lines.append("\tspares")
         inuse = {r["spare"] for r in pool.get("replacements", [])}
@@ -152,13 +160,24 @@ def cmd_add(args, state):
     pool = next((p for p in state["pools"] if p["name"] == a[0]), None)
     if not pool:
         return 1
-    if len(a) >= 2 and a[1] == "spare":
+    kind = a[1] if len(a) >= 2 else ""
+    if kind in ("cache", "log"):
+        key = kind
+        pool.setdefault(key, [])
+        for dev in a[2:]:
+            if dev == "mirror":
+                continue
+            name = dev.replace("/dev/", "")
+            name = (S.disk_by_token(state, name) or {}).get("name", name)
+            if name not in pool[key]:
+                pool[key].append(name)
+    elif kind == "spare":
         for dev in a[2:]:
             name = dev.replace("/dev/", "")
             name = (S.disk_by_token(state, name) or {}).get("name", name)
             if name not in pool["spares"]:
                 pool["spares"].append(name)
-    elif len(a) >= 2 and a[1] == "mirror":
+    elif kind == "mirror":
         for dev in a[2:]:
             name = dev.replace("/dev/", "")
             if name not in pool["members"]:
@@ -209,22 +228,29 @@ def cmd_remove(args, state):
     dev = (S.disk_by_token(state, dev) or {}).get("name", dev)
     pool["spares"] = [s for s in pool["spares"] if s != dev]
     pool["members"] = [m for m in pool["members"] if m != dev]
+    pool["cache"] = [c for c in pool.get("cache", []) if c != dev]
+    pool["log"] = [g for g in pool.get("log", []) if g != dev]
     S.save(state)
     return 0
 
 
 def cmd_create(args, state):
-    a = _strip_flags(args)               # name [raidtype] devs...
+    # Drop flags AND `-o/-O` property VALUES (k=v args don't start with '-').
+    a = [x for x in _strip_flags(args) if "=" not in x]   # name [raidtype] devs...
     if not a:
         return 1
     name = a[0]
     rest = a[1:]
+    _vkw = ("mirror", "raidz1", "raidz2", "raidz3")
     rtype = "stripe"
-    if rest and rest[0] in ("mirror", "raidz1", "raidz2"):
-        rtype = rest[0]; rest = rest[1:]
-    members = [(S.disk_by_token(state, d.replace("/dev/", "")) or {}).get("name", d.replace("/dev/", "")) for d in rest]
+    if rest and rest[0] in _vkw:
+        # raid10 repeats `mirror`; record raid10 when >1 mirror group, else the keyword.
+        rtype = "raid10" if (rest[0] == "mirror" and rest.count("mirror") > 1) else rest[0]
+    devs = [d for d in rest if d not in _vkw]          # drop vdev keyword tokens
+    members = [(S.disk_by_token(state, d.replace("/dev/", "")) or {}).get("name", d.replace("/dev/", "")) for d in devs]
     state["pools"].append({"name": name, "type": rtype, "members": members,
-                           "spares": [], "replacements": [], "resilver": None})
+                           "spares": [], "replacements": [], "cache": [], "log": [],
+                           "resilver": None})
     for m in members:
         d = S.disk_by_name(state, m)
         if d:

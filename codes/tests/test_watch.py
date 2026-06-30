@@ -702,5 +702,78 @@ class TestWatchDestroy(unittest.TestCase):
         mock_zfs.remove_pool_cron.assert_not_called()
 
 
+class TestExtendAndBurnin(unittest.TestCase):
+    """_cmd_extend (L2ARC/SLOG add + aux remove) and _cmd_burnin dispatch."""
+
+    @patch("b2ctl.watch.zfs")
+    @patch("b2ctl.watch.core")
+    @patch("b2ctl.watch._confirm", return_value=True)
+    @patch("b2ctl.watch._ask")
+    def test_extend_add_cache(self, mock_ask, _mc, mock_core, mock_zfs):
+        from b2ctl.watch import _cmd_extend
+        mock_zfs.list_pools.return_value = ["tank"]
+        mock_zfs.add_cache.return_value = (True, "")
+        free = _disk(dev="/dev/sde", pool=None, vdev=None, smart_dtype="")
+        mock_core.scan.return_value = [free]
+        mock_ask.side_effect = ["1", "1"]            # action=cache, pick disk #1
+        _cmd_extend({})
+        mock_zfs.add_cache.assert_called_once()
+        self.assertEqual(mock_zfs.add_cache.call_args[0][0], "tank")
+
+    @patch("b2ctl.watch.zfs")
+    @patch("b2ctl.watch.core")
+    @patch("b2ctl.watch._confirm", return_value=True)
+    @patch("b2ctl.watch._ask")
+    def test_extend_add_log_mirror(self, mock_ask, _mc, mock_core, mock_zfs):
+        from b2ctl.watch import _cmd_extend
+        mock_zfs.list_pools.return_value = ["tank"]
+        mock_zfs.add_log.return_value = (True, "")
+        a = _disk(dev="/dev/sdx", pool=None, vdev=None, smart_dtype="")
+        b = _disk(dev="/dev/sdy", serial="DIFF", pool=None, vdev=None, smart_dtype="")
+        mock_core.scan.return_value = [a, b]
+        mock_ask.side_effect = ["2", "1 2"]          # action=log, pick both
+        _cmd_extend({})
+        mock_zfs.add_log.assert_called_once()
+
+    @patch("b2ctl.watch.zfs")
+    @patch("b2ctl.watch._confirm", return_value=True)
+    @patch("b2ctl.watch._ask")
+    def test_extend_remove_aux(self, mock_ask, _mc, mock_zfs):
+        from b2ctl.watch import _cmd_extend
+        mock_zfs.list_pools.return_value = ["tank"]
+        mock_zfs.topology.return_value = {
+            "/dev/sde": {"pool": "tank", "vdev": "cache", "token": "sde", "state": "ONLINE"}}
+        mock_zfs.remove_vdev.return_value = (True, "")
+        mock_ask.side_effect = ["3", "1"]            # action=remove, pick #1
+        _cmd_extend({})
+        mock_zfs.remove_vdev.assert_called_once_with("tank", "sde", dry_run=False)
+
+    @patch("b2ctl.watch.core")
+    @patch("b2ctl.watch._ask")
+    def test_burnin_dispatch(self, mock_ask, mock_core):
+        from b2ctl.watch import _cmd_burnin
+        free = _disk(dev="/dev/sde", pool=None, vdev=None, smart_dtype="")
+        mock_core.scan.return_value = [free]
+        mock_ask.side_effect = ["1"]
+        with patch("b2ctl.burnin.run", return_value=0) as mock_run, \
+             patch("b2ctl.watch._confirm", return_value=False):
+            _cmd_burnin({})
+        mock_run.assert_called_once()
+
+    @patch("b2ctl.watch.zfs")
+    @patch("b2ctl.watch.core")
+    @patch("b2ctl.watch._ask")
+    def test_create_raid10_rejects_odd(self, mock_ask, mock_core, mock_zfs):
+        from b2ctl.watch import _cmd_create
+        mock_zfs.MIN_DISKS = {"raid10": 4}
+        a = _disk(dev="/dev/a", pool=None, vdev=None, smart_dtype="")
+        b = _disk(dev="/dev/b", serial="B", pool=None, vdev=None, smart_dtype="")
+        c = _disk(dev="/dev/c", serial="C", pool=None, vdev=None, smart_dtype="")
+        mock_core.scan.return_value = [a, b, c]
+        mock_ask.side_effect = ["1 2 3", "tank"]     # pick 3 disks, name
+        _cmd_create({}, raid_type="raid10")
+        mock_zfs.create_pool.assert_not_called()     # odd count rejected
+
+
 if __name__ == "__main__":
     unittest.main()

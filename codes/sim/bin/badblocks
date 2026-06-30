@@ -1,0 +1,20 @@
+#!/usr/bin/env python3
+"""Fake `badblocks -sv -b 4096 /dev/sdX` — always reports a clean read scan."""
+import sys
+
+
+def main():
+    argv = sys.argv[1:]
+    dev = next((a for a in argv if a.startswith("/dev/")), "/dev/sdX")
+    # Refuse the destructive write-test mode outright (b2ctl never uses it).
+    if "-w" in argv:
+        print("badblocks: write-mode disabled in sim", file=sys.stderr)
+        return 1
+    sys.stderr.write(f"Checking blocks 0 to 999999 (read-only test) on {dev}\n")
+    sys.stderr.write("Checking for bad blocks (read-only test): done\n")
+    print("Pass completed, 0 bad blocks found. (0/0/0 errors)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

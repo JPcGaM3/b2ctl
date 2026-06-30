@@ -20,6 +20,15 @@ def main():
     if not d or not d.get("present"):
         return 2  # no such device → b2ctl marks NOREAD
 
+    # `smartctl -t long|short <dev>` — start a (fake) self-test, return immediately.
+    if "-t" in argv:
+        kind = argv[argv.index("-t") + 1] if argv.index("-t") + 1 < len(argv) else "long"
+        print(f"Sending command: \"Execute SMART {kind.capitalize()} self-test routine "
+              "immediately in off-line mode\".")
+        print("Drive command \"Execute SMART ... self-test\" successful.")
+        print("Testing has begun.")
+        return 0
+
     print("smartctl 7.5 2025-04-30 r5714 [x86_64-linux-sim] (local build)")
     print("")
     print("=== START OF INFORMATION SECTION ===")
@@ -38,6 +47,10 @@ def main():
     print(f"177 Wear_Leveling_Count     0x0013   {d['wear']:03d}   {d['wear']:03d}   005    Pre-fail  Always       -       1")
     print(f"197 Current_Pending_Sector  0x0012   100   100   000    Old_age   Always       -       {d['pending']}")
     print(f"241 Total_LBAs_Written      0x0032   099   099   000    Old_age   Always       -       {d['lba_written']}")
+    print("")
+    print("SMART Self-test log structure revision number 1")
+    print("Num  Test_Description    Status                  Remaining  LifeTime(hours)  LBA_of_first_error")
+    print(f"# 1  Extended offline    Completed without error       00%      {d['poh']}         -")
     return 0
 
 

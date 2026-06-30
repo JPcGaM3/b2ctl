@@ -512,7 +512,7 @@ def _cmd_replace(tbw) -> None:
     _replace_onto_spare(d, spares[0])
 
 
-def _cmd_create(tbw) -> None:
+def _cmd_create(tbw, raid_type=None) -> None:
     # Exclude HIDDEN PERC drives (megaraid passthrough → shared /dev/sda); a
     # JBOD'd drive has its own /dev/sdX (smart_dtype "") and is poolable.
     available = [d for d in core.scan(tbw)
@@ -534,14 +534,23 @@ def _cmd_create(tbw) -> None:
     name = _ask("  pool name> ")
     if not name:
         return
-    raid_type = _ask("  raid type (stripe, mirror, raidz1, raidz2) [mirror]> ") or "mirror"
-    if raid_type not in ("stripe", "mirror", "raidz1", "raidz2"):
+    if raid_type is None:
+        raid_type = _ask("  raid type (stripe, mirror, raid10, raidz1, raidz2) "
+                         "[mirror]> ") or "mirror"
+    if raid_type not in ("stripe", "mirror", "raid10", "raidz1", "raidz2"):
         print(f"{R}  invalid raid type{N}")
         return
     min_disks = zfs.MIN_DISKS.get(raid_type, 1)
     if len(devs) < min_disks:
         print(f"{R}  error: need at least {min_disks} disks for {raid_type}{N}")
         return
+    if raid_type == "raid10":
+        if len(devs) % 2:
+            print(f"{R}  error: raid10 needs an even number of disks{N}")
+            return
+        print(f"{C}  mirror pairs:{N}")
+        for i in range(0, len(devs), 2):
+            print(f"    mirror {available[indices[i]].dev} + {available[indices[i + 1]].dev}")
 
     # Pool properties — Enter accepts the recommended SSD default.
     print(f"{C}  pool properties (press Enter for the recommended SSD default):{N}")
@@ -686,8 +695,93 @@ def _cmd_demote(tbw) -> None:
             print(R + f"  ✗ failed: {out}" + N)
 
 
+def _avail_for_aux(tbw):
+    """Poolable free disks (JBOD'd / raw, not already in a pool)."""
+    return [d for d in core.scan(tbw)
+            if not d.in_pool and d.dev != "-" and not d.smart_dtype]
+
+
+def _cmd_extend(tbw) -> None:
+    """Add an L2ARC cache or SLOG log vdev to an existing pool, or remove one."""
+    pools = zfs.list_pools()
+    if not pools:
+        print(f"{Y}  no ZFS pools to extend{N}")
+        return
+    pool = pools[0] if len(pools) == 1 else _ask(f"  pool {pools}> ")
+    if pool not in pools:
+        print(f"{Y}  cancelled{N}"); return
+    print("  [1] add L2ARC cache (read cache; loss = harmless)")
+    print("  [2] add SLOG log   (sync-write accel; mirror + PLP recommended)")
+    print("  [3] remove a cache/log device")
+    choice = _ask("  action> ")
+
+    if choice in ("1", "2"):
+        avail = _avail_for_aux(tbw)
+        if not avail:
+            print(f"{Y}  no free disks available{N}"); return
+        for i, d in enumerate(avail, 1):
+            print(f"    [{i}] {d.dev} (bay {d.bay or '?'})")
+        sel = _ask("  pick disk(s) (space-separated #)> ")
+        try:
+            devs = [avail[int(x) - 1].by_id or avail[int(x) - 1].dev for x in sel.split()]
+        except (ValueError, IndexError):
+            print(f"{Y}  cancelled or invalid selection{N}"); return
+        if not devs:
+            return
+        if choice == "1":
+            if _confirm(f"add {len(devs)} L2ARC cache device(s) to '{pool}'?"):
+                ok, out = zfs.add_cache(pool, devs, dry_run=_DRY_RUN)
+                print((G + "  ✔ cache added" if ok else R + f"  ✗ failed: {out}") + N)
+        else:
+            if len(devs) == 1:
+                print(f"{Y}  [!] SLOG not mirrored: losing this log device can lose "
+                      f"in-flight sync writes.{N}")
+                if not _confirm("add a NON-mirrored SLOG anyway?"):
+                    return
+            print(f"{Y}  [!] ensure the SSD(s) have Power-Loss Protection (PLP).{N}")
+            if _confirm(f"add SLOG ({'mirror' if len(devs) > 1 else 'single'}) to '{pool}'?"):
+                ok, out = zfs.add_log(pool, devs, dry_run=_DRY_RUN)
+                print((G + "  ✔ SLOG added" if ok else R + f"  ✗ failed: {out}") + N)
+        return
+
+    if choice == "3":
+        topo = zfs.topology()
+        aux = sorted({e["token"] for e in topo.values()
+                      if e["pool"] == pool and ("cache" in e["vdev"] or "log" in e["vdev"])})
+        if not aux:
+            print(f"{Y}  no cache/log devices on '{pool}'{N}"); return
+        for i, t in enumerate(aux, 1):
+            print(f"    [{i}] {t}")
+        try:
+            tok = aux[int(_ask("  remove which #> ")) - 1]
+        except (ValueError, IndexError):
+            print(f"{Y}  cancelled{N}"); return
+        if _confirm(f"remove '{tok}' from '{pool}'?"):
+            ok, out = zfs.remove_vdev(pool, tok, dry_run=_DRY_RUN)
+            print((G + "  ✔ removed" if ok else R + f"  ✗ failed: {out}") + N)
+        return
+    print(f"{Y}  cancelled{N}")
+
+
+def _cmd_burnin(tbw) -> None:
+    """Vet a free disk with a SMART long self-test before pooling it."""
+    from . import burnin
+    avail = _avail_for_aux(tbw)
+    if not avail:
+        print(f"{Y}  no free disks to burn in{N}"); return
+    for i, d in enumerate(avail, 1):
+        print(f"    [{i}] {d.dev} (bay {d.bay or '?'}) {d.model}")
+    sel = _ask("  burn in which #> ")
+    try:
+        d = avail[int(sel) - 1]
+    except (ValueError, IndexError):
+        print(f"{Y}  cancelled{N}"); return
+    do_scan = _confirm("also run a full read-surface scan (slow, read-only)?")
+    burnin.run(d, tbw, do_scan=do_scan, dry_run=_DRY_RUN)
+
+
 _MENU = (f"{C}[r]{N}efresh  {C}[a]{N}ssign  {C}[o]{N}ffload  {C}[s]{N}wap  {C}[d]{N}emote  {C}[t]{N}oggle-dryrun  "
-         f"{C}[n]{N}ew-pool  {C}[x]{N}destroy-pool  {C}[l]{N}ocate  {C}[q]{N}uit   (or hot-plug)")
+         f"{C}[n]{N}ew-pool  {C}[e]{N}xtend  {C}[b]{N}urnin  {C}[x]{N}destroy-pool  {C}[l]{N}ocate  {C}[q]{N}uit   (or hot-plug)")
 
 
 def run() -> int:
@@ -723,6 +817,10 @@ def run() -> int:
                 _toggle_dry_run()
             elif cmd == "n":
                 _cmd_create(tbw)
+            elif cmd in ("e", "extend"):
+                _cmd_extend(tbw)
+            elif cmd in ("b", "burnin"):
+                _cmd_burnin(tbw)
             elif cmd == "x":
                 _cmd_destroy(tbw)
             elif cmd == "l":

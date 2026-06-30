@@ -246,6 +246,7 @@ class TestZfsActions:
     def test_min_disks_constants(self):
         assert zfs.MIN_DISKS["stripe"] == 1
         assert zfs.MIN_DISKS["mirror"] == 2
+        assert zfs.MIN_DISKS["raid10"] == 4
         assert zfs.MIN_DISKS["raidz1"] == 3
         assert zfs.MIN_DISKS["raidz2"] == 4
 
@@ -288,6 +289,58 @@ class TestZfsCreatePool(unittest.TestCase):
         self.assertIn("compression=zstd", cmd)
         self.assertIn("recordsize=16K", cmd)
         self.assertNotIn("compression=lz4", cmd)
+
+    @patch('b2ctl.zfs.run_check')
+    def test_create_pool_raid10_stripe_of_mirrors(self, mock_run_check):
+        mock_run_check.return_value = (True, "")
+        ok, _ = zfs.create_pool("tank", "raid10",
+                                ["/dev/a", "/dev/b", "/dev/c", "/dev/d"])
+        self.assertTrue(ok)
+        cmd = mock_run_check.call_args[0][0]
+        self.assertEqual(cmd[-7:], ["tank", "mirror", "/dev/a", "/dev/b",
+                                    "mirror", "/dev/c", "/dev/d"])
+
+    def test_create_pool_raid10_rejects_odd(self):
+        ok, msg = zfs.create_pool("tank", "raid10", ["/dev/a", "/dev/b", "/dev/c"])
+        self.assertFalse(ok)
+        self.assertIn("even", msg)
+
+    def test_create_pool_raid10_rejects_too_few(self):
+        ok, msg = zfs.create_pool("tank", "raid10", ["/dev/a", "/dev/b"])
+        self.assertFalse(ok)
+
+
+class TestZfsAuxVdevs(unittest.TestCase):
+    """L2ARC cache + SLOG log + aux removal wrappers."""
+
+    @patch('b2ctl.zfs.run_check')
+    def test_add_cache(self, mock_rc):
+        mock_rc.return_value = (True, "")
+        zfs.add_cache("tank", ["/dev/nvme0n1"])
+        mock_rc.assert_called_with(
+            ["zpool", "add", "-f", "tank", "cache", "/dev/nvme0n1"], dry_run=False)
+
+    @patch('b2ctl.zfs.run_check')
+    def test_add_log_single_no_mirror(self, mock_rc):
+        mock_rc.return_value = (True, "")
+        zfs.add_log("tank", ["/dev/ssd0"])
+        mock_rc.assert_called_with(
+            ["zpool", "add", "-f", "tank", "log", "/dev/ssd0"], dry_run=False)
+
+    @patch('b2ctl.zfs.run_check')
+    def test_add_log_two_devs_mirrored(self, mock_rc):
+        mock_rc.return_value = (True, "")
+        zfs.add_log("tank", ["/dev/ssd0", "/dev/ssd1"])
+        mock_rc.assert_called_with(
+            ["zpool", "add", "-f", "tank", "log", "mirror", "/dev/ssd0", "/dev/ssd1"],
+            dry_run=False)
+
+    @patch('b2ctl.zfs.run_check')
+    def test_remove_vdev(self, mock_rc):
+        mock_rc.return_value = (True, "")
+        zfs.remove_vdev("tank", "/dev/nvme0n1", dry_run=True)
+        mock_rc.assert_called_with(
+            ["zpool", "remove", "tank", "/dev/nvme0n1"], dry_run=True)
 
     @patch('b2ctl.zfs.run_check')
     def test_destroy_pool(self, mock_run_check):

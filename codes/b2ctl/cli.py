@@ -21,7 +21,7 @@ from . import installer as _installer_mod
 from .common import need_root, run, R, Y, G, C, N
 from . import ui
 
-__version__ = "0.7.0-itmode"
+__version__ = "0.8.0-itmode"
 
 
 def _resolve_dev(target: str, disks=None):
@@ -90,8 +90,9 @@ def _replace(_args) -> int:
     return 0
 
 
-def _create(_args) -> int:
-    watch._cmd_create(spec.load())
+def _create(args) -> int:
+    watch._cmd_create(spec.load(),
+                      raid_type="raid10" if getattr(args, "raid10", False) else None)
     return 0
 
 
@@ -108,6 +109,58 @@ def _swap(_args) -> int:
 def _demote(_args) -> int:
     watch._cmd_demote(spec.load())
     return 0
+
+
+def _resolve_devs(tokens) -> list[str]:
+    """Map bay/serial/dev/by-id tokens to stable by-id paths (never /dev/sdX)."""
+    disks = core.scan(spec.load())
+    out = []
+    for t in tokens:
+        match = next((d for d in disks if t in (d.bay, d.serial, d.dev,
+                      d.dev.replace("/dev/", ""), d.by_id)), None)
+        out.append((match.by_id or match.dev) if match else t)
+    return out
+
+
+def _cache_add(args) -> int:
+    from . import zfs
+    devs = _resolve_devs(args.devs)
+    ok, out = zfs.add_cache(args.pool, devs, dry_run=watch._DRY_RUN)
+    print((f"{G}[+] L2ARC cache added to {args.pool}" if ok else f"{R}[-] {out}") + N)
+    return 0 if ok else 1
+
+
+def _cache_rm(args) -> int:
+    from . import zfs
+    ok, out = zfs.remove_vdev(args.pool, _resolve_devs([args.dev])[0], dry_run=watch._DRY_RUN)
+    print((f"{G}[+] removed from {args.pool}" if ok else f"{R}[-] {out}") + N)
+    return 0 if ok else 1
+
+
+def _log_add(args) -> int:
+    from . import zfs
+    devs = _resolve_devs(args.devs)
+    if len(devs) == 1:
+        print(f"{Y}[!] SLOG not mirrored: losing this log device can lose "
+              f"in-flight sync writes.{N}")
+    print(f"{Y}[!] ensure this SSD has Power-Loss Protection (PLP).{N}")
+    ok, out = zfs.add_log(args.pool, devs, dry_run=watch._DRY_RUN)
+    print((f"{G}[+] SLOG added to {args.pool}" if ok else f"{R}[-] {out}") + N)
+    return 0 if ok else 1
+
+
+def _log_rm(args) -> int:
+    from . import zfs
+    ok, out = zfs.remove_vdev(args.pool, _resolve_devs([args.dev])[0], dry_run=watch._DRY_RUN)
+    print((f"{G}[+] removed from {args.pool}" if ok else f"{R}[-] {out}") + N)
+    return 0 if ok else 1
+
+
+def _burnin(args) -> int:
+    from . import burnin
+    return burnin.run(args.target, spec.load(), do_scan=args.scan,
+                      kind="short" if args.short else "long",
+                      dry_run=watch._DRY_RUN)
 
 
 def _raid_replace(args) -> int:
@@ -374,6 +427,8 @@ def build_parser() -> argparse.ArgumentParser:
     re_cmd.set_defaults(func=_replace)
 
     cr = sub.add_parser("create", help="create a new zfs pool")
+    cr.add_argument("--raid10", action="store_true",
+                    help="stripe of mirrors (RAID10) from an even number of disks")
     cr.set_defaults(func=_create)
 
     ds = sub.add_parser("destroy", help="destroy a zfs pool (DESTRUCTIVE) + remove its cron")
@@ -385,6 +440,35 @@ def build_parser() -> argparse.ArgumentParser:
 
     de = sub.add_parser("demote", help="demote mirror leg to spare")
     de.set_defaults(func=_demote)
+
+    # aux vdevs: L2ARC cache + SLOG log
+    ca = sub.add_parser("cache-add", help="add L2ARC read-cache device(s) to a pool")
+    ca.add_argument("pool")
+    ca.add_argument("devs", nargs="+", help="bay/serial/dev of cache device(s)")
+    ca.set_defaults(func=_cache_add)
+
+    crm = sub.add_parser("cache-rm", help="remove an L2ARC cache device from a pool")
+    crm.add_argument("pool")
+    crm.add_argument("dev", help="cache leaf token / bay / serial / dev")
+    crm.set_defaults(func=_cache_rm)
+
+    la = sub.add_parser("log-add", help="add a SLOG (2 devs = mirrored log)")
+    la.add_argument("pool")
+    la.add_argument("devs", nargs="+", help="bay/serial/dev of log device(s)")
+    la.set_defaults(func=_log_add)
+
+    lrm = sub.add_parser("log-rm", help="remove a SLOG device from a pool")
+    lrm.add_argument("pool")
+    lrm.add_argument("dev", help="log leaf token / bay / serial / dev")
+    lrm.set_defaults(func=_log_rm)
+
+    bi = sub.add_parser("burnin", help="vet a spare/new disk (SMART long self-test)")
+    bi.add_argument("target", help="bay / serial / dev of the disk to burn in")
+    bi.add_argument("--scan", action="store_true",
+                    help="also run a full read-surface scan (badblocks, read-only)")
+    bi.add_argument("--short", action="store_true",
+                    help="short self-test instead of long")
+    bi.set_defaults(func=_burnin)
 
     v = sub.add_parser("version", help="print version")
     v.set_defaults(func=lambda _a: (print(f"b2ctl {__version__}") or 0))

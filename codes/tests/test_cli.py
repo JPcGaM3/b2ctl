@@ -171,5 +171,44 @@ class TestRaidCommands(unittest.TestCase):
         add_mock.assert_called_once_with("raid1", ["32:4", "32:5"], dry_run=False)
 
 
+class TestAuxAndBurninCommands(unittest.TestCase):
+    """cache/log/burnin subcommands parse and honor --dry-run."""
+
+    def test_parser_has_aux_and_burnin(self):
+        import b2ctl.cli as cli
+        p = cli.build_parser()
+        for cmd, extra in (("cache-add", ["tank", "sde"]), ("cache-rm", ["tank", "sde"]),
+                           ("log-add", ["tank", "sde"]), ("log-rm", ["tank", "sde"]),
+                           ("burnin", ["sde"])):
+            ns = p.parse_args([cmd] + extra)
+            assert hasattr(ns, "func")
+
+    def test_create_raid10_flag_parses(self):
+        import b2ctl.cli as cli
+        ns = cli.build_parser().parse_args(["create", "--raid10"])
+        assert ns.raid10 is True
+
+    def test_cache_add_honors_dry_run(self):
+        import b2ctl.cli as cli
+        import b2ctl.watch as watch
+        watch._DRY_RUN = True
+        try:
+            with patch("b2ctl.cli._resolve_devs", return_value=["/dev/disk/by-id/x"]), \
+                 patch("b2ctl.zfs.add_cache", return_value=(True, "")) as mock_add:
+                args = cli.build_parser().parse_args(["cache-add", "tank", "sde"])
+                args.func(args)
+            mock_add.assert_called_once_with("tank", ["/dev/disk/by-id/x"], dry_run=True)
+        finally:
+            watch._DRY_RUN = False
+
+    def test_log_add_single_warns_and_calls(self):
+        import b2ctl.cli as cli
+        with patch("b2ctl.cli._resolve_devs", return_value=["/dev/disk/by-id/x"]), \
+             patch("b2ctl.zfs.add_log", return_value=(True, "")) as mock_add:
+            args = cli.build_parser().parse_args(["log-add", "tank", "sde"])
+            args.func(args)
+        mock_add.assert_called_once_with("tank", ["/dev/disk/by-id/x"], dry_run=False)
+
+
 if __name__ == "__main__":
     unittest.main()

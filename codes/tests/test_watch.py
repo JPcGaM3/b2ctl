@@ -702,6 +702,39 @@ class TestWatchDestroy(unittest.TestCase):
         mock_zfs.remove_pool_cron.assert_not_called()
 
 
+class TestRefreshRaidVolumes(unittest.TestCase):
+    """watch _cmd_refresh renders the hardware RAID volumes table (parity with
+    the CLI `status` path)."""
+
+    def _run_refresh(self, vols):
+        import io
+        import contextlib
+        from b2ctl.watch import _cmd_refresh
+
+        class _Bk:
+            def raid_volumes(self_inner):
+                return vols
+        with patch("b2ctl.watch.core") as mc, \
+             patch("b2ctl.watch.zfs") as mz, \
+             patch("b2ctl.watch._backend.get_backend", return_value=_Bk()):
+            mc.scan.return_value = []
+            mz.list_pools.return_value = []
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                _cmd_refresh({})
+            return buf.getvalue()
+
+    def test_renders_volumes_when_present(self):
+        out = self._run_refresh([{"vd": "0", "raid": "raid1", "state": "Optl",
+                                  "size": "640.0 GB", "members": 2, "name": ""}])
+        self.assertIn("RAID volumes", out)
+        self.assertIn("vd0", out)
+
+    def test_no_header_when_no_volumes(self):
+        out = self._run_refresh([])
+        self.assertNotIn("RAID volumes", out)
+
+
 class TestExtendAndBurnin(unittest.TestCase):
     """_cmd_extend (L2ARC/SLOG add + aux remove) and _cmd_burnin dispatch."""
 

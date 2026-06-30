@@ -21,6 +21,7 @@ import sys
 import time
 
 from . import core, hba, zfs, spec, locate, safety
+from . import backend as _backend
 from .common import Disk, R, Y, G, C, N, run_check
 from . import ui
 
@@ -322,6 +323,9 @@ def _cmd_refresh(tbw) -> None:
     pools = zfs.list_pools()
     print("\n" + ui.render_table(disks))
     print(ui.render_pools(pools))
+    vols = _backend.get_backend().raid_volumes()
+    if vols:
+        print(ui.render_raid_volumes(vols))
     print(ui.render_details(disks, pools))
 
 

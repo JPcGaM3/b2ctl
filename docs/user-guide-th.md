@@ -125,9 +125,10 @@ BAY   DEV       IF   MODEL                   SERIAL            POWER_ON      WEA
 1:6   sdd       SAS  Samsung SSD 870         S74ZNS0WXXXXXXX   18246h(~2.1y) 1%         98.4%      ...
 1:7   sde       SAS  Samsung SSD 870         S74ZNS0WXXXXXXX   18247h(~2.1y) 1%         99.8%      ...
 ========================================================================================================
-Pools:
-  rpool     952G    4.83G   free=947G    ONLINE    cap=0%
-  tank      2.72T   1.72G   free=2.72T   ONLINE    cap=0%
+Storage summary:
+  TYPE NAME            LEVEL    STATE     SIZE      USED      FREE
+  SW   rpool           mirror   ONLINE    952G      4.83G     947G
+  SW   tank            raidz1   ONLINE    2.72T     1.72G     2.72T
 [OK] all disks healthy and assigned
 
 [r]efresh  [a]ssign  [o]ffload  [s]wap  [d]emote  [n]ew-pool  [e]xtend  [b]urnin  [t]oggle-dryrun  [l]ocate  [q]uit   (or hot-plug)
@@ -754,7 +755,20 @@ b2ctl install --flash     # เครื่อง IT/HBA: ลง sas2ircu + mode
 - `SW:tank/raidz1-0` — เป็นสมาชิก **software** RAID (ZFS)
 - `-` — ดิสก์เดี่ยว/ยังไม่ได้ assign (เช่น NVMe, JBOD)
 
-มีตาราง **RAID volumes (hardware)** แยกบอกแต่ละ volume (level/สถานะ/ขนาด/จำนวนสมาชิก)
+เครื่องที่มี **ทั้งสองแบบ** ตาราง disk จะแบ่งกลุ่ม — บล็อก
+`--- Hardware (PERC RAID) ---` อยู่บน, `--- Software (ZFS) ---` อยู่ล่าง — และ
+summary รวมเป็นตาราง **Storage summary** เดียว (hardware บน / software ล่าง):
+
+```
+Storage summary:
+  TYPE NAME            LEVEL    STATE     SIZE      USED      FREE
+  HW   MainSSD         raid1    Optl      640.0 GB  12.0G     628.0G
+  SW   tank            mirror   ONLINE    928G      598M      927G
+```
+
+- **NAME** — ชื่อ volume ของ hardware (เช่น `MainSSD`) / ชื่อ pool ของ software
+- **USED/FREE** — software เอาจาก pool; hardware อ่านจาก **filesystem ที่ mount**
+  ของ volume ผ่าน `lsblk` ถ้า volume เป็น raw/ไม่ได้ mount จะขึ้น `-` (ไม่มี FS ให้วัด)
 
 ### เปลี่ยนดิสก์ RAID ที่เสีย
 

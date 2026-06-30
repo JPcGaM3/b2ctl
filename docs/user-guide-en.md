@@ -143,9 +143,10 @@ BAY   DEV  IF   MODEL            SERIAL            POWER_ON      WEAR   END    .
 1:6   sdd  SAS  Samsung SSD 870  S74ZNS0WXXXXXXX   18246h(~2.1y) 1%     98.4% ...
 1:7   sde  SAS  Samsung SSD 870  S74ZNS0WXXXXXXX   18247h(~2.1y) 1%     99.8% ...
 ================================================================================
-Pools:
-  rpool   952G   4.83G  free=947G   ONLINE   cap=0%
-  tank    2.72T  1.72G  free=2.72T  ONLINE   cap=0%
+Storage summary:
+  TYPE NAME            LEVEL    STATE     SIZE      USED      FREE
+  SW   rpool           mirror   ONLINE    952G      4.83G     947G
+  SW   tank            raidz1   ONLINE    2.72T     1.72G     2.72T
 [OK] all disks healthy and assigned
 
 [r]efresh  [a]ssign  [o]ffload  [s]wap  [d]emote  [n]ew-pool  [e]xtend  [b]urnin  [t]oggle-dryrun  [l]ocate  [q]uit
@@ -817,8 +818,21 @@ through the controller), with the `POOL/ARRAY` column marking each disk:
 - `SW:tank/raidz1-0` — member of a **software** RAID (ZFS pool)
 - `-` — direct/unassigned (e.g. an NVMe, a JBOD disk)
 
-A separate **RAID volumes (hardware)** table lists each volume (level, state,
-size, member count).
+On a box that has **both** kinds, the disk table groups them — a
+`--- Hardware (PERC RAID) ---` block on top, `--- Software (ZFS) ---` below — and
+the summary becomes one **Storage summary** table, hardware rows above software:
+
+```
+Storage summary:
+  TYPE NAME            LEVEL    STATE     SIZE      USED      FREE
+  HW   MainSSD         raid1    Optl      640.0 GB  12.0G     628.0G
+  SW   tank            mirror   ONLINE    928G      598M      927G
+```
+
+- **NAME** — the hardware volume's name (e.g. `MainSSD`) / the ZFS pool name.
+- **USED/FREE** — for software, from the pool; for hardware, read from the
+  volume's **mounted filesystem** via `lsblk`. If the hardware volume is raw or
+  not mounted, USED/FREE show `-` (there's no filesystem to measure).
 
 ### Replacing a failed RAID disk
 

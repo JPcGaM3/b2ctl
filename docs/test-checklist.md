@@ -49,7 +49,7 @@
 
 > **0 FAIL.** SKIP 3 = C9 (create new pool — ยังไม่ทำ), D5 (raidz demote refuse — cover ด้วย unit test),
 > D6 (dirty disk — ต้องหา disk มี data เก่า). 203 กู้จาก SUSPENDED + redeploy → เทส C2/C5-C8/D2/D7 ซ้ำผ่าน.
-> Unit tests: **254 passed**.
+> Unit tests: **266 passed**.
 
 <a id="action-items"></a>
 
@@ -417,12 +417,12 @@ swap which #&gt; N
 cd codes && python3 -m pytest tests/ -q
 ```
 
-**ผลรอบนี้ (dev machine):** `254 passed, 0 failed` ✅ *(เพิ่ม L2ARC/SLOG aux vdevs, RAID10 create, disk burn-in, NVMe bay-map by by-id/serial, watch RAID-volumes parity, sim NVMe — บน 215 เดิม)*
+**ผลรอบนี้ (dev machine):** `266 passed, 0 failed` ✅ *(เพิ่ม L2ARC/SLOG aux vdevs, RAID10 create, disk burn-in, NVMe bay-map by by-id/serial, watch RAID-volumes parity, sim NVMe — บน 215 เดิม)*
 
 | ID | Scenario | Expected | Status | Actual | Comment |
 |----|----------|----------|:------:|--------|---------|
 | E1 | Test suite รันได้ | suite รันจบ ไม่ error การ import | ✅ | tests collected, รันจบ | OK |
-| E2 | Pass rate | tests ผ่านทั้งหมด | ✅ | **254 passed / 0 failed** | +26 (v0.8.0) add_cache/add_log/remove_vdev, raid10, burnin; +6 (v0.8.1) nvme by-id/serial remap; +2 (v0.8.2) watch RAID-volumes render; +5 (v0.8.3) install parity (base/--with-tools dispatch) |
+| E2 | Pass rate | tests ผ่านทั้งหมด | ✅ | **266 passed / 0 failed** | +26 (v0.8.0) add_cache/add_log/remove_vdev, raid10, burnin; +6 (v0.8.1) nvme by-id/serial remap; +2 (v0.8.2) watch RAID-volumes render; +5 (v0.8.3) install parity (base/--with-tools dispatch) |
 | E3 | sim NVMe walk | `sim/run status` โชว์ nvme0n1/nvme1n1 = PCIe2:0/1, `burnin nvme0n1` = PASS | ✅ | NVMe enumerated + serial-relabelled + burn-in PASS ใน sim | NVMe by-id ต้องเครื่องจริง (sysfs/by-id แฟกไม่ได้) |
 
 <details>

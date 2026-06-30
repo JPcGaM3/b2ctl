@@ -873,14 +873,20 @@ every bay is full, and there is **no hot spare**, `[o]ffload` it:
   scrambled slots, set `reverse_slots`+`slots_per_enclosure`, or an explicit
   `map` (`{"32:0": "32:7"}`). Calibrate with `b2ctl locate <serial>`.
 - **back** (`type: nvme`) — a PCIe/M.2 SSD enclosure (one or more). NVMe has no
-  enclosure:slot, so its BAY shows the **PCIe address** (e.g. `d8:00.0`). Relabel
-  it to a friendly bay with the back panel's `map`:
+  enclosure:slot, so its BAY shows the **PCIe address** (e.g. `d8:00.0`) until you
+  relabel it. Each map entry can key on any of three identifiers (**precedence
+  by-id > serial > bdf**):
 
 ```json
 { "panel": "back", "type": "nvme",
-  "map": [ {"bdf": "d8:00.0", "bay": "PCIe2:0"},
-           {"bdf": "d9:00.0", "bay": "PCIe2:1"} ] }
+  "map": [ {"by-id":  "nvme-Samsung_SSD_990_EVO_Plus_4TB_S7..", "bay": "PCIe2:0"},
+           {"serial": "S7XXNS0W123", "bay": "PCIe2:1"},
+           {"bdf":    "d8:00.0",     "bay": "PCIe2:2"} ] }
 ```
 
-Find each drive's `bdf` in `b2ctl status` (its BAY) or `cat
-/sys/class/nvme/nvme0/address`.
+- **`serial`** is the easiest — copy it straight from the **SERIAL** column of
+  `b2ctl status`.
+- **`by-id`** is a substring of the drive's `/dev/disk/by-id/nvme-<model>_<serial>`
+  link (run `ls /dev/disk/by-id/ | grep nvme`); it survives the card moving slots.
+- **`bdf`** still works — find it in `b2ctl status` (the BAY) or `cat
+  /sys/class/nvme/nvme0/address`.

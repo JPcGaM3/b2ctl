@@ -830,14 +830,18 @@ raidz1 (และ mirror) ยังทำงานได้แม้ดิสก
   `reverse_slots`+`slots_per_enclosure` หรือ `map` ตรง ๆ (`{"32:0": "32:7"}`)
   เทียบตำแหน่งด้วย `b2ctl locate <serial>`
 - **back** (`type: nvme`) — กล่อง PCIe/M.2 SSD (มีได้หลายอัน) NVMe ไม่มี enc:slot
-  เลยโชว์ **PCIe address** (เช่น `d8:00.0`) เปลี่ยนเป็นชื่อ bay ที่อ่านง่ายได้ด้วย `map`
-  ของ panel back:
+  เลยโชว์ **PCIe address** (เช่น `d8:00.0`) จนกว่าจะ relabel แต่ละ entry ใน `map`
+  match ได้ด้วย key 3 แบบ (**ลำดับความสำคัญ by-id > serial > bdf**):
 
 ```json
 { "panel": "back", "type": "nvme",
-  "map": [ {"bdf": "d8:00.0", "bay": "PCIe2:0"},
-           {"bdf": "d9:00.0", "bay": "PCIe2:1"} ] }
+  "map": [ {"by-id":  "nvme-Samsung_SSD_990_EVO_Plus_4TB_S7..", "bay": "PCIe2:0"},
+           {"serial": "S7XXNS0W123", "bay": "PCIe2:1"},
+           {"bdf":    "d8:00.0",     "bay": "PCIe2:2"} ] }
 ```
 
-หา `bdf` ของแต่ละตัวจาก `b2ctl status` (คอลัมน์ BAY) หรือ
-`cat /sys/class/nvme/nvme0/address`
+- **`serial`** ง่ายสุด — copy จากคอลัมน์ **SERIAL** ใน `b2ctl status` ได้เลย
+- **`by-id`** เป็น substring ของลิงก์ `/dev/disk/by-id/nvme-<model>_<serial>`
+  (`ls /dev/disk/by-id/ | grep nvme`) ไม่เปลี่ยนแม้ย้าย slot การ์ด
+- **`bdf`** ยังใช้ได้ — หาได้จาก `b2ctl status` (คอลัมน์ BAY) หรือ
+  `cat /sys/class/nvme/nvme0/address`

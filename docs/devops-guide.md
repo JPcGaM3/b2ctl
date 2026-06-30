@@ -86,8 +86,11 @@ lsblk -dnb -P -o NAME,SIZE,SERIAL,MODEL,TRAN,ROTA,TYPE
 ### 3.2 Stable names — `hba._by_id_index()`
 Walks `/dev/disk/by-id`, `realpath`s each link, and keeps the
 highest-priority link per real device: `ata-` > `scsi-SATA` > `wwn-` >
-`scsi-`. Skips `*-part*`. This `by_id` is what every `zpool` action uses, so a
-disk keeps a stable name across reboots/reslots.
+`scsi-` > `nvme-<model>_<serial>` > `nvme-eui.<hex>`. Skips `*-part*`. This
+`by_id` is what every `zpool` action uses, so a disk keeps a stable name across
+reboots/reslots. The NVMe model link is ranked above `nvme-eui.*` so `d.by_id`
+is the human-readable one operators put in `bay_map.json` (the `nvme-eui.` rule
+must be listed before `nvme-` in `rank`, since both share the `nvme-` prefix).
 
 ### 3.3 Physical bay — `hba.attach_bays()` / `bay_map()`
 ```
@@ -106,6 +109,14 @@ is **display-only** (LEDs key off the device, not the slot), so a wrong map is
 cosmetic, never dangerous. Calibrate with `b2ctl locate <serial>`.
 
 If `sas2ircu list` returns nothing the step is skipped and `bay` stays `None`.
+
+**NVMe bays — `baymap.remap_nvme()`.** NVMe has no enc:slot; its raw bay is the
+PCIe BDF (`hba._nvme_pcie()` reads `/sys/class/nvme/<ctrl>/address`, drops the
+`0000:` domain). A back/`type:nvme` panel relabels it; each map entry keys on
+`by-id` (substring of the drive's `/dev/disk/by-id/nvme-…` link), `serial`, or
+`bdf`, matched in **precedence by-id > serial > bdf**. Remap runs even when the
+BDF is unavailable, so a by-id/serial entry still labels the drive. `hba_raid`
+reuses `hba.enumerate_disks`, so NVMe in RAID mode is covered with no extra code.
 
 ### 3.4 SMART — `smart.read()`
 ```

@@ -59,9 +59,11 @@ replaces a new disk inserted in the same bay (`zpool replace` + resilver). Refus
 if the vdev isn't fully redundant (won't fault the pool).
 
 **bay_map.json** is now a **panel list** parsed by the shared `b2ctl.baymap`
-module (front `type:sas` enc:slot remap; back `type:nvme` `map:[{bdf,bay}]`).
-NVMe drives show their **PCIe address** (`/sys/class/nvme/<ctrl>/address`) as the
-BAY, relabel-able via a back panel. Old flat-dict bay_map files are ignored.
+module (front `type:sas` enc:slot remap; back `type:nvme` map entries keyed by
+`by-id`, `serial`, or `bdf` — precedence by-id > serial > bdf). NVMe drives show
+their **PCIe address** (`/sys/class/nvme/<ctrl>/address`) as the BAY until
+relabelled; `_by_id_index` prefers the `nvme-<model>_<serial>` link over
+`nvme-eui.*` so `by_id` is the friendly key. Old flat-dict bay_map files are ignored.
 
 ## 2. Environment (read carefully — it dictates every command)
 

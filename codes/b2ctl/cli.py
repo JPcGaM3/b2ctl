@@ -21,7 +21,7 @@ from . import installer as _installer_mod
 from .common import need_root, run, R, Y, G, C, N
 from . import ui
 
-__version__ = "0.8.3-itmode"
+__version__ = "0.8.4-itmode"
 
 
 def _resolve_dev(target: str, disks=None):
@@ -43,10 +43,8 @@ def _status(args) -> int:
         return 0
     print(ui.render_table(disks))
     pools = zfs.list_pools()
-    print(ui.render_pools(pools))
     vols = _backend_mod.get_backend().raid_volumes()
-    if vols:
-        print(ui.render_raid_volumes(vols))
+    print(ui.render_storage(core.assemble_storage(disks, pools, vols)))
     print(ui.render_details(disks, pools))
 
     if args.locate:

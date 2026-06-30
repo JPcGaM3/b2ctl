@@ -702,11 +702,11 @@ class TestWatchDestroy(unittest.TestCase):
         mock_zfs.remove_pool_cron.assert_not_called()
 
 
-class TestRefreshRaidVolumes(unittest.TestCase):
-    """watch _cmd_refresh renders the hardware RAID volumes table (parity with
-    the CLI `status` path)."""
+class TestRefreshStorageSummary(unittest.TestCase):
+    """watch _cmd_refresh renders the unified Storage summary — hardware above
+    software (parity with the CLI `status` path)."""
 
-    def _run_refresh(self, vols):
+    def _run_refresh(self, vols, pools):
         import io
         import contextlib
         from b2ctl.watch import _cmd_refresh
@@ -714,25 +714,31 @@ class TestRefreshRaidVolumes(unittest.TestCase):
         class _Bk:
             def raid_volumes(self_inner):
                 return vols
-        with patch("b2ctl.watch.core") as mc, \
-             patch("b2ctl.watch.zfs") as mz, \
+        with patch("b2ctl.core.scan", return_value=[]), \
+             patch("b2ctl.zfs.list_pools", return_value=pools), \
+             patch("b2ctl.zfs.pool_level", return_value="mirror"), \
              patch("b2ctl.watch._backend.get_backend", return_value=_Bk()):
-            mc.scan.return_value = []
-            mz.list_pools.return_value = []
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 _cmd_refresh({})
             return buf.getvalue()
 
-    def test_renders_volumes_when_present(self):
-        out = self._run_refresh([{"vd": "0", "raid": "raid1", "state": "Optl",
-                                  "size": "640.0 GB", "members": 2, "name": ""}])
-        self.assertIn("RAID volumes", out)
-        self.assertIn("vd0", out)
+    def test_hardware_above_software(self):
+        vols = [{"vd": "0", "raid": "raid1", "state": "Optl",
+                 "size": "640.0 GB", "members": 2, "name": "MainSSD"}]
+        pools = [{"name": "tank", "size": "928G", "alloc": "598M",
+                  "free": "927G", "health": "ONLINE"}]
+        out = self._run_refresh(vols, pools)
+        self.assertIn("Storage summary", out)
+        self.assertIn("MainSSD", out)
+        self.assertLess(out.index("MainSSD"), out.index("tank"))
 
-    def test_no_header_when_no_volumes(self):
-        out = self._run_refresh([])
-        self.assertNotIn("RAID volumes", out)
+    def test_software_only(self):
+        pools = [{"name": "tank", "size": "928G", "alloc": "598M",
+                  "free": "927G", "health": "ONLINE"}]
+        out = self._run_refresh([], pools)
+        self.assertIn("Storage summary", out)
+        self.assertIn("tank", out)
 
 
 class TestExtendAndBurnin(unittest.TestCase):

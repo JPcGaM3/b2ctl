@@ -139,6 +139,29 @@ def degraded_leaves() -> list[dict]:
     return bad
 
 
+def pool_level(pool: str) -> str:
+    """Data-vdev redundancy type for a pool: 'mirror' / 'raidz1' / ...,
+    'mixed' if several differ, 'stripe' if there is no redundant data vdev.
+
+    Derived from topology() vdev names (e.g. 'mirror-0' -> 'mirror'), excluding
+    the auxiliary classes (cache/log/spare/special/dedup).
+    """
+    _AUX = ("cache", "log", "spare", "special", "dedup")
+    levels = set()
+    for e in topology().values():
+        if e["pool"] != pool:
+            continue
+        vdev = e["vdev"]
+        if vdev == pool or any(a in vdev for a in _AUX):
+            continue
+        levels.add(re.sub(r"-\d+$", "", vdev))
+    if not levels:
+        return "stripe"
+    if len(levels) == 1:
+        return next(iter(levels))
+    return "mixed"
+
+
 def spares(pool: str) -> list[str]:
     """AVAIL spare tokens in a pool."""
     out = run(["zpool", "status", "-P", "-v", pool])

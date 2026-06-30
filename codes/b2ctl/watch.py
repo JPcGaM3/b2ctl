@@ -322,10 +322,8 @@ def _cmd_refresh(tbw) -> None:
     disks = core.scan(tbw)
     pools = zfs.list_pools()
     print("\n" + ui.render_table(disks))
-    print(ui.render_pools(pools))
     vols = _backend.get_backend().raid_volumes()
-    if vols:
-        print(ui.render_raid_volumes(vols))
+    print(ui.render_storage(core.assemble_storage(disks, pools, vols)))
     print(ui.render_details(disks, pools))
 
 

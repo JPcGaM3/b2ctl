@@ -95,3 +95,34 @@ class TestScanPipeline:
         assert len(ghosts) == 1
         assert ghosts[0].serial == "G2"
         assert "OS_REJECTED" in ghosts[0].reasons
+
+
+class TestAssembleStorage:
+    """assemble_storage unifies HW volumes (top) + SW pools (bottom)."""
+
+    def test_hw_above_sw_with_usage_and_names(self):
+        from b2ctl.common import Disk
+        hw = Disk(dev="/dev/sdb"); hw.array_type = "HW"; hw.array_name = "vd0/raid1"
+        vols = [{"vd": "0", "raid": "RAID1", "state": "Optl",
+                 "size": "640.0 GB", "name": "MainSSD", "members": 2}]
+        pools = [{"name": "tank", "size": "928G", "alloc": "598M",
+                  "free": "927G", "health": "ONLINE"}]
+        with patch("b2ctl.hba.vd_usage", return_value=(12_884_901_888, 687_194_767_360)), \
+             patch("b2ctl.zfs.pool_level", return_value="mirror"):
+            rows = _core_mod.assemble_storage([hw], pools, vols)
+        assert [r["kind"] for r in rows] == ["HW", "SW"]
+        hw_row, sw_row = rows
+        assert hw_row["name"] == "MainSSD"
+        assert hw_row["level"] == "raid1"
+        assert hw_row["used"] != "-" and hw_row["free"] != "-"
+        assert sw_row["name"] == "tank" and sw_row["level"] == "mirror"
+        assert sw_row["used"] == "598M"
+
+    def test_hw_usage_dash_when_unmounted(self):
+        from b2ctl.common import Disk
+        hw = Disk(dev="/dev/sdb"); hw.array_type = "HW"; hw.array_name = "vd0/raid1"
+        vols = [{"vd": "0", "raid": "RAID1", "state": "Optl", "size": "640.0 GB",
+                 "name": "MainSSD"}]
+        with patch("b2ctl.hba.vd_usage", return_value=None):
+            rows = _core_mod.assemble_storage([hw], [], vols)
+        assert rows[0]["used"] == "-" and rows[0]["free"] == "-"

@@ -31,6 +31,29 @@ def _lsblk_pairs(cols: str) -> list[dict]:
     return rows
 
 
+def vd_usage(dev: str) -> tuple[int, int] | None:
+    """Return (used_bytes, size_bytes) of the mounted filesystem on a block
+    device (e.g. a PERC virtual disk presented as /dev/sdX), or None if nothing
+    is mounted. Includes children (the FS usually lives on a partition), so this
+    does NOT use `-d`. If several filesystems are mounted, the largest wins.
+    """
+    out = run(["lsblk", "-b", "-P", "-o", "NAME,FSUSED,FSSIZE,MOUNTPOINT", dev])
+    best = None
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        row = dict(_PAIR_RE.findall(line))
+        if row.get("MOUNTPOINT") and row.get("FSSIZE"):
+            try:
+                size = int(row["FSSIZE"])
+                used = int(row.get("FSUSED") or 0)
+            except ValueError:
+                continue
+            if best is None or size > best[1]:
+                best = (used, size)
+    return best
+
+
 def _nvme_pcie(name: str) -> str | None:
     """PCIe BDF for an nvme namespace, e.g. 'nvme0n1' -> 'd8:00.0' (domain dropped)."""
     m = re.match(r"(nvme\d+)", name)

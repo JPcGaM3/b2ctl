@@ -136,3 +136,33 @@ class TestArrayColumn:
         d.bay = "PCIe2:0"
         out = ui.render_table([d])
         assert "PCIe2:0" in out and "nvme0n1" in out
+
+    def test_render_table_groups_hw_above_sw(self):
+        hw = _disk(dev="/dev/sdb", serial="HW1", pool=None, vdev=None)
+        hw.array_type = "HW"; hw.array_name = "vd0/raid1"
+        sw = _disk(dev="/dev/sda", serial="SW1", pool="tank", vdev="mirror-0")
+        out = ui.render_table([hw, sw])
+        assert "Hardware (PERC RAID)" in out
+        assert "Software (ZFS / unassigned)" in out
+        # hardware sub-header appears before software sub-header
+        assert out.index("Hardware (PERC RAID)") < out.index("Software (ZFS")
+
+    def test_render_table_flat_when_software_only(self):
+        sw = _disk(dev="/dev/sda", pool="tank", vdev="mirror-0")
+        out = ui.render_table([sw])
+        assert "Hardware (PERC RAID)" not in out
+
+    def test_render_storage_hw_above_sw(self):
+        rows = [
+            {"kind": "HW", "name": "MainSSD", "level": "raid1", "state": "Optl",
+             "size": "640.0 GB", "used": "12.0G", "free": "628.0G"},
+            {"kind": "SW", "name": "tank", "level": "mirror", "state": "ONLINE",
+             "size": "928G", "used": "598M", "free": "927G"},
+        ]
+        out = ui.render_storage(rows)
+        assert "Storage summary" in out
+        assert "MainSSD" in out and "tank" in out
+        assert out.index("MainSSD") < out.index("tank")
+
+    def test_render_storage_empty(self):
+        assert ui.render_storage([]) == ""

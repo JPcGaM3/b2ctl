@@ -74,6 +74,37 @@ def scan(tbw_table=None) -> list[Disk]:
     return disks
 
 
+def assemble_storage(disks: list[Disk], pools: list[dict],
+                     vols: list[dict]) -> list[dict]:
+    """Unified storage rows for the summary table — hardware (PERC VDs) first,
+    then software (ZFS pools). Each row: kind/name/level/state/size/used/free.
+
+    HW usage comes from lsblk's filesystem columns on the VD's block device
+    (mounted → used/free, else '-'); SW usage from `zpool list` (alloc/free).
+    """
+    from . import hba
+    from .ui import human_size
+    rows: list[dict] = []
+    for v in vols or []:
+        vd = str(v.get("vd", "?"))
+        dev = next((d.dev for d in disks if d.array_type == "HW"
+                    and d.array_name.startswith(f"vd{vd}/")), None)
+        used = free = "-"
+        usage = hba.vd_usage(dev) if dev else None
+        if usage:
+            u, sz = usage
+            used, free = human_size(u), human_size(sz - u)
+        rows.append({"kind": "HW", "name": v.get("name") or f"vd{vd}",
+                     "level": str(v.get("raid", "?")).lower(),
+                     "state": v.get("state", "?"), "size": v.get("size", "-"),
+                     "used": used, "free": free})
+    for p in pools or []:
+        rows.append({"kind": "SW", "name": p["name"],
+                     "level": zfs.pool_level(p["name"]), "state": p["health"],
+                     "size": p["size"], "used": p["alloc"], "free": p["free"]})
+    return rows
+
+
 def scan_one(dev: str, tbw_table) -> Disk:
     """Build a single Disk (used when a hot-plugged device appears)."""
     for d in scan(tbw_table):

@@ -55,36 +55,75 @@ def _status_cell(d: Disk) -> str:
     return f"{'':10}"
 
 
+def _disk_row(d: Disk) -> str:
+    wear_used = "N/A" if d.wear_val is None else f"{100 - d.wear_val}%"
+    end_left = "N/A" if d.end_left is None else f"{d.end_left:.1f}%"
+    if d.written_tb is None:
+        written = "N/A"
+    elif d.is_ssd:
+        cap = f"/{d.tbw_rating:.0f}TBW" if d.tbw_rating else "/?"
+        written = f"{d.written_tb:.2f}TB{cap}"
+    else:
+        written = f"{d.written_tb:.2f}TB (HDD)"
+    # POOL cell encodes the array type: SW = ZFS, HW = PERC virtual disk.
+    if d.pool:
+        pool = f"SW:{d.pool}" + (f"/{d.vdev}" if d.vdev else "")
+    elif d.array_type == "HW":
+        pool = f"HW:{d.array_name}"
+    else:
+        pool = "-"
+    return (
+        f"{(d.bay or '-'):<8}{d.dev.replace('/dev/',''):<10}"
+        f"{(d.iface or '?'):<5}{(d.model or '?')[:23]:<24}"
+        f"{(d.serial or 'N/A')[:17]:<18}{fmt_poh(d.poh):<14}"
+        f"{wear_used:<11}{end_left:<11}{written:<19}{d.realloc:<6}"
+        f"{d.health:<9}{pool[:20]:<21}{_status_cell(d)}{color_level(d.level)}")
+
+
+def _subhdr(label: str) -> str:
+    s = f"--- {label} "
+    return C + s + "-" * max(0, 184 - len(s)) + N
+
+
 def render_table(disks: list[Disk]) -> str:
     hdr = (f"{'BAY':<8}{'DEV':<10}{'IF':<5}{'MODEL':<24}{'SERIAL':<18}"
            f"{'POWER_ON':<14}{'WEAR(used)':<11}{'END(left)':<11}"
            f"{'WRITTEN':<19}{'BAD':<6}{'HEALTH':<9}{'POOL/ARRAY':<21}{'STATUS':<10}{'LEVEL'}")
     lines = ["=" * 184, hdr, "-" * 184]
-    for d in disks:
-        wear_used = "N/A" if d.wear_val is None else f"{100 - d.wear_val}%"
-        end_left = "N/A" if d.end_left is None else f"{d.end_left:.1f}%"
-        if d.written_tb is None:
-            written = "N/A"
-        elif d.is_ssd:
-            cap = f"/{d.tbw_rating:.0f}TBW" if d.tbw_rating else "/?"
-            written = f"{d.written_tb:.2f}TB{cap}"
-        else:
-            written = f"{d.written_tb:.2f}TB (HDD)"
-        # POOL cell encodes the array type: SW = ZFS, HW = PERC virtual disk.
-        if d.pool:
-            pool = f"SW:{d.pool}" + (f"/{d.vdev}" if d.vdev else "")
-        elif d.array_type == "HW":
-            pool = f"HW:{d.array_name}"
-        else:
-            pool = "-"
-        lines.append(
-            f"{(d.bay or '-'):<8}{d.dev.replace('/dev/',''):<10}"
-            f"{(d.iface or '?'):<5}{(d.model or '?')[:23]:<24}"
-            f"{(d.serial or 'N/A')[:17]:<18}{fmt_poh(d.poh):<14}"
-            f"{wear_used:<11}{end_left:<11}{written:<19}{d.realloc:<6}"
-            f"{d.health:<9}{pool[:20]:<21}{_status_cell(d)}{color_level(d.level)}")
+    # Group hardware (PERC RAID volume members) above software (ZFS + free),
+    # but only when both kinds are present — single-type boxes stay flat.
+    hw = [d for d in disks if d.array_type == "HW"]
+    sw = [d for d in disks if d.array_type != "HW"]
+    if hw and sw:
+        lines.append(_subhdr("Hardware (PERC RAID)"))
+        lines += [_disk_row(d) for d in hw]
+        lines.append(_subhdr("Software (ZFS / unassigned)"))
+        lines += [_disk_row(d) for d in sw]
+    else:
+        lines += [_disk_row(d) for d in hw + sw]
     lines.append("=" * 184)
     return "\n".join(lines)
+
+
+def render_storage(rows: list[dict]) -> str:
+    """Unified storage summary — hardware rows above software rows (caller orders).
+    Columns mean the same for both; HW used/free come from a mounted VD filesystem
+    (else '-'), SW from `zpool list`."""
+    if not rows:
+        return ""
+    out = ["Storage summary:",
+           f"  {'TYPE':<5}{'NAME':<16}{'LEVEL':<9}{'STATE':<10}"
+           f"{'SIZE':<10}{'USED':<10}{'FREE'}"]
+    for r in rows:
+        st = str(r.get("state", "?"))
+        low = st.lower()
+        col = G if (low.startswith("optl") or low == "online") else (
+            Y if low == "degraded" else R)
+        out.append(
+            f"  {r['kind']:<5}{str(r['name'])[:15]:<16}{str(r['level'])[:8]:<9}"
+            f"{col}{st[:9]:<10}{N}{str(r['size'])[:9]:<10}"
+            f"{str(r['used'])[:9]:<10}{r['free']}")
+    return "\n".join(out)
 
 
 def render_pools(pools: list[dict]) -> str:

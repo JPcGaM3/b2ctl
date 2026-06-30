@@ -310,6 +310,37 @@ class TestZfsCreatePool(unittest.TestCase):
         self.assertFalse(ok)
 
 
+class TestPoolLevel(unittest.TestCase):
+    """pool_level derives the data-vdev redundancy type, ignoring aux vdevs."""
+
+    def _topo(self, entries):
+        return {str(i): e for i, e in enumerate(entries)}
+
+    def test_mirror(self):
+        topo = self._topo([{"pool": "rpool", "vdev": "mirror-0"},
+                           {"pool": "rpool", "vdev": "mirror-0"}])
+        with patch("b2ctl.zfs.topology", return_value=topo):
+            self.assertEqual(zfs.pool_level("rpool"), "mirror")
+
+    def test_raidz1_ignores_cache_log(self):
+        topo = self._topo([{"pool": "tank", "vdev": "raidz1-0"},
+                           {"pool": "tank", "vdev": "cache"},
+                           {"pool": "tank", "vdev": "log"}])
+        with patch("b2ctl.zfs.topology", return_value=topo):
+            self.assertEqual(zfs.pool_level("tank"), "raidz1")
+
+    def test_mixed(self):
+        topo = self._topo([{"pool": "tank", "vdev": "mirror-0"},
+                           {"pool": "tank", "vdev": "raidz1-1"}])
+        with patch("b2ctl.zfs.topology", return_value=topo):
+            self.assertEqual(zfs.pool_level("tank"), "mixed")
+
+    def test_stripe_when_no_redundant_vdev(self):
+        topo = self._topo([{"pool": "fast", "vdev": "fast"}])
+        with patch("b2ctl.zfs.topology", return_value=topo):
+            self.assertEqual(zfs.pool_level("fast"), "stripe")
+
+
 class TestZfsAuxVdevs(unittest.TestCase):
     """L2ARC cache + SLOG log + aux removal wrappers."""
 

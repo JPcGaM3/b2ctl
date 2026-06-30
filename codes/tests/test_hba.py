@@ -104,6 +104,24 @@ class TestHbaBmReuse:
         assert ghosts[0].serial == "SN999"
 
 
+class TestVdUsage(unittest.TestCase):
+    """vd_usage reads lsblk FS columns of a VD block device's mounted FS."""
+
+    def test_picks_largest_mounted_fs(self):
+        out = (
+            'NAME="sdb" FSUSED="" FSSIZE="" MOUNTPOINT=""\n'
+            'NAME="sdb1" FSUSED="1048576" FSSIZE="104857600" MOUNTPOINT="/boot"\n'
+            'NAME="sdb2" FSUSED="12884901888" FSSIZE="687194767360" MOUNTPOINT="/mnt/data"\n')
+        with patch("b2ctl.hba.run", return_value=out):
+            self.assertEqual(hba.vd_usage("/dev/sdb"), (12884901888, 687194767360))
+
+    def test_none_when_nothing_mounted(self):
+        out = ('NAME="sdb" FSUSED="" FSSIZE="" MOUNTPOINT=""\n'
+               'NAME="sdb1" FSUSED="" FSSIZE="" MOUNTPOINT=""\n')
+        with patch("b2ctl.hba.run", return_value=out):
+            self.assertIsNone(hba.vd_usage("/dev/sdb"))
+
+
 class TestByIdIndexNvmePreference(unittest.TestCase):
     """NVMe model link (nvme-<model>_<serial>) preferred over nvme-eui.<hex>."""
 

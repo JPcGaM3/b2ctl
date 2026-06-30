@@ -121,7 +121,7 @@ Pools:
   tank      2.72T   1.72G   free=2.72T   ONLINE    cap=0%
 [OK] all disks healthy and assigned
 
-[r]efresh  [a]ssign  [o]ffload  [s]wap  [d]emote  [n]ew-pool  [t]oggle-dryrun  [l]ocate  [q]uit   (or hot-plug)
+[r]efresh  [a]ssign  [o]ffload  [s]wap  [d]emote  [n]ew-pool  [e]xtend  [b]urnin  [t]oggle-dryrun  [l]ocate  [q]uit   (or hot-plug)
 b2ctl&gt;
 </pre>
 </details>
@@ -426,7 +426,7 @@ b2ctl> n
     [3] /dev/sdd (bay 1:6)
   pick disks (space-separated #)> 1 2 3
   pool name> backup
-  raid type (stripe, mirror, raidz1, raidz2) [mirror]> raidz1
+  raid type (stripe, mirror, raid10, raidz1, raidz2) [mirror]> raidz1
   create pool 'backup' (raidz1) with 3 disks? [y/N]> y
   ✔ pool created
 ```
@@ -772,6 +772,32 @@ default ที่เหมาะกับ SSD อยู่แล้ว — **ก
 - **off (Monthly)** *(แนะนำ)* — ติดตั้ง schedule รายเดือนให้ pool: `zpool trim`
   อาทิตย์แรก + `zpool scrub` อาทิตย์ที่สอง (cron ที่ `/etc/cron.d/b2ctl-<pool>`)
 - **on** — trim ต่อเนื่องโดย ZFS เอง; ไม่สร้าง cron
+
+**raid10** = stripe ของ mirror (เร็ว/ resilver ไว / random IOPS ดีสุด): เลือกดิสก์
+**จำนวนคู่ (even, ≥4)** b2ctl จะจับคู่ให้เอง (`mirror d1 d2 mirror d3 d4 …`) และโชว์คู่
+ก่อนยืนยัน — จาก CLI ใช้ `b2ctl create --raid10`
+
+## เพิ่ม cache / log ให้ pool (`[e]xtend`)
+
+เร่งความเร็ว pool เดิมตาม runbook ของเครื่อง storage:
+
+- **L2ARC cache** — read-cache บน SSD/NVMe เร็ว ๆ พังแล้วแค่ cache miss (ไม่ mirror)
+  ช่วยเฉพาะตอน working set ใหญ่กว่า RAM. CLI: `b2ctl cache-add|cache-rm <pool> <dev…>`
+- **SLOG log** — เร่ง write แบบ **sync** (เช่น NFS `sync`) เลือก **2 ลูกเพื่อ mirror**
+  (log ลูกเดียวเสีย = เสีย write ที่ค้างอยู่) และต้องเป็น SSD ที่มี **PLP**; b2ctl เตือน
+  ถ้าเลือกลูกเดียว. CLI: `b2ctl log-add|log-rm <pool> <dev…>`
+- เลือก `[3]` เพื่อถอด cache/log ออก (`zpool remove`)
+
+## Burn-in ดิสก์ก่อนเข้าใช้ (`[b]urnin`)
+
+ก่อนเชื่อดิสก์ใหม่/มือสอง รัน SMART long self-test (เลือกสแกนผิวอ่านทั้งลูกได้) แล้วได้ผล
+**PASS / WARN / FAIL**:
+
+- **PASS** สะอาด · **WARN** ใช้ได้แต่เก่า (POH > 40000 ชม. หรือมี grown defect) → จัด
+  priority ต่ำ อย่าจับคู่ mirror กับดิสก์เก่าด้วยกัน · **FAIL** มี uncorrected error หรือ
+  self-test ไม่ผ่าน → อย่าเอาเข้า pool
+- **อ่านอย่างเดียว**: ทำแค่สั่ง self-test และ (ถ้าเลือก) `badblocks` แบบ read-only — ไม่
+  เขียนทับดิสก์. CLI: `b2ctl burnin <bay|dev> [--scan] [--short]`
 
 ## ลบ ZFS pool (`[x]` หรือ `b2ctl destroy <pool>`)
 

@@ -42,6 +42,17 @@ runs `zpool destroy` (double-confirm + type-name) and removes that cron; `watch`
 prunes orphan crons (pools gone) at startup. Hardware-RAID actions (perccli) are
 gated to RAID mode via `raid_actions._require_raid()`.
 
+**Aux vdevs + burn-in (v0.8.0):** `create` adds **raid10** (stripe of mirrors —
+even disk count → `mirror a b mirror c d …`; CLI `create --raid10`). `[e]xtend`
+adds/removes **L2ARC cache** (`zfs.add_cache`, unguarded) and **SLOG log**
+(`zfs.add_log`, ≥2 devs → mirrored; warns on single + always reminds about PLP);
+CLI `cache-add/cache-rm/log-add/log-rm`; aux removal via `zfs.remove_vdev`
+(`zpool remove`). `[b]urnin` (`burnin.py`, CLI `burnin <bay|dev> [--scan]
+[--short]`) vets a spare/new disk read-only: `smartctl -t long` self-test (+ opt
+read-only `badblocks -sv`, never `-w`) → `assess()` PASS/WARN(POH>40000 / grown
+defects)/FAIL(uncorrected / self-test error). All honor `--dry-run`. These map to
+the R740XD hosting runbook STEP 02–03.
+
 **Spare-less offload:** `[o]ffload` with no AVAIL spare on a redundant vdev does
 a guarded `zpool offline` (pool → DEGRADED, gated by `zfs.can_offline`), then
 replaces a new disk inserted in the same bay (`zpool replace` + resilver). Refuses

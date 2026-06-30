@@ -159,9 +159,33 @@ resilvering pool, which is rare). Finds `replacing-N` vdev blocks; returns
 | swap-to-spare | `zpool replace <pool> <member> <spare-token>` |
 | demote-to-spare | `zpool detach <pool> <member>` → `zpool add <pool> spare <by-id>` |
 | add mirror vdev | `zpool add <pool> mirror <a> <b>` |
+| add L2ARC cache | `zpool add -f <pool> cache <by-id...>` (`zfs.add_cache`) |
+| add SLOG log | `zpool add -f <pool> log [mirror] <by-id...>` (`zfs.add_log`; ≥2 devs → mirrored) |
+| remove aux vdev | `zpool remove <pool> <token>` (`zfs.remove_vdev`; cache/log/spare leaf) |
 | attach | `zpool attach <pool> <existing> <new>` |
 | create pool | `zpool create ...` (checks `wipefs -n` for existing labels first) |
+| create RAID10 | `zpool create ... <name> mirror a b mirror c d ...` (repeated `mirror` from disk pairs) |
 | wipe | `zpool labelclear -f <dev>` → `wipefs -a <dev>` → `sgdisk --zap-all <dev>` |
+
+**Aux vdevs (runbook STEP 03).** L2ARC `cache` loss is harmless (cache miss),
+so it is added unguarded. SLOG `log` holds in-flight sync writes: `add_log`
+mirrors automatically with ≥2 devices, and the watch/CLI workflow warns on a
+single (non-mirrored) log and always reminds the operator to use a **PLP** SSD
+(PLP is not reliably exposed by SMART, so it is a warning, not a gate). All three
+honor `--dry-run`. CLI: `b2ctl cache-add|cache-rm|log-add|log-rm <pool> <dev…>`;
+watch: `[e]xtend`.
+
+### 3.6a Disk burn-in — `burnin.py` (runbook STEP 02, read-only vetting)
+| step | command |
+|------|---------|
+| start self-test | `smartctl -t long\|short <dev>` (`start_selftest`) |
+| poll progress | `smartctl -a <dev>` parsed for `% of test remaining` / `Completed without error` (`selftest_status`) |
+| surface scan (opt) | `badblocks -sv -b 4096 <dev>` — **read-only, never `-w`** (`read_scan`) |
+| verdict | `assess(disk)` → FAIL (uncorrected>0 / self-test error), WARN (POH>40000 / grown defects), else PASS |
+
+CLI `b2ctl burnin <bay\|dev> [--scan] [--short]`; watch `[b]urnin`. Only spare/new
+disks (`in_pool` is refused). The only writes are the self-test trigger and a
+read-only `badblocks`; nothing on the disk is modified.
 
 ### 3.7 LED locate — `locate.py` (by DEVICE, never by slot)
 `sas2ircu ... LOCATE <slot>` is **not used** — on this backplane it lights a

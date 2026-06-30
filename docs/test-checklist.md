@@ -49,7 +49,7 @@
 
 > **0 FAIL.** SKIP 3 = C9 (create new pool — ยังไม่ทำ), D5 (raidz demote refuse — cover ด้วย unit test),
 > D6 (dirty disk — ต้องหา disk มี data เก่า). 203 กู้จาก SUSPENDED + redeploy → เทส C2/C5-C8/D2/D7 ซ้ำผ่าน.
-> Unit tests: **215 passed**.
+> Unit tests: **241 passed**.
 
 <a id="action-items"></a>
 
@@ -417,12 +417,12 @@ swap which #&gt; N
 cd codes && python3 -m pytest tests/ -q
 ```
 
-**ผลรอบนี้ (dev machine):** `215 passed, 0 failed` ✅ *(เพิ่ม RAID-mode, JBOD/ZFS, pool lifecycle+cron, spare-less offload, panel bay_map/NVMe, RAID dry-run)*
+**ผลรอบนี้ (dev machine):** `241 passed, 0 failed` ✅ *(เพิ่ม L2ARC/SLOG aux vdevs, RAID10 create, disk burn-in — บน 215 เดิม)*
 
 | ID | Scenario | Expected | Status | Actual | Comment |
 |----|----------|----------|:------:|--------|---------|
 | E1 | Test suite รันได้ | suite รันจบ ไม่ error การ import | ✅ | tests collected, รันจบ | OK |
-| E2 | Pass rate | tests ผ่านทั้งหมด | ✅ | **215 passed / 0 failed** | ครอบคลุม RAID actions, JBOD->ZFS, destroy+cron, spare-less offload, baymap/NVMe |
+| E2 | Pass rate | tests ผ่านทั้งหมด | ✅ | **241 passed / 0 failed** | +26 ใหม่: add_cache/add_log/remove_vdev, create raid10, burnin assess/selftest/read-scan, watch extend+burnin |
 
 <details>
 <summary>📋 ดูโครงสร้าง test ใหม่ + รายละเอียด 9 เทสที่แก้</summary>

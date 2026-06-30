@@ -140,7 +140,7 @@ Pools:
   tank    2.72T  1.72G  free=2.72T  ONLINE   cap=0%
 [OK] all disks healthy and assigned
 
-[r]efresh  [a]ssign  [o]ffload  [s]wap  [d]emote  [n]ew-pool  [t]oggle-dryrun  [l]ocate  [q]uit
+[r]efresh  [a]ssign  [o]ffload  [s]wap  [d]emote  [n]ew-pool  [e]xtend  [b]urnin  [t]oggle-dryrun  [l]ocate  [q]uit
 b2ctl&gt;
 </pre>
 </details>
@@ -381,7 +381,7 @@ b2ctl> n
     [3] /dev/sdd (bay 1:6)
   pick disks (space-separated #)> 1 2 3
   pool name> backup
-  raid type (stripe, mirror, raidz1, raidz2) [mirror]> raidz1
+  raid type (stripe, mirror, raid10, raidz1, raidz2) [mirror]> raidz1
   create pool 'backup' (raidz1) with 3 disks? [y/N]> y
   ✔ pool created
 ```
@@ -392,14 +392,72 @@ b2ctl> n
 |------|--------------|-------------------|--------------|
 | **stripe** | 1 | 0 — one failure = total data loss | 100% |
 | **mirror** | 2 | 1 | 50% |
+| **raid10** | 4 (even) | 1 per mirror pair | 50% (fast resilver, best random IOPS) |
 | **raidz1** | 2 (recommend 3+) | 1 | (N-1)/N |
 | **raidz2** | 4 | 2 | (N-2)/N |
+
+> **raid10** = stripe of mirrors. Pick an even number of disks; b2ctl pairs them
+> (`mirror d1 d2 mirror d3 d4 …`) and shows the pairs before you confirm. From the
+> CLI: `b2ctl create --raid10`.
 
 > ⚠️ Warning: If disks have existing labels or data, b2ctl warns and asks to wipe first.
 
 ---
 
-### 6.7 `t` — Toggle dry-run mode
+### 6.7 `e` — Extend a pool (L2ARC cache / SLOG log)
+
+**When to use:** speed up an existing pool with a read cache (L2ARC) or a
+sync-write log (SLOG), as in the storage-box runbook.
+
+```
+b2ctl> e
+  [1] add L2ARC cache (read cache; loss = harmless)
+  [2] add SLOG log   (sync-write accel; mirror + PLP recommended)
+  [3] remove a cache/log device
+  action> 2
+    [1] /dev/sdg (bay 1:8)
+    [2] /dev/sdh (bay 1:9)
+  pick disk(s) (space-separated #)> 1 2
+  [!] ensure the SSD(s) have Power-Loss Protection (PLP).
+  add SLOG (mirror) to 'tank'? [y/N]> y
+  ✔ SLOG added
+```
+
+- **L2ARC cache** — a read cache on a fast SSD/NVMe. Losing it only costs a cache
+  miss, so it is never mirrored. Helps only when your working set is larger than RAM.
+- **SLOG log** — accelerates **synchronous** writes (e.g. NFS `sync`). Pick **two**
+  disks for a mirror (a lone log device can lose in-flight writes), and use SSDs
+  with **Power-Loss Protection (PLP)**. b2ctl warns if you choose a single device.
+- CLI: `b2ctl cache-add|cache-rm|log-add|log-rm <pool> <dev…>`.
+
+---
+
+### 6.8 `b` — Burn-in a disk (vet before pooling)
+
+**When to use:** before trusting a new or second-hand disk, run a SMART long
+self-test (optionally a full read-surface scan) and get a PASS/WARN/FAIL verdict.
+
+```
+b2ctl> b
+    [1] /dev/sdg (bay 1:8) Samsung SSD 870 EVO 1TB
+  burn in which #> 1
+  also run a full read-surface scan (slow, read-only)? [y/N]> n
+  self-test /dev/sdg: [####################] 100%
+  ✔ self-test finished on /dev/sdg
+  [PASS] /dev/sdg
+  ✔ safe to add to a pool.
+```
+
+- **PASS** — clean. **WARN** — usable but aged (power-on hours > 40000, or grown
+  defects): use as lower-priority / not paired with another old disk. **FAIL** —
+  uncorrected errors or a failed self-test: do not pool it.
+- Read-only: the only actions are the self-test trigger and (optionally) a
+  read-only `badblocks` scan — your data/disk is never written.
+- CLI: `b2ctl burnin <bay|dev> [--scan] [--short]`.
+
+---
+
+### 6.9 `t` — Toggle dry-run mode
 
 **When to use:** want to see exactly what commands would run without making any changes — for learning, rehearsing, or verifying before a real operation.
 
@@ -423,7 +481,7 @@ Also available as a startup flag: `sudo b2ctl --dry-run watch`
 
 ---
 
-### 6.8 `l` — Locate (blink LED)
+### 6.10 `l` — Locate (blink LED)
 
 **When to use:** need to confirm which physical bay a disk occupies before pulling it.
 
@@ -445,7 +503,7 @@ The bay's activity LED blinks for ~5 seconds then stops automatically.
 
 ---
 
-### 6.9 `q` — Quit
+### 6.11 `q` — Quit
 
 ```
 b2ctl> q
@@ -454,7 +512,7 @@ bye
 
 ---
 
-### 6.10 Hot-plug (automatic detection)
+### 6.12 Hot-plug (automatic detection)
 
 **Inserting a disk:**
 

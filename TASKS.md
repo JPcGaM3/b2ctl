@@ -12,6 +12,25 @@
 > - `b2ctl locate <serial>` → exactly one bay's LED/activity blinks ~5s.
 > - If a bay number is still off, edit `bay_map.json` (reverse rule or explicit map).
 
+## FEATURE — ZFS aux vdevs (SLOG/L2ARC) + RAID10 + burn-in [DONE, v0.8.0-itmode]
+
+Spec: `prompts/FEATURE_aux-vdevs-burnin.md`. For the R740XD central ZFS/NFS
+storage runbook (STEP 02–03). Shipped, mock + sim verified (241 tests pass):
+
+- **L2ARC cache**: `zfs.add_cache` / `remove_vdev`; CLI `cache-add`/`cache-rm`;
+  watch `[e]xtend` → 1. Unguarded (cache loss = harmless).
+- **SLOG log**: `zfs.add_log` (≥2 devs → mirrored); CLI `log-add`/`log-rm`;
+  watch `[e]xtend` → 2. Warns on single (non-mirrored) log + always reminds PLP.
+- **RAID10**: `create_pool(raid_type="raid10")` emits repeated `mirror` pairs;
+  CLI `create --raid10`; watch `[n]ew-pool` raid10 (even count, shows pairs).
+- **Burn-in**: `burnin.py` (`start_selftest`/`selftest_status`/`read_scan`/
+  `assess`); CLI `burnin <bay|dev> [--scan] [--short]`; watch `[b]urnin`.
+  Read-only (self-test + read-only `badblocks`, never `-w`).
+- All honor `--dry-run`. Sim updated (`zpool` cache/log/raid10/`destroy`,
+  `smartctl -t`, fake `badblocks`); fixed a pre-existing sim `create` bug (didn't
+  skip `-o k=v` property values). Docs: user-guide en/th, devops-guide,
+  test-checklist (215→241). Version → **v0.8.0-itmode**.
+
 ## FEATURE — RAID-mode support (Dell PERC) + dual-backend [DONE, validate on R640]
 
 Spec: `prompts/FEATURE_raid_mode.md`. Bumped to **v0.6.0-itmode**.

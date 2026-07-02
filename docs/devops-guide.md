@@ -52,7 +52,7 @@ those only work behind a RAID controller and are removed in this build.
 | `common.py` | colours, `run()`/`run_check()`, `Disk` model, `assess()` | none |
 | `spec.py` | load/lookup TBW ratings (`ssd_spec.json`) | none |
 | `hba.py` | enumerate disks, by-id index, bay map + **remap** | `lsblk`, `sas2ircu` |
-| `locate.py` | LED locate: perccli (PERC PD) / ledctl → dd (raw), timed + pulse | `perccli`, `ledctl`, `dd` |
+| `locate.py` | LED locate: perccli (PERC PD) / ledctl → dd (raw), timed | `perccli`, `ledctl`, `dd` |
 | `smart.py` | direct SMART read + parse, endurance | `smartctl` |
 | `zfs.py` | pool/topology parse, membership, actions | `zpool`, `wipefs`, `sgdisk` |
 | `core.py` | the `scan()` pipeline | (composes the above) |
@@ -223,22 +223,6 @@ first and prints `via {perccli|ledctl|dd}`. `b2ctl status --locate` blinks all
 at-risk disks at once (`blink_many`, still dd). **Invariants: LED-only (never a
 writing command; `dd` `of=` is always `/dev/null`); always end with the locate
 LED off.**
-
-**Pulse (v0.8.6)** — `b2ctl locate <disk> [secs] --pulse ON:OFF` (also a watch
-`[l]ocate` prompt) beats the LED in an ON/OFF rhythm for the whole duration,
-easier to spot than a steady read. `locate._pulse(total, on, off, active, idle)`
-alternates `active(dur)`/`idle(dur)` (durations clamped so it never overruns
-`total`). Per method:
-- **dd path** (raw SATA/SAS/NVMe): no dedicated LED — `active` = a read burst
-  (activity LED flickers), `idle` = `time.sleep` (dark). Still read-only.
-- **perccli path** (PERC PDs): `active` = `hba_raid.locate(bay, True)` … `sleep`
-  … `locate(bay, False)` on the dedicated locate LED; `idle` = dark.
-`ON`/`OFF` must both be > 0 (`cli._parse_pulse`), else steady behavior. The
-pulse **repeats inside the total duration**, so the duration must span several
-cycles — a 5s total with `2:2` shows barely one beat. The CLI takes the total as
-the positional `secs`; the watch `[l]ocate` prompt asks for it and defaults to
-`max((on+off)*4, 5)` when pulsing. On perccli the firmware drives the LED and
-`start/stop locate` has ~1s latency, so favour larger `on`/`off` there.
 
 ---
 

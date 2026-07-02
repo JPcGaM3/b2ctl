@@ -49,7 +49,7 @@
 
 > **0 FAIL.** SKIP 3 = C9 (create new pool — ยังไม่ทำ), D5 (raidz demote refuse — cover ด้วย unit test),
 > D6 (dirty disk — ต้องหา disk มี data เก่า). 203 กู้จาก SUSPENDED + redeploy → เทส C2/C5-C8/D2/D7 ซ้ำผ่าน.
-> Unit tests: **294 passed**.
+> Unit tests: **286 passed**.
 
 <a id="action-items"></a>
 
@@ -417,12 +417,12 @@ swap which #&gt; N
 cd codes && python3 -m pytest tests/ -q
 ```
 
-**ผลรอบนี้ (dev machine):** `294 passed, 0 failed` ✅ *(เพิ่ม unified Storage summary, +v0.8.5 bay_map/ssd_spec directory-independence + `b2ctl update` resource sync, +v0.8.6 locate --pulse, +v0.8.7 ledctl locate + dd fallback)*
+**ผลรอบนี้ (dev machine):** `286 passed, 0 failed` ✅ *(เพิ่ม unified Storage summary, +v0.8.5 bay_map/ssd_spec directory-independence + `b2ctl update` resource sync, +v0.8.7 ledctl locate + dd fallback; v0.8.8 ถอด locate --pulse ออก)*
 
 | ID | Scenario | Expected | Status | Actual | Comment |
 |----|----------|----------|:------:|--------|---------|
 | E1 | Test suite รันได้ | suite รันจบ ไม่ error การ import | ✅ | tests collected, รันจบ | OK |
-| E2 | Pass rate | tests ผ่านทั้งหมด | ✅ | **294 passed / 0 failed** | +26 (v0.8.0) add_cache/add_log/remove_vdev, raid10, burnin; +6 (v0.8.1) nvme by-id/serial remap; +2 (v0.8.2) watch RAID-volumes render; +5 (v0.8.3) install parity; +v0.8.4 storage summary; +13 (v0.8.5) bay_map/ssd_spec path precedence + `b2ctl update` sync (created/current/customized-kept/force); +10 (v0.8.6) locate --pulse (pulse driver, dd/perccli rhythm, parse); +5 (v0.8.7) ledctl locate + dd fallback (steady/pulse/fallback/always-off/perc-skip) |
+| E2 | Pass rate | tests ผ่านทั้งหมด | ✅ | **286 passed / 0 failed** | +26 (v0.8.0) add_cache/add_log/remove_vdev, raid10, burnin; +6 (v0.8.1) nvme by-id/serial remap; +2 (v0.8.2) watch RAID-volumes render; +5 (v0.8.3) install parity; +v0.8.4 storage summary; +13 (v0.8.5) bay_map/ssd_spec path precedence + `b2ctl update` sync; +5 (v0.8.7) ledctl locate + dd fallback (steady/fallback/always-off/perc-skip); −8 (v0.8.8) removed locate --pulse |
 | E3 | sim NVMe walk | `sim/run status` โชว์ nvme0n1/nvme1n1 = PCIe2:0/1, `burnin nvme0n1` = PASS | ✅ | NVMe enumerated + serial-relabelled + burn-in PASS ใน sim | NVMe by-id ต้องเครื่องจริง (sysfs/by-id แฟกไม่ได้) |
 
 <details>

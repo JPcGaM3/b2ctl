@@ -727,7 +727,6 @@ ESP partition **manually**. b2ctl does not touch Proxmox boot config.
 | `b2ctl status --json` | JSON output |
 | `b2ctl --dry-run <cmd>` | preview what commands would run — no writes |
 | `b2ctl locate <bay\|serial\|dev> [secs]` | blink one disk's LED (~5s) |
-| `b2ctl locate <disk> 20 --pulse 2:2` | pulse the LED (2s on / 2s off) — give it a **duration of several cycles** (e.g. 20s) to see the rhythm; a short 5s barely shows one beat |
 
 **Which LED?** locate picks the most-dedicated indicator: PERC drives → the
 controller's slot LED (`perccli`); raw SATA/SAS → the backplane's dedicated

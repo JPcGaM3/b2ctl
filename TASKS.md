@@ -19,21 +19,18 @@ Raw-disk locate now prefers the backplane's dedicated locate LED via `ledctl`
 by applicability; a PERC VD member stays **perccli-only** (no /dev fallback — would
 light the whole VD = wrong bay).
 - locate.py: `_ledctl` (`ledctl locate=/locate_off=`), `_have_ledctl`; `blink`
-  prefers ledctl, always `locate_off` in a `finally`, else `_blink_dd`. LED-only.
+  prefers ledctl, always `locate_off` in a `finally`, else `_dd_read`. LED-only.
 - config.py: `ledctl` in tool_paths + soft `validate()` row (else dd fallback).
-- cli.py: version 0.8.7; locate help notes perccli/ledctl/dd.
-- +5 tests (294 pass); docs (user-guide en/th, devops §3.7 + module map, CLAUDE §5).
+- cli.py: locate help notes perccli/ledctl/dd.
+- +5 tests; docs (user-guide en/th, devops §3.7 + module map, CLAUDE §5).
 
-## FEATURE — locate LED pulse (on/off rhythm) [DONE, v0.8.6-itmode]
+## REMOVED — locate LED pulse [v0.8.8-itmode]
 
-`b2ctl locate <disk> [secs] --pulse ON:OFF` (+ watch `[l]ocate` pulse prompt)
-beats the LED ON:OFF seconds for the duration — easier to spot than a steady read.
-- locate.py: `_pulse(total, on, off, active, idle)` generic driver (clamped to
-  total); `blink`/`blink_disk` take `on`/`off` — dd path = read-burst/idle,
-  perccli path = dedicated locate LED on/off. Steady behavior unchanged when
-  on/off = 0.
-- cli.py: `--pulse` arg + `_parse_pulse` (ON/OFF > 0). Version → 0.8.6-itmode.
-- +10 tests (289 pass); docs (user-guide en/th, devops §3.7).
+The v0.8.6 `--pulse` feature (LED on/off rhythm) was **removed** at the operator's
+request — locate is back to a single steady blink for `seconds`. Dropped
+`locate._pulse`, the `on`/`off` params on `blink`/`blink_disk`, `cli._parse_pulse`
++ `--pulse`, and the watch pulse/duration prompts (revert `_cmd_locate` to steady).
+Version → 0.8.8-itmode; −8 tests (286 pass). (ledctl/perccli/dd routing unchanged.)
 
 ## FIX — bay_map/ssd_spec directory-independence + `b2ctl update` sync [DONE, v0.8.5-itmode]
 

@@ -21,7 +21,7 @@ from . import installer as _installer_mod
 from .common import need_root, run, R, Y, G, C, N
 from . import ui
 
-__version__ = "0.8.7-itmode"
+__version__ = "0.8.8-itmode"
 
 
 def _resolve_dev(target: str, disks=None):
@@ -64,23 +64,7 @@ def _watch(_args) -> int:
     return watch.run()
 
 
-def _parse_pulse(s: str) -> tuple[float, float]:
-    """Parse '--pulse ON:OFF' (seconds) -> (on, off). Raises ValueError if bad."""
-    on_s, _, off_s = s.partition(":")
-    on, off = float(on_s), float(off_s)
-    if on <= 0 or off <= 0:
-        raise ValueError("on and off must both be > 0")
-    return on, off
-
-
 def _locate(args) -> int:
-    on = off = 0.0
-    if getattr(args, "pulse", None):
-        try:
-            on, off = _parse_pulse(args.pulse)
-        except ValueError:
-            print(f"{R}[-] bad --pulse '{args.pulse}' (want ON:OFF, e.g. 2:2){N}")
-            return 1
     disks = core.scan()
     d = next((x for x in disks if args.target in
               (x.bay, x.serial, x.dev, x.dev.replace("/dev/", ""))), None)
@@ -88,9 +72,8 @@ def _locate(args) -> int:
         print(f"{R}[-] could not resolve '{args.target}' to a disk{N}")
         return 1
     where = f"bay {d.bay}" if locatemod.is_perc_pd(d) else d.dev
-    rhythm = f" pulse {on:g}s/{off:g}s" if on and off else ""
-    print(f"{Y}[*] blinking {where} for {args.seconds}s{rhythm} ...{N}")
-    ok, method = locatemod.blink_disk(d, args.seconds, on, off)
+    print(f"{Y}[*] blinking {where} for {args.seconds}s ...{N}")
+    ok, method = locatemod.blink_disk(d, args.seconds)
     print((G + f"[+] done (via {method})" if ok else R + "[-] failed") + N)
     return 0 if ok else 1
 
@@ -495,8 +478,6 @@ def build_parser() -> argparse.ArgumentParser:
     lo.add_argument("seconds", nargs="?", type=int,
                     default=locatemod.DEFAULT_SECONDS,
                     help="blink duration (default 5)")
-    lo.add_argument("--pulse", metavar="ON:OFF",
-                    help="beat the LED ON:OFF seconds (e.g. 2:2) for <seconds>")
     lo.set_defaults(func=_locate)
 
     off = sub.add_parser("offload", help="safely detach or resilver a disk to offload it")

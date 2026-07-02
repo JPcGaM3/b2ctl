@@ -394,32 +394,9 @@ def _cmd_locate(tbw) -> None:
     if chosen.dev == "-":
         print(f"{R}  cannot locate a GHOST disk (OS rejected it, no /dev node){N}")
         return
-    on = off = 0.0
-    pulse = _ask("  pulse seconds on:off, e.g. 2:2 (blank = steady)> ")
-    if pulse:
-        try:
-            on_s, _, off_s = pulse.partition(":")
-            on, off = float(on_s), float(off_s)
-            if on <= 0 or off <= 0:
-                raise ValueError
-        except ValueError:
-            print(f"{Y}  bad pulse '{pulse}' — using steady{N}")
-            on = off = 0.0
-    # pulse repeats within the total duration, so it needs several cycles of room;
-    # default longer when pulsing (5s can't show even one on+off).
-    default_secs = max(int((on + off) * 4), locate.DEFAULT_SECONDS) if on and off \
-        else locate.DEFAULT_SECONDS
-    secs = default_secs
-    dur = _ask(f"  duration seconds (blank = {default_secs})> ")
-    if dur:
-        try:
-            secs = max(1, int(dur))
-        except ValueError:
-            print(f"{Y}  bad duration '{dur}' — using {default_secs}s{N}")
     where = f"bay {chosen.bay}" if locate.is_perc_pd(chosen) else chosen.dev
-    rhythm = f" pulse {on:g}s/{off:g}s" if on and off else ""
-    print(f"{Y}  blinking {where} for {secs}s{rhythm} ...{N}")
-    ok, method = locate.blink_disk(chosen, secs, on, off)
+    print(f"{Y}  blinking {where} for {locate.DEFAULT_SECONDS}s ...{N}")
+    ok, method = locate.blink_disk(chosen)
     print((G + f"  ✔ done (via {method})" if ok else R + "  ✗ failed") + N)
 
 

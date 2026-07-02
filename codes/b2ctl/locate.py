@@ -9,10 +9,8 @@ never address the LED by slot. Backend chain, most-dedicated first:
   * raw disk (own /dev node)              -> ledctl (SGPIO/SES dedicated locate
     LED) if installed, else dd activity read (READ ONLY, if=dev of=/dev/null).
 
-`ledctl locate` is an SES *identify blink*, not a solid LED — no tool makes a
-healthy drive's LED solid or dark; it only toggles the locate indicator on/off.
-Default blink is ~5 seconds, then it stops. An optional pulse (on/off seconds)
-beats the LED in a distinct rhythm for the whole duration.
+`ledctl locate` is an SES *identify blink*, not a solid LED — it only toggles the
+locate indicator on/off. Default blink is ~5 seconds, then it stops.
 """
 
 from __future__ import annotations
@@ -25,23 +23,6 @@ from . import config as _cfg
 DEFAULT_SECONDS = 5
 _DEVNULL = subprocess.DEVNULL
 
-
-def _pulse(total: float, on: float, off: float, active, idle) -> None:
-    """Alternate active(dur)/idle(dur) for `total` seconds, clamped to the end.
-
-    `active`/`idle` each take a duration; active drives the LED (read / locate on),
-    idle leaves it dark. Durations are trimmed so the loop never overruns `total`.
-    """
-    end = time.monotonic() + total
-    while True:
-        rem = end - time.monotonic()
-        if rem <= 0:
-            break
-        active(min(on, rem))
-        rem = end - time.monotonic()
-        if rem <= 0:
-            break
-        idle(min(off, rem))
 
 def _dd_read(dev: str, seconds: int) -> None:
     """Sequential read for `seconds` -> activity LED flickers. Read-only."""
@@ -63,43 +44,23 @@ def _have_ledctl() -> bool:
     return shutil.which(_cfg.tool("ledctl")) is not None
 
 
-def _blink_dd(dev: str, seconds: int, on: float, off: float) -> None:
-    """dd activity-LED locate (fallback). on/off -> pulse of read/idle."""
-    if on > 0 and off > 0:
-        _pulse(seconds, on, off, lambda d: _dd_read(dev, d), time.sleep)
-    else:
-        _dd_read(dev, seconds)
-
-
-def blink(dev: str, seconds: int = DEFAULT_SECONDS,
-          on: float = 0, off: float = 0) -> tuple[bool, str]:
+def blink(dev: str, seconds: int = DEFAULT_SECONDS) -> tuple[bool, str]:
     """Blink one raw disk for `seconds`, then stop. Returns (ok, method).
 
-    Prefers ledctl (dedicated locate LED, clean on/off) and falls back to the dd
-    activity read when ledctl is absent or cannot drive the device. on>0 and off>0
-    pulse the LED (on seconds lit, off seconds dark); else steady on for the
-    duration. The LED is ALWAYS left off at the end.
+    Prefers ledctl (dedicated locate LED) and falls back to the dd activity read
+    when ledctl is absent or cannot drive the device. The LED is ALWAYS left off
+    at the end.
     """
     if _have_ledctl():
-        ok, _ = _ledctl(dev, True)          # probe + would-be first "on"
+        ok, _ = _ledctl(dev, True)          # light + support probe
         if ok:
             try:
-                if on > 0 and off > 0:
-                    _ledctl(dev, False)     # reset; _pulse drives clean cycles
-
-                    def _active(d):
-                        _ledctl(dev, True)
-                        time.sleep(d)
-                        _ledctl(dev, False)
-
-                    _pulse(seconds, on, off, _active, time.sleep)
-                else:
-                    time.sleep(seconds)     # LED already on from the probe
+                time.sleep(seconds)
             finally:
                 _ledctl(dev, False)         # ALWAYS leave it off
             return True, "ledctl"
         # ledctl present but couldn't drive this dev -> safe fallback
-    _blink_dd(dev, seconds, on, off)
+    _dd_read(dev, seconds)
     return True, "dd"
 
 
@@ -114,37 +75,22 @@ def is_perc_pd(disk) -> bool:
                                or bool(getattr(disk, "pd_state", "")))
 
 
-def blink_disk(disk, seconds: int = DEFAULT_SECONDS,
-               on: float = 0, off: float = 0) -> tuple[bool, str]:
+def blink_disk(disk, seconds: int = DEFAULT_SECONDS) -> tuple[bool, str]:
     """Blink a Disk's bay LED, routed by backend.
 
     PERC physical drives (VD members and Unconfigured-Good spares) have no
-    per-member block device — they share the VD's /dev/sdX — so a dd read would
-    blink the wrong bay. Light the slot LED via perccli (by enc:slot). Everything
-    else uses the dd activity read on the device.
-
-    on>0 and off>0 pulse the LED (on seconds lit, off seconds dark) for the whole
-    duration; otherwise the LED stays lit steadily for `seconds`.
+    per-member block device — they share the VD's /dev/sdX — so a dd/ledctl read
+    would blink the wrong bay. Light the slot LED via perccli (by enc:slot) only.
+    Everything else uses ledctl (else dd) on the device.
     """
     if is_perc_pd(disk):
         from . import hba_raid
-        if on > 0 and off > 0:
-            state = {"ok": True}
-
-            def _active(d):
-                ok, _ = hba_raid.locate(disk.bay, True)
-                state["ok"] = ok
-                time.sleep(d)
-                hba_raid.locate(disk.bay, False)
-
-            _pulse(seconds, on, off, _active, time.sleep)
-            return state["ok"], "perccli"
         ok, _ = hba_raid.locate(disk.bay, True)
         if ok:
             time.sleep(seconds)
             hba_raid.locate(disk.bay, False)
         return ok, "perccli"
-    return blink(disk.dev, seconds, on, off)
+    return blink(disk.dev, seconds)
 
 
 def blink_many(devs: list[str], seconds: int = DEFAULT_SECONDS) -> str:

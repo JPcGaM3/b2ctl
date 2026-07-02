@@ -57,9 +57,84 @@ class TestConfig:
             "tool_paths": {},
             "controller": {"mode": "auto", "index": "all"},
             "bay_map_path": "",
+            "ssd_spec_path": "",
         }
-        p = cfg_mod.bay_map_path()
+        with patch("b2ctl.config.os.path.exists", return_value=False):
+            p = cfg_mod.bay_map_path()
         assert p.endswith("bay_map.json")
+
+    def test_bay_map_path_prefers_etc_standard_over_bundled(self):
+        import b2ctl.config as cfg_mod
+        cfg_mod._cache = {
+            "tool_paths": {},
+            "controller": {"mode": "auto", "index": "all"},
+            "bay_map_path": "",
+            "ssd_spec_path": "",
+        }
+        # no override + /etc file present -> the absolute standard path wins
+        with patch("b2ctl.config.os.path.exists", return_value=True):
+            assert cfg_mod.bay_map_path() == cfg_mod.STD_BAY_MAP
+
+    def test_ssd_spec_path_returns_config_override(self):
+        import b2ctl.config as cfg_mod
+        cfg_mod._cache = {
+            "tool_paths": {},
+            "controller": {"mode": "auto", "index": "all"},
+            "bay_map_path": "",
+            "ssd_spec_path": "/srv/ssd_spec.json",
+        }
+        assert cfg_mod.ssd_spec_path() == "/srv/ssd_spec.json"
+
+    def test_ssd_spec_path_prefers_etc_then_bundled(self):
+        import b2ctl.config as cfg_mod
+        cfg_mod._cache = {
+            "tool_paths": {},
+            "controller": {"mode": "auto", "index": "all"},
+            "bay_map_path": "",
+            "ssd_spec_path": "",
+        }
+        with patch("b2ctl.config.os.path.exists", return_value=True):
+            assert cfg_mod.ssd_spec_path() == cfg_mod.STD_SSD_SPEC
+        with patch("b2ctl.config.os.path.exists", return_value=False):
+            assert cfg_mod.ssd_spec_path().endswith("ssd_spec.json")
+
+    def test_load_honors_ssd_spec_path_override(self):
+        import json
+        import os
+        import tempfile
+        import b2ctl.config as cfg_mod
+        tmp = tempfile.mkdtemp()
+        path = os.path.join(tmp, "config.json")
+        with open(path, "w") as f:
+            json.dump({"ssd_spec_path": "/data/ssd_spec.json"}, f)
+        old = cfg_mod.CONFIG_PATH
+        cfg_mod.CONFIG_PATH = path
+        try:
+            cfg_mod._cache = None
+            cfg = cfg_mod.load()
+            assert cfg["ssd_spec_path"] == "/data/ssd_spec.json"
+        finally:
+            cfg_mod.CONFIG_PATH = old
+            cfg_mod._cache = None
+
+    def test_validate_labels_override_and_etc_ok_bundled_warn(self):
+        import b2ctl.config as cfg_mod
+        cfg_mod._cache = {
+            "tool_paths": {"sas2ircu": "", "perccli": "", "smartctl": "", "zpool": ""},
+            "controller": {"mode": "auto", "index": "all"},
+            "bay_map_path": "/srv/bay_map.json",          # override -> ok
+            "ssd_spec_path": "",                          # -> bundled -> warn
+        }
+
+        def _exists(p):
+            # /etc data files absent (force bundled); override + bundled present
+            return not p.startswith(cfg_mod.STD_DIR)
+
+        with patch("b2ctl.config.subprocess.run", side_effect=FileNotFoundError), \
+             patch("b2ctl.config.os.path.exists", side_effect=_exists):
+            rows = {name: status for name, status, _ in cfg_mod.validate()}
+        assert rows["bay_map"] == "ok"      # config override
+        assert rows["ssd_spec"] == "warn"   # bundled fallback
 
     def test_load_returns_defaults_when_no_file(self):
         import b2ctl.config as cfg_mod

@@ -14,9 +14,6 @@ import re
 
 from .common import Y, N
 
-_SPEC_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                          "..", "ssd_spec.json")
-
 # rated TBW in terabytes-written
 _DEFAULT_TBW = {
     "samsung ssd 860 pro 1tb": 1200,
@@ -29,8 +26,9 @@ def _norm(s: str) -> str:
 
 
 def load() -> dict:
+    from . import config
     table = {_norm(k): float(v) for k, v in _DEFAULT_TBW.items()}
-    path = os.path.abspath(_SPEC_FILE)
+    path = config.ssd_spec_path()
     if os.path.exists(path):
         try:
             with open(path) as f:

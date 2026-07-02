@@ -13,6 +13,13 @@ import subprocess
 
 CONFIG_PATH = "/etc/b2ctl/config.json"
 
+# Standard absolute locations for operator-editable data files. Preferred over
+# the __file__-relative bundled copies so resolution is directory-independent
+# (see bay_map_path/ssd_spec_path). `b2ctl update` syncs the bundled files here.
+STD_DIR      = "/etc/b2ctl"
+STD_BAY_MAP  = os.path.join(STD_DIR, "bay_map.json")
+STD_SSD_SPEC = os.path.join(STD_DIR, "ssd_spec.json")
+
 _DEFAULTS: dict = {
     "tool_paths": {
         "sas2ircu": "",
@@ -31,6 +38,7 @@ _DEFAULTS: dict = {
         "index": "all",    # "all" or integer string e.g. "0"
     },
     "bay_map_path": "",
+    "ssd_spec_path": "",
 }
 
 _cache: dict | None = None
@@ -54,6 +62,8 @@ def load() -> dict:
                 cfg["controller"]["index"] = str(ctrl["index"])
             if user.get("bay_map_path"):
                 cfg["bay_map_path"] = user["bay_map_path"]
+            if user.get("ssd_spec_path"):
+                cfg["ssd_spec_path"] = user["ssd_spec_path"]
         except (json.JSONDecodeError, OSError, KeyError):
             pass
     return cfg
@@ -78,14 +88,28 @@ def tool(name: str) -> str:
     return found if found else name
 
 
-def bay_map_path() -> str:
-    """Return path to bay_map.json (config override or bundled next to code)."""
-    p = _get()["bay_map_path"]
+def _resource_path(cfg_key: str, std: str, bundled: str) -> str:
+    """Resolve a data file: config override > /etc standard > bundled next to code.
+
+    The bundled fallback is __file__-relative (cwd/copy-sensitive); the /etc
+    standard is absolute, so preferring it keeps resolution directory-independent.
+    """
+    p = _get()[cfg_key]
     if p:
         return p
-    return os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..", "bay_map.json")
-    )
+    if os.path.exists(std):
+        return std
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", bundled))
+
+
+def bay_map_path() -> str:
+    """Return path to bay_map.json (override > /etc > bundled)."""
+    return _resource_path("bay_map_path", STD_BAY_MAP, "bay_map.json")
+
+
+def ssd_spec_path() -> str:
+    """Return path to ssd_spec.json (override > /etc > bundled)."""
+    return _resource_path("ssd_spec_path", STD_SSD_SPEC, "ssd_spec.json")
 
 
 def controller_mode() -> str:
@@ -164,15 +188,17 @@ def validate() -> list[tuple[str, str, str]]:
                     if name in ("sas2ircu", "perccli") else "install via apt")
             results.append((name, "warn", f"not found  →  {hint}"))
 
-    # bay_map
-    bmp = bay_map_path()
-    if os.path.exists(bmp):
-        if _get()["bay_map_path"]:
-            results.append(("bay_map", "ok", bmp))
+    # data files: config override or /etc standard = ok; bundled fallback = warn
+    for label, resolved, override_key in (
+        ("bay_map", bay_map_path(), "bay_map_path"),
+        ("ssd_spec", ssd_spec_path(), "ssd_spec_path"),
+    ):
+        if not os.path.exists(resolved):
+            results.append((label, "error", f"{resolved} not found"))
+        elif _get()[override_key] or resolved == os.path.join(STD_DIR, f"{label}.json"):
+            results.append((label, "ok", resolved))
         else:
-            results.append(("bay_map", "warn",
-                            f"bundled ({bmp})  →  b2ctl update --export-bay-map to customize"))
-    else:
-        results.append(("bay_map", "error", f"{bmp} not found"))
+            results.append((label, "warn",
+                            f"bundled ({resolved})  →  run: b2ctl update  (sync to {STD_DIR})"))
 
     return results

@@ -36,3 +36,23 @@ class TestSpecLookup:
     def test_reverse_match_does_not_false_positive(self):
         table = {"samsung ssd 870 evo 1tb": 600}
         assert spec.lookup("WD Red", table) is None
+
+
+class TestSpecLoadPath:
+    """spec.load() resolves the file via config.ssd_spec_path()."""
+
+    def test_load_reads_config_ssd_spec_path_and_merges(self):
+        import json
+        import os
+        import tempfile
+        from unittest.mock import patch
+        tmp = tempfile.mkdtemp()
+        path = os.path.join(tmp, "ssd_spec.json")
+        with open(path, "w") as f:
+            json.dump({"acme nvme 4tb": 3000}, f)
+        with patch("b2ctl.config.ssd_spec_path", return_value=path):
+            table = spec.load()
+        # custom entry from the file...
+        assert table["acme nvme 4tb"] == 3000.0
+        # ...merged over the built-in defaults (still present)
+        assert table["samsung ssd 870 evo 1tb"] == 600.0

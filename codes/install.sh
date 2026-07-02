@@ -149,7 +149,10 @@ cp "${SRC_DIR}/ssd_spec.json" "${PREFIX}/"
 echo "[*] writing launcher -> ${LAUNCHER}"
 cat >"${LAUNCHER}" <<EOF
 #!/usr/bin/env bash
-exec env PYTHONPATH="${PREFIX}" python3 -m b2ctl "\$@"
+# PYTHONSAFEPATH=1 stops python -m prepending the cwd to sys.path, so running
+# b2ctl from a directory containing a b2ctl/ package (e.g. the repo checkout)
+# cannot shadow this install. Honored on Python >=3.11, ignored on older.
+exec env PYTHONPATH="${PREFIX}" PYTHONSAFEPATH=1 python3 -m b2ctl "\$@"
 EOF
 chmod +x "${LAUNCHER}"
 

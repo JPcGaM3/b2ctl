@@ -395,7 +395,7 @@ def _cmd_locate(tbw) -> None:
         print(f"{R}  cannot locate a GHOST disk (OS rejected it, no /dev node){N}")
         return
     on = off = 0.0
-    pulse = _ask("  pulse ON:OFF seconds (blank = steady)> ")
+    pulse = _ask("  pulse seconds on:off, e.g. 2:2 (blank = steady)> ")
     if pulse:
         try:
             on_s, _, off_s = pulse.partition(":")

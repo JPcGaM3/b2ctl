@@ -12,6 +12,18 @@
 > - `b2ctl locate <serial>` → exactly one bay's LED/activity blinks ~5s.
 > - If a bay number is still off, edit `bay_map.json` (reverse rule or explicit map).
 
+## FEATURE — ledctl locate backend + dd fallback [DONE, v0.8.7-itmode]
+
+Raw-disk locate now prefers the backplane's dedicated locate LED via `ledctl`
+(SGPIO/SES), falling back to the `dd` activity read. Chain = perccli → ledctl → dd
+by applicability; a PERC VD member stays **perccli-only** (no /dev fallback — would
+light the whole VD = wrong bay).
+- locate.py: `_ledctl` (`ledctl locate=/locate_off=`), `_have_ledctl`; `blink`
+  prefers ledctl, always `locate_off` in a `finally`, else `_blink_dd`. LED-only.
+- config.py: `ledctl` in tool_paths + soft `validate()` row (else dd fallback).
+- cli.py: version 0.8.7; locate help notes perccli/ledctl/dd.
+- +5 tests (294 pass); docs (user-guide en/th, devops §3.7 + module map, CLAUDE §5).
+
 ## FEATURE — locate LED pulse (on/off rhythm) [DONE, v0.8.6-itmode]
 
 `b2ctl locate <disk> [secs] --pulse ON:OFF` (+ watch `[l]ocate` pulse prompt)

@@ -728,6 +728,14 @@ ESP partition **manually**. b2ctl does not touch Proxmox boot config.
 | `b2ctl --dry-run <cmd>` | preview what commands would run — no writes |
 | `b2ctl locate <bay\|serial\|dev> [secs]` | blink one disk's LED (~5s) |
 | `b2ctl locate <disk> 20 --pulse 2:2` | pulse the LED (2s on / 2s off) — give it a **duration of several cycles** (e.g. 20s) to see the rhythm; a short 5s barely shows one beat |
+
+**Which LED?** locate picks the most-dedicated indicator: PERC drives → the
+controller's slot LED (`perccli`); raw SATA/SAS → the backplane's dedicated
+**locate LED via `ledctl`** if the `ledmon` package is installed (`apt install
+ledmon`), otherwise the **`dd` activity-LED** fallback. `b2ctl locate` prints
+which it used (`via ledctl` / `via dd` / `via perccli`). Note the locate LED is a
+*blink* (SES identify), not solid — no tool can make a healthy drive's LED solid
+or fully dark.
 | `b2ctl offload` | guided: safely remove an in-pool disk |
 | `b2ctl replace` | guided: replace a disk onto a spare |
 | `b2ctl swap` | guided: swap a worn disk onto an existing spare |

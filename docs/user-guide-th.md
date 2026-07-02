@@ -695,6 +695,13 @@ b2ctl rollback 20260617-143022-replace
 | `sudo b2ctl --dry-run watch` | เข้าโหมดเฝ้าดูแบบ dry-run (ไม่เปลี่ยนแปลงจริง) |
 | `sudo b2ctl locate <bay/serial/sdX>` | กะพริบไฟดิสก์ตัวนั้น |
 | `sudo b2ctl locate <disk> 20 --pulse 2:2` | กะพริบเป็นจังหวะ (ติด 2 วิ / ดับ 2 วิ) — ต้องตั้ง **duration หลายรอบ** (เช่น 20 วิ) ถึงจะเห็นจังหวะ; 5 วิ สั้นไปเห็นแค่รอบเดียว |
+
+**ใช้ไฟดวงไหน?** locate เลือกไฟที่เจาะจงสุด: disk หลัง PERC → ไฟ slot ของ
+controller (`perccli`); SATA/SAS raw → ไฟ locate เฉพาะของ backplane ผ่าน `ledctl`
+ถ้าลง package `ledmon` แล้ว (`apt install ledmon`), ไม่งั้น fallback เป็นไฟ
+activity ผ่าน `dd`. `b2ctl locate` จะบอกว่าใช้ทางไหน (`via ledctl` / `via dd` /
+`via perccli`). หมายเหตุ: ไฟ locate เป็น *กะพริบ* (SES identify) ไม่ใช่ติดนิ่ง — ไม่มี
+tool ไหนทำให้ไฟ drive ที่ healthy ติดนิ่งหรือดับสนิทได้
 | `sudo b2ctl log` | ดู 20 operation ล่าสุดจาก audit trail |
 | `sudo b2ctl log --last N` | ดู N operation ล่าสุด |
 | `sudo b2ctl rollback <op_id>` | ย้อนกลับ operation ก่อนหน้า (พร้อม confirm) |

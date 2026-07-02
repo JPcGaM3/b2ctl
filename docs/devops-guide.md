@@ -52,7 +52,7 @@ those only work behind a RAID controller and are removed in this build.
 | `common.py` | colours, `run()`/`run_check()`, `Disk` model, `assess()` | none |
 | `spec.py` | load/lookup TBW ratings (`ssd_spec.json`) | none |
 | `hba.py` | enumerate disks, by-id index, bay map + **remap** | `lsblk`, `sas2ircu` |
-| `locate.py` | device-based LED locate (ledctl -> dd), timed | `ledctl`, `dd` |
+| `locate.py` | LED locate: perccli (PERC PD) / ledctl → dd (raw), timed + pulse | `perccli`, `ledctl`, `dd` |
 | `smart.py` | direct SMART read + parse, endurance | `smartctl` |
 | `zfs.py` | pool/topology parse, membership, actions | `zpool`, `wipefs`, `sgdisk` |
 | `core.py` | the `scan()` pipeline | (composes the above) |
@@ -198,16 +198,31 @@ CLI `b2ctl burnin <bay\|dev> [--scan] [--short]`; watch `[b]urnin`. Only spare/n
 disks (`in_pool` is refused). The only writes are the self-test trigger and a
 read-only `badblocks`; nothing on the disk is modified.
 
-### 3.7 LED locate — `locate.py` (by DEVICE, never by slot)
+### 3.7 LED locate — `locate.py`
 `sas2ircu ... LOCATE <slot>` is **not used** — on this backplane it lights a
-whole range of bays, and the slot numbers are scrambled anyway. Locate is keyed
-to the `/dev/sdX` device, backend chain:
-1. fallback: `dd if=/dev/sdX of=/dev/null bs=1M` for N seconds (READ ONLY) — the
-   activity LED flickers; nothing to switch off.
-Default blink is 5 s then auto-stop. `b2ctl locate <bay|serial|sdX> [secs]`
-resolves any identifier to the device first. `b2ctl status --locate` blinks all
-at-risk disks at once (`blink_many`). **Invariant: never construct a writing
-`dd` (`of=` is always `/dev/null`).**
+whole range of bays, and the slot numbers are scrambled anyway. `blink_disk()`
+picks the most-dedicated indicator, **perccli → ledctl → dd**, by applicability:
+
+1. **PERC PD** (`is_perc_pd`: VD member / UGood) → `hba_raid.locate(enc:slot, on)`
+   (`perccli start/stop locate`) **only**. If perccli fails, report failed — **no
+   `/dev` fallback**: a member shares `/dev/sda`, so ledctl/dd there would light
+   the whole VD (all members' bays = wrong bay).
+2. **raw disk** (own `/dev` node) → `blink(dev, …)`:
+   - **ledctl** (v0.8.7) if `shutil.which(ledctl)` (`_have_ledctl`) — the
+     backplane's dedicated locate LED via SGPIO/SES: `_ledctl(dev, on)` runs
+     `ledctl locate=<dev>` / `ledctl locate_off=<dev>`. The first `locate=` doubles
+     as a support probe; the LED is **always turned off in a `finally`**.
+   - **dd** fallback (`_blink_dd`) if ledctl is absent or can't drive the device
+     (`ledctl locate=` returned non-zero): `dd if=<dev> of=/dev/null bs=1M` for N
+     seconds (READ ONLY) — the activity LED flickers, nothing to switch off.
+
+`ledctl` needs SGPIO/SES; PERC VD members (no per-drive node) and non-VMD M.2
+NVMe won't drive it → dd fallback. Default blink is 5 s then auto-stop.
+`b2ctl locate <bay|serial|sdX> [secs]` resolves any identifier to the device
+first and prints `via {perccli|ledctl|dd}`. `b2ctl status --locate` blinks all
+at-risk disks at once (`blink_many`, still dd). **Invariants: LED-only (never a
+writing command; `dd` `of=` is always `/dev/null`); always end with the locate
+LED off.**
 
 **Pulse (v0.8.6)** — `b2ctl locate <disk> [secs] --pulse ON:OFF` (also a watch
 `[l]ocate` prompt) beats the LED in an ON/OFF rhythm for the whole duration,

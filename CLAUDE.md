@@ -158,7 +158,7 @@ tool is actually added.
 | core.py | `scan()` pipeline + `scan_one()` | composes above |
 | ui.py | `render_table/pools/details/new_disk` (reference style), `disk_label()` | — |
 | watch.py | interactive `select()` loop: hotplug detect + prompts, commands r/a/o/s/d/n/l/q | lsblk |
-| locate.py | blink LED using dd | dd |
+| locate.py | LED locate: perccli (PERC PD) / ledctl → dd (raw); timed + pulse | perccli, ledctl, dd |
 | cli.py | argparse: status/watch/locate/swap/demote/create/version | sas2ircu |
 
 ## 6. Gotchas already solved (don't regress these)

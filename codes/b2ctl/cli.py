@@ -21,7 +21,7 @@ from . import installer as _installer_mod
 from .common import need_root, run, R, Y, G, C, N
 from . import ui
 
-__version__ = "0.8.4-itmode"
+__version__ = "0.8.5-itmode"
 
 
 def _resolve_dev(target: str, disks=None):
@@ -293,12 +293,37 @@ def _install(args) -> int:
     return 0
 
 
+# Operator-editable data files that `b2ctl update` syncs into /etc/b2ctl and
+# binds via config (bundled name, /etc destination, config key).
+_MANAGED = [
+    ("bay_map.json",  _cfg_mod.STD_BAY_MAP,  "bay_map_path"),
+    ("ssd_spec.json", _cfg_mod.STD_SSD_SPEC, "ssd_spec_path"),
+]
+
+
+def _sync_resource(bundled_name: str, dest: str, force: bool) -> str:
+    """Copy a bundled data file to its /etc destination without clobbering
+    operator edits. Returns one of: created / current / customized-kept /
+    updated (backup .bak). A file that differs from the bundled copy is treated
+    as operator-customized and preserved unless force=True (then backed up)."""
+    import shutil as _shutil
+    import filecmp
+    src = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", bundled_name))
+    if not os.path.exists(dest):
+        _shutil.copy2(src, dest)
+        return "created"
+    if filecmp.cmp(src, dest, shallow=False):
+        return "current"
+    if force:
+        _shutil.copy2(dest, dest + ".bak")
+        _shutil.copy2(src, dest)
+        return "updated (backup .bak)"
+    return "customized-kept"
+
+
 def _update(args) -> int:
-    """Validate config and report tool/bay_map status."""
-    export = getattr(args, "export_bay_map", False)
-    if export and os.geteuid() != 0:
-        print(f"{R}[-] b2ctl update --export-bay-map requires root{N}")
-        return 1
+    """Validate config, then (as root) sync bay_map/ssd_spec into /etc/b2ctl."""
+    force = getattr(args, "force", False) or getattr(args, "export_bay_map", False)
 
     print(f"\n{C}[b2ctl update]{N}")
     results = _cfg_mod.validate()
@@ -309,25 +334,39 @@ def _update(args) -> int:
         icon  = _STATUS_ICON.get(status, "[?]")
         print(f"  {color}{icon}{N} {field:<12} {msg}")
 
-    if export:
-        import shutil as _shutil
-        import json as _json
-        src = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "bay_map.json"))
-        dest = "/etc/b2ctl/bay_map.json"
-        os.makedirs("/etc/b2ctl", exist_ok=True)
-        _shutil.copy2(src, dest)
-        cfg_path = _cfg_mod.CONFIG_PATH
-        try:
-            with open(cfg_path) as f:
-                cfg = _json.load(f)
-        except (OSError, _json.JSONDecodeError):
-            cfg = _cfg_mod.load()
-        cfg["bay_map_path"] = dest
-        with open(cfg_path, "w") as f:
-            _json.dump(cfg, f, indent=2)
-        print(f"\n{G}[✔] bay_map exported to {dest}{N}")
-        print(f"    config updated: bay_map_path = \"{dest}\"")
-        print(f"    Edit {dest} freely — install.sh won't overwrite it.")
+    if os.geteuid() != 0:
+        print(f"\n  {Y}[i]{N} run as root to sync {_cfg_mod.STD_DIR} "
+              f"(bay_map, ssd_spec) + bind config")
+        print()
+        return 0
+
+    if getattr(args, "export_bay_map", False):
+        print(f"\n  {Y}[i]{N} note: plain `b2ctl update` now syncs bay_map + ssd_spec")
+
+    import json as _json
+    os.makedirs(_cfg_mod.STD_DIR, exist_ok=True)
+    cfg_path = _cfg_mod.CONFIG_PATH
+    try:
+        with open(cfg_path) as f:
+            cfg = _json.load(f)
+    except (OSError, _json.JSONDecodeError):
+        cfg = _cfg_mod.load()
+
+    print(f"\n{C}[sync {_cfg_mod.STD_DIR}]{N}")
+    _SYNC_ICON = {"created": f"{G}[✔]{N}", "current": f"{G}[✔]{N}",
+                  "customized-kept": f"{Y}[i]{N}"}
+    for bundled_name, dest, key in _MANAGED:
+        state = _sync_resource(bundled_name, dest, force)
+        cfg[key] = dest  # bind to the absolute /etc path (directory-independent)
+        icon = _SYNC_ICON.get(state, f"{G}[✔]{N}")
+        note = "  (use --force to overwrite)" if state == "customized-kept" else ""
+        print(f"  {icon} {os.path.basename(dest):<14} {state}{note}  →  {dest}")
+
+    with open(cfg_path, "w") as f:
+        _json.dump(cfg, f, indent=2)
+    print(f"\n  {G}[✔]{N} config bound: bay_map_path, ssd_spec_path → {_cfg_mod.STD_DIR}")
+    print(f"      Edit those files freely — install.sh won't overwrite them; "
+          f"`b2ctl update` keeps your edits.")
     print()
     return 0
 
@@ -530,9 +569,13 @@ def build_parser() -> argparse.ArgumentParser:
     inst_p.set_defaults(func=_install)
 
     # update
-    upd_p = sub.add_parser("update", help="validate config and report tool status")
+    upd_p = sub.add_parser(
+        "update",
+        help="validate config + sync bay_map/ssd_spec to /etc/b2ctl (as root)")
+    upd_p.add_argument("--force", action="store_true",
+                       help="overwrite operator-customized files (keeps a .bak)")
     upd_p.add_argument("--export-bay-map", action="store_true",
-                       help="copy bundled bay_map.json to /etc/b2ctl/ and update config")
+                       help="(deprecated) alias of --force; plain update now syncs both files")
     upd_p.set_defaults(func=_update)
 
     # RAID-mode (PERC) actions

@@ -243,5 +243,98 @@ class TestInstallParity(unittest.TestCase):
         it.assert_not_called()
 
 
+class TestUpdateSync(unittest.TestCase):
+    """`b2ctl update` syncs bay_map/ssd_spec to /etc without clobbering edits."""
+
+    def _bundled(self, name):
+        # the real bundled files live next to the b2ctl package (codes/<name>)
+        import b2ctl.cli as cli
+        return os.path.abspath(os.path.join(os.path.dirname(cli.__file__), "..", name))
+
+    def test_sync_resource_created_when_missing(self):
+        import b2ctl.cli as cli
+        tmp = tempfile.mkdtemp()
+        dest = os.path.join(tmp, "bay_map.json")
+        state = cli._sync_resource("bay_map.json", dest, force=False)
+        assert state == "created"
+        assert os.path.exists(dest)
+
+    def test_sync_resource_current_when_identical(self):
+        import shutil
+        import b2ctl.cli as cli
+        tmp = tempfile.mkdtemp()
+        dest = os.path.join(tmp, "bay_map.json")
+        shutil.copy2(self._bundled("bay_map.json"), dest)
+        assert cli._sync_resource("bay_map.json", dest, force=False) == "current"
+
+    def test_sync_resource_customized_kept_without_force(self):
+        import b2ctl.cli as cli
+        tmp = tempfile.mkdtemp()
+        dest = os.path.join(tmp, "bay_map.json")
+        with open(dest, "w") as f:
+            f.write('{"operator": "edited"}')
+        state = cli._sync_resource("bay_map.json", dest, force=False)
+        assert state == "customized-kept"
+        with open(dest) as f:
+            assert "operator" in f.read()          # edits preserved
+        assert not os.path.exists(dest + ".bak")   # nothing backed up
+
+    def test_sync_resource_force_overwrites_with_backup(self):
+        import b2ctl.cli as cli
+        tmp = tempfile.mkdtemp()
+        dest = os.path.join(tmp, "bay_map.json")
+        with open(dest, "w") as f:
+            f.write('{"operator": "edited"}')
+        state = cli._sync_resource("bay_map.json", dest, force=True)
+        assert state.startswith("updated")
+        assert os.path.exists(dest + ".bak")       # old copy backed up
+        with open(dest + ".bak") as f:
+            assert "operator" in f.read()
+
+    def test_update_root_syncs_both_and_binds_config(self):
+        import b2ctl.cli as cli
+        import b2ctl.config as cfg_mod
+        tmp = tempfile.mkdtemp()
+        dest_bay = os.path.join(tmp, "bay_map.json")
+        dest_spec = os.path.join(tmp, "ssd_spec.json")
+        cfg_path = os.path.join(tmp, "config.json")
+        managed = [("bay_map.json", dest_bay, "bay_map_path"),
+                   ("ssd_spec.json", dest_spec, "ssd_spec_path")]
+        with patch.object(cli, "_MANAGED", managed), \
+             patch.object(cfg_mod, "CONFIG_PATH", cfg_path), \
+             patch.object(cfg_mod, "STD_DIR", tmp), \
+             patch("b2ctl.config.validate", return_value=[]), \
+             patch("os.geteuid", return_value=0):
+            args = cli.build_parser().parse_args(["update"])
+            args.func(args)
+        assert os.path.exists(dest_bay) and os.path.exists(dest_spec)
+        with open(cfg_path) as f:
+            cfg = json.load(f)
+        assert cfg["bay_map_path"] == dest_bay
+        assert cfg["ssd_spec_path"] == dest_spec
+
+    def test_update_non_root_does_not_write(self):
+        import b2ctl.cli as cli
+        import b2ctl.config as cfg_mod
+        tmp = tempfile.mkdtemp()
+        dest_bay = os.path.join(tmp, "bay_map.json")
+        cfg_path = os.path.join(tmp, "config.json")
+        managed = [("bay_map.json", dest_bay, "bay_map_path")]
+        with patch.object(cli, "_MANAGED", managed), \
+             patch.object(cfg_mod, "CONFIG_PATH", cfg_path), \
+             patch.object(cfg_mod, "STD_DIR", tmp), \
+             patch("b2ctl.config.validate", return_value=[]), \
+             patch("os.geteuid", return_value=1000):
+            args = cli.build_parser().parse_args(["update"])
+            args.func(args)
+        assert not os.path.exists(dest_bay)     # non-root skips the sync
+        assert not os.path.exists(cfg_path)
+
+    def test_update_parser_has_force(self):
+        import b2ctl.cli as cli
+        ns = cli.build_parser().parse_args(["update", "--force"])
+        assert ns.force is True
+
+
 if __name__ == "__main__":
     unittest.main()

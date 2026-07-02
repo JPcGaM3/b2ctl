@@ -504,19 +504,43 @@ error page → `[✗]`. Temp dir cleaned via `try/finally`.
 > downloads. The apt prerequisites are installed by `install_tools()` only when a
 > tool is actually being added (`--with-tools`/`--perc`/`--flash`).
 
-### §7.3 `b2ctl update` — config validation and bay_map export
+### §7.3 `b2ctl update` — config validation + resource sync
 
 ```bash
-b2ctl update                        # validate config, report tool status (no root needed)
-sudo b2ctl update --export-bay-map  # copy bundled bay_map.json to /etc/b2ctl/
+b2ctl update            # non-root: validate config + report status only
+sudo b2ctl update       # root: also sync bay_map.json + ssd_spec.json -> /etc/b2ctl/ + bind config
+sudo b2ctl update --force   # overwrite operator-customized files (saves .bak first)
 ```
 
 `b2ctl update` reads the active config and reports per-item status:
-- `[✔]` — config file parses OK, tool found, bay_map exists
-- `[i]` — warn: config missing (using defaults), tool not found, bay_map is bundled
-- `[✗]` — error: JSON parse error, bay_map file missing
+- `[✔]` — config parses OK, tool found, data file is a config override or the `/etc` standard
+- `[i]` — warn: config missing (defaults), tool not found, data file is the bundled fallback
+- `[✗]` — error: JSON parse error, data file missing
 
-`--export-bay-map`: copies `/opt/b2ctl/bay_map.json` → `/etc/b2ctl/bay_map.json` and writes `bay_map_path` into `/etc/b2ctl/config.json`. The `/etc/b2ctl/` copy is never overwritten by `install.sh`.
+**Resource sync (root only).** For each managed file `(bay_map.json, ssd_spec.json)`
+`cli._sync_resource()` compares the bundled copy with `/etc/b2ctl/<file>` via
+`filecmp.cmp(src, dest, shallow=False)`:
+- dest missing → copy → `created`
+- identical → `current` (no write)
+- differs (operator-customized) → **preserved** as `customized-kept` unless
+  `--force`, which backs up to `<file>.bak` then overwrites → `updated (backup .bak)`
+
+After syncing, it writes `bay_map_path` / `ssd_spec_path` (absolute `/etc/b2ctl/`
+paths) into `/etc/b2ctl/config.json` so resolution is directory-independent.
+`--export-bay-map` is a deprecated alias of `--force`. The `/etc/b2ctl/` copies
+are never touched by `install.sh`.
+
+**Why directory-independence needed two fixes (v0.8.5).**
+1. *Code path* — the launcher runs `python -m b2ctl`, and `python -m` prepends
+   the cwd to `sys.path[0]` ahead of `PYTHONPATH`. Running from a directory that
+   contains a `b2ctl/` package (the source checkout) silently shadowed the
+   installed `/opt/b2ctl`. The launcher now sets `PYTHONSAFEPATH=1` (Python ≥3.11)
+   so cwd is not prepended → the installed copy always wins.
+2. *Data path* — `config.bay_map_path()` / `ssd_spec_path()` resolve
+   **override > `/etc/b2ctl/<file>` > bundled `__file__`-relative**
+   (`config._resource_path`). The `__file__` fallback is cwd/copy-sensitive; the
+   `/etc` standard is absolute, so preferring it (and `b2ctl update` binding it in
+   config) makes the mapping load the same file from any directory.
 
 ---
 
@@ -528,6 +552,7 @@ sudo b2ctl update --export-bay-map  # copy bundled bay_map.json to /etc/b2ctl/
 | BAY all `-` | `sas2ircu` missing or can't execute; bays are optional (locate still works by serial/dev). If `b2ctl check` shows "binary exists but won't execute", run `apt-get install -y libc6-i386` — sas2ircu is a 32-bit ELF |
 | BAY all `-` (RAID-mode detected despite IT HBA) | crossflashed PERC H710 responds to storcli's management plane; auto-detect sees storcli and picks RaidBackend. Fix: `apt-get install libc6-i386` so sas2ircu executes, or set `controller.mode = "it"` in `/etc/b2ctl/config.json` |
 | BAY numbers wrong | edit `bay_map.json` (reverse rule or explicit map); recalibrate with `b2ctl locate <serial>` |
+| BAY mapping works in one directory but not another (raw BDF elsewhere) | pre-v0.8.5 `python -m` cwd-shadowing: running from the source checkout loaded that copy's `bay_map.json`. Fix: `sudo b2ctl update` (bind `/etc/b2ctl/bay_map.json` in config) and redeploy so the launcher has `PYTHONSAFEPATH=1` |
 | locate lights many bays | you're on old sas2ircu-slot locate; this build uses device-based locate — rebuild/redeploy |
 | POOL `-` for in-pool disk | by-id/dev mismatch — verify `zpool status -P` leaf paths resolve (`realpath`) to the same `/dev/sdX` lsblk reports |
 | END(left) `N/A` on SSD | model not in `ssd_spec.json` / no `241 Total_LBAs_Written` attr; add the rating |

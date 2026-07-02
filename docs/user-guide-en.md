@@ -742,8 +742,9 @@ ESP partition **manually**. b2ctl does not touch Proxmox boot config.
 | `sudo b2ctl install --with-tools` | download + install **both** tools (sas2ircu + perccli) |
 | `sudo b2ctl install --perc` / `--flash` | install that backend's tool + set the mode (raid/it) |
 | `sudo b2ctl install --tool sas2ircu` | install only one tool (`sas2ircu` or `perccli`) |
-| `b2ctl update` | validate config, check tool paths, report missing tools |
-| `sudo b2ctl update --export-bay-map` | copy bundled bay_map.json to /etc/b2ctl/ and update config |
+| `b2ctl update` | validate config; **as root** also sync `bay_map.json` + `ssd_spec.json` into `/etc/b2ctl/` and bind them in config (preserves files you edited) |
+| `sudo b2ctl update --force` | overwrite operator-customized `/etc/b2ctl/` files (keeps a `.bak`) |
+| `sudo b2ctl update --export-bay-map` | deprecated alias of `--force` (plain `update` now syncs both files) |
 
 ### Watch mode keys (at `b2ctl>`)
 
@@ -918,3 +919,26 @@ every bay is full, and there is **no hot spare**, `[o]ffload` it:
 > NVMe drives appear in the table and in `[a]ssign` / `[b]urnin` like any other
 > disk — only the BAY column differs (no enclosure:slot). The bay label is
 > display-only; getting it wrong is cosmetic, never dangerous.
+
+### Make your bay labels apply from every directory
+
+Edit the bay_map in the **`/etc/b2ctl/` copy** — not the one in the source
+checkout. To create/refresh it, run **`b2ctl update`** as root:
+
+```bash
+sudo b2ctl update          # creates /etc/b2ctl/bay_map.json + ssd_spec.json, binds them in config
+sudo nano /etc/b2ctl/bay_map.json   # add your NVMe serial -> bay entries
+b2ctl watch                # now maps correctly from ANY directory
+```
+
+`b2ctl update` copies the bundled `bay_map.json` and `ssd_spec.json` (the SSD
+TBW table) into `/etc/b2ctl/` and records their paths in the config, so b2ctl
+always loads the same files no matter which directory you run it from. It **will
+not overwrite files you edited** — a customized file shows `customized-kept`
+(use `sudo b2ctl update --force` to overwrite, which first saves a `.bak`).
+
+> **Why this matters:** before v0.8.5, running `b2ctl` from inside the source
+> checkout could load that copy's `bay_map.json` instead of the installed one, so
+> the mapping seemed to change with the current directory. The installer now runs
+> the installed copy regardless of directory (`PYTHONSAFEPATH`), and `b2ctl
+> update` puts the editable files in one fixed place (`/etc/b2ctl/`).

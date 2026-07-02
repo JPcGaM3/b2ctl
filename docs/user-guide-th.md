@@ -702,8 +702,9 @@ b2ctl rollback 20260617-143022-replace
 | `sudo b2ctl install --with-tools` | ดาวน์โหลด + ติดตั้ง sas2ircu **และ** perccli จาก Google Drive |
 | `sudo b2ctl install --perc` / `--flash` | ลง tool ของ backend นั้น + ตั้ง mode (raid/it) |
 | `sudo b2ctl install --tool sas2ircu` | ติดตั้งเฉพาะ tool ที่ระบุ (`sas2ircu` หรือ `perccli`) |
-| `b2ctl update` | ตรวจสอบ config และ tool ทั้งหมด แสดงสถานะ |
-| `sudo b2ctl update --export-bay-map` | คัดลอก bay_map.json ไปยัง /etc/b2ctl/ เพื่อแก้ไขได้อิสระ |
+| `b2ctl update` | ตรวจ config; **ถ้าเป็น root** จะ sync `bay_map.json` + `ssd_spec.json` ไปที่ `/etc/b2ctl/` และผูกใน config (ไฟล์ที่แก้เองไม่ถูกทับ) |
+| `sudo b2ctl update --force` | เขียนทับไฟล์ `/etc/b2ctl/` ที่ผู้ใช้แก้ (สำรอง `.bak` ให้ก่อน) |
+| `sudo b2ctl update --export-bay-map` | (เลิกใช้) alias ของ `--force` — ตอนนี้ `update` เฉยๆ sync ทั้งสองไฟล์แล้ว |
 
 ### คำสั่งในโหมด watch (พิมพ์ที่ `b2ctl>`)
 
@@ -873,3 +874,24 @@ raidz1 (และ mirror) ยังทำงานได้แม้ดิสก
 
 > NVMe ขึ้นในตารางและใช้ `[a]ssign` / `[b]urnin` ได้เหมือน disk อื่นทุกอย่าง —
 > ต่างแค่คอลัมน์ BAY (ไม่มี enc:slot) ป้าย bay เป็นแค่ชื่อแสดงผล ตั้งผิดก็ไม่อันตราย
+
+### ให้ป้าย bay ใช้ได้จากทุก directory
+
+แก้ bay_map ที่ **copy ใน `/etc/b2ctl/`** — ไม่ใช่ตัวใน source checkout สร้าง/รีเฟรช
+ด้วย **`b2ctl update`** (เป็น root):
+
+```bash
+sudo b2ctl update          # สร้าง /etc/b2ctl/bay_map.json + ssd_spec.json + ผูกใน config
+sudo nano /etc/b2ctl/bay_map.json   # ใส่ entry serial NVMe -> bay
+b2ctl watch                # map ถูกต้องจากทุก directory แล้ว
+```
+
+`b2ctl update` คัดลอก `bay_map.json` และ `ssd_spec.json` (ตาราง TBW ของ SSD) ที่
+bundle มา ไปที่ `/etc/b2ctl/` และบันทึก path ลง config ดังนั้น b2ctl โหลดไฟล์เดียวกัน
+เสมอไม่ว่ารันจาก directory ไหน และ **จะไม่ทับไฟล์ที่คุณแก้เอง** — ไฟล์ที่แก้แล้วจะขึ้น
+`customized-kept` (ถ้าอยากทับใช้ `sudo b2ctl update --force` ซึ่งสำรอง `.bak` ให้ก่อน)
+
+> **ทำไมสำคัญ:** ก่อน v0.8.5 การรัน `b2ctl` จากใน source checkout อาจโหลด
+> `bay_map.json` ของ copy นั้นแทนตัวที่ติดตั้งไว้ ทำให้ mapping เหมือนเปลี่ยนตาม
+> directory ปัจจุบัน ตอนนี้ launcher รัน copy ที่ติดตั้งเสมอ (`PYTHONSAFEPATH`) และ
+> `b2ctl update` วางไฟล์ที่แก้ได้ไว้ที่เดียว (`/etc/b2ctl/`)

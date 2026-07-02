@@ -12,6 +12,23 @@
 > - `b2ctl locate <serial>` → exactly one bay's LED/activity blinks ~5s.
 > - If a bay number is still off, edit `bay_map.json` (reverse rule or explicit map).
 
+## FIX — bay_map/ssd_spec directory-independence + `b2ctl update` sync [DONE, v0.8.5-itmode]
+
+Symptom (real box): NVMe bays mapped only when `b2ctl` ran from the source
+checkout dir; raw BDF elsewhere. Root cause: `python -m b2ctl` prepends cwd to
+`sys.path`, so the checkout's `b2ctl/` package shadowed the installed `/opt/b2ctl`
+(the two copies ship different `bay_map.json`).
+- install.sh launcher: `PYTHONSAFEPATH=1` → cwd not on `sys.path`; installed copy
+  always wins (code path).
+- config.py: `_resource_path` = override > `/etc/b2ctl/<file>` > bundled; added
+  `ssd_spec_path()` (+ `ssd_spec_path` config key); `validate()` reports both files.
+- spec.py: `load()` resolves via `config.ssd_spec_path()`.
+- cli.py: plain `b2ctl update` (root) syncs `bay_map.json`+`ssd_spec.json` into
+  `/etc/b2ctl/` via `filecmp` (created/current/customized-kept), binds both paths
+  in config; `--force` overwrites customized files (keeps `.bak`);
+  `--export-bay-map` = deprecated alias.
+- +13 tests (279 pass); docs (user-guide en/th, devops §7.3 + troubleshooting).
+
 ## FIX — install-command parity [DONE, v0.8.3-itmode]
 
 `./install.sh` and `b2ctl install` now share one contract (no-flag = b2ctl only /

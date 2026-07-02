@@ -26,6 +26,7 @@ _DEFAULTS: dict = {
         "perccli": "",
         "perccli64": "",
         "smartctl": "",
+        "ledctl": "",
         "lsblk": "",
         "zpool": "",
         "wipefs": "",
@@ -187,6 +188,13 @@ def validate() -> list[tuple[str, str, str]]:
             hint = (f"run: b2ctl install --tool {name}"
                     if name in ("sas2ircu", "perccli") else "install via apt")
             results.append((name, "warn", f"not found  →  {hint}"))
+
+    # ledctl — optional: enables the dedicated locate LED (else dd fallback)
+    if shutil.which(tool("ledctl")):
+        results.append(("ledctl", "ok", tool("ledctl")))
+    else:
+        results.append(("ledctl", "warn",
+                        "not found  →  locate uses dd fallback (apt install ledmon)"))
 
     # data files: config override or /etc standard = ok; bundled fallback = warn
     for label, resolved, override_key in (

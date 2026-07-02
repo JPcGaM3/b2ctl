@@ -1,14 +1,18 @@
 """b2ctl.locate — find a physical disk by its LED, addressed by DEVICE.
 
 The Dell-12G-on-LSI-IT-mode backplane reports scrambled slot numbers, and
-``sas2ircu ... LOCATE <slot>`` lights a whole range of bays instead of one. So
-we never address the LED by slot. We use dd activity read: a universal fallback
-where a few seconds of sequential READ makes the bay's activity LED flicker.
-READ ONLY (if=dev of=/dev/null).
+``sas2ircu ... LOCATE <slot>`` lights a whole range of bays instead of one, so we
+never address the LED by slot. Backend chain, most-dedicated first:
+  * PERC VD member / UGood (`is_perc_pd`) -> perccli `start/stop locate` by
+    enc:slot ONLY. No /dev-based fallback: a member shares /dev/sda, so ledctl/dd
+    there would light the whole VD (wrong bay).
+  * raw disk (own /dev node)              -> ledctl (SGPIO/SES dedicated locate
+    LED) if installed, else dd activity read (READ ONLY, if=dev of=/dev/null).
 
-Default blink is ~5 seconds, then it stops on its own. An optional pulse
-(on/off seconds) makes the LED beat in a distinct rhythm — easier to spot than a
-steady read — for the whole duration.
+`ledctl locate` is an SES *identify blink*, not a solid LED — no tool makes a
+healthy drive's LED solid or dark; it only toggles the locate indicator on/off.
+Default blink is ~5 seconds, then it stops. An optional pulse (on/off seconds)
+beats the LED in a distinct rhythm for the whole duration.
 """
 
 from __future__ import annotations
@@ -16,6 +20,7 @@ import subprocess
 import time
 
 from .common import run_check
+from . import config as _cfg
 
 DEFAULT_SECONDS = 5
 _DEVNULL = subprocess.DEVNULL
@@ -47,18 +52,54 @@ def _dd_read(dev: str, seconds: int) -> None:
         pass  # expected: we ran for the full duration then stopped
 
 
-def blink(dev: str, seconds: int = DEFAULT_SECONDS,
-          on: float = 0, off: float = 0) -> tuple[bool, str]:
-    """Blink one disk for `seconds`, then stop. Returns (ok, method).
+def _ledctl(dev: str, on: bool) -> tuple[bool, str]:
+    """Toggle the dedicated locate LED via ledctl (SGPIO/SES). LED-only, safe."""
+    verb = "locate" if on else "locate_off"
+    return run_check([_cfg.tool("ledctl"), f"{verb}={dev}"])
 
-    on>0 and off>0 pulse the activity LED (on seconds of read, off seconds idle);
-    otherwise a single steady read for the whole duration.
-    """
+
+def _have_ledctl() -> bool:
+    import shutil
+    return shutil.which(_cfg.tool("ledctl")) is not None
+
+
+def _blink_dd(dev: str, seconds: int, on: float, off: float) -> None:
+    """dd activity-LED locate (fallback). on/off -> pulse of read/idle."""
     if on > 0 and off > 0:
-        _pulse(seconds, on, off,
-               lambda d: _dd_read(dev, d), time.sleep)
+        _pulse(seconds, on, off, lambda d: _dd_read(dev, d), time.sleep)
     else:
         _dd_read(dev, seconds)
+
+
+def blink(dev: str, seconds: int = DEFAULT_SECONDS,
+          on: float = 0, off: float = 0) -> tuple[bool, str]:
+    """Blink one raw disk for `seconds`, then stop. Returns (ok, method).
+
+    Prefers ledctl (dedicated locate LED, clean on/off) and falls back to the dd
+    activity read when ledctl is absent or cannot drive the device. on>0 and off>0
+    pulse the LED (on seconds lit, off seconds dark); else steady on for the
+    duration. The LED is ALWAYS left off at the end.
+    """
+    if _have_ledctl():
+        ok, _ = _ledctl(dev, True)          # probe + would-be first "on"
+        if ok:
+            try:
+                if on > 0 and off > 0:
+                    _ledctl(dev, False)     # reset; _pulse drives clean cycles
+
+                    def _active(d):
+                        _ledctl(dev, True)
+                        time.sleep(d)
+                        _ledctl(dev, False)
+
+                    _pulse(seconds, on, off, _active, time.sleep)
+                else:
+                    time.sleep(seconds)     # LED already on from the probe
+            finally:
+                _ledctl(dev, False)         # ALWAYS leave it off
+            return True, "ledctl"
+        # ledctl present but couldn't drive this dev -> safe fallback
+    _blink_dd(dev, seconds, on, off)
     return True, "dd"
 
 

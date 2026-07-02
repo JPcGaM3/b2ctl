@@ -21,7 +21,7 @@ from . import installer as _installer_mod
 from .common import need_root, run, R, Y, G, C, N
 from . import ui
 
-__version__ = "0.8.6-itmode"
+__version__ = "0.8.7-itmode"
 
 
 def _resolve_dev(target: str, disks=None):
@@ -489,7 +489,8 @@ def build_parser() -> argparse.ArgumentParser:
     w = sub.add_parser("watch", help="interactive hotplug-aware loop")
     w.set_defaults(func=_watch)
 
-    lo = sub.add_parser("locate", help="blink ONE disk's LED (by bay/serial/dev)")
+    lo = sub.add_parser("locate",
+                        help="blink ONE disk's LED (perccli / ledctl, else dd)")
     lo.add_argument("target", help="bay label (1:4), serial, sdX, or /dev/sdX")
     lo.add_argument("seconds", nargs="?", type=int,
                     default=locatemod.DEFAULT_SECONDS,

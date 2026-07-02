@@ -394,9 +394,21 @@ def _cmd_locate(tbw) -> None:
     if chosen.dev == "-":
         print(f"{R}  cannot locate a GHOST disk (OS rejected it, no /dev node){N}")
         return
+    on = off = 0.0
+    pulse = _ask("  pulse ON:OFF seconds (blank = steady)> ")
+    if pulse:
+        try:
+            on_s, _, off_s = pulse.partition(":")
+            on, off = float(on_s), float(off_s)
+            if on <= 0 or off <= 0:
+                raise ValueError
+        except ValueError:
+            print(f"{Y}  bad pulse '{pulse}' — using steady{N}")
+            on = off = 0.0
     where = f"bay {chosen.bay}" if locate.is_perc_pd(chosen) else chosen.dev
-    print(f"{Y}  blinking {where} for {locate.DEFAULT_SECONDS}s ...{N}")
-    ok, method = locate.blink_disk(chosen)
+    rhythm = f" pulse {on:g}s/{off:g}s" if on and off else ""
+    print(f"{Y}  blinking {where} for {locate.DEFAULT_SECONDS}s{rhythm} ...{N}")
+    ok, method = locate.blink_disk(chosen, locate.DEFAULT_SECONDS, on, off)
     print((G + f"  ✔ done (via {method})" if ok else R + "  ✗ failed") + N)
 
 

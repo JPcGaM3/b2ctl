@@ -336,5 +336,45 @@ class TestUpdateSync(unittest.TestCase):
         assert ns.force is True
 
 
+class TestLocatePulse(unittest.TestCase):
+    """`b2ctl locate --pulse ON:OFF` parsing + wiring."""
+
+    def test_parse_pulse_ok(self):
+        import b2ctl.cli as cli
+        assert cli._parse_pulse("2:2") == (2.0, 2.0)
+        assert cli._parse_pulse("1.5:3") == (1.5, 3.0)
+
+    def test_parse_pulse_rejects_zero_and_garbage(self):
+        import b2ctl.cli as cli
+        for bad in ("0:2", "2:0", "abc", "2", ":2"):
+            with self.assertRaises(ValueError):
+                cli._parse_pulse(bad)
+
+    def test_parser_accepts_pulse_and_seconds(self):
+        import b2ctl.cli as cli
+        ns = cli.build_parser().parse_args(["locate", "1:4", "8", "--pulse", "2:2"])
+        assert ns.pulse == "2:2" and ns.seconds == 8
+
+    def test_locate_bad_pulse_returns_1_without_scanning(self):
+        import b2ctl.cli as cli
+        with patch("b2ctl.core.scan") as sc:
+            ns = cli.build_parser().parse_args(["locate", "sda", "--pulse", "bad"])
+            rc = ns.func(ns)
+        assert rc == 1
+        sc.assert_not_called()
+
+    def test_locate_pulse_threads_on_off_to_blink_disk(self):
+        import b2ctl.cli as cli
+        from b2ctl.common import Disk
+        d = Disk(dev="/dev/nvme0n1")
+        d.serial = "S1"
+        with patch("b2ctl.core.scan", return_value=[d]), \
+             patch("b2ctl.locate.blink_disk", return_value=(True, "dd")) as bd:
+            ns = cli.build_parser().parse_args(["locate", "S1", "6", "--pulse", "2:2"])
+            rc = ns.func(ns)
+        assert rc == 0
+        bd.assert_called_once_with(d, 6, 2.0, 2.0)
+
+
 if __name__ == "__main__":
     unittest.main()

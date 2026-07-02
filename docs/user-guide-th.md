@@ -694,7 +694,7 @@ b2ctl rollback 20260617-143022-replace
 | `sudo b2ctl watch` | ⭐ เข้าโหมดเฝ้าดู (แนะนำ) |
 | `sudo b2ctl --dry-run watch` | เข้าโหมดเฝ้าดูแบบ dry-run (ไม่เปลี่ยนแปลงจริง) |
 | `sudo b2ctl locate <bay/serial/sdX>` | กะพริบไฟดิสก์ตัวนั้น |
-| `sudo b2ctl locate <disk> [วิ] --pulse 2:2` | กะพริบเป็นจังหวะ (ติด 2 วิ / ดับ 2 วิ) ตลอดเวลา — หาง่ายกว่า |
+| `sudo b2ctl locate <disk> 20 --pulse 2:2` | กะพริบเป็นจังหวะ (ติด 2 วิ / ดับ 2 วิ) — ต้องตั้ง **duration หลายรอบ** (เช่น 20 วิ) ถึงจะเห็นจังหวะ; 5 วิ สั้นไปเห็นแค่รอบเดียว |
 | `sudo b2ctl log` | ดู 20 operation ล่าสุดจาก audit trail |
 | `sudo b2ctl log --last N` | ดู N operation ล่าสุด |
 | `sudo b2ctl rollback <op_id>` | ย้อนกลับ operation ก่อนหน้า (พร้อม confirm) |

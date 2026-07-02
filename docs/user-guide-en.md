@@ -727,7 +727,7 @@ ESP partition **manually**. b2ctl does not touch Proxmox boot config.
 | `b2ctl status --json` | JSON output |
 | `b2ctl --dry-run <cmd>` | preview what commands would run — no writes |
 | `b2ctl locate <bay\|serial\|dev> [secs]` | blink one disk's LED (~5s) |
-| `b2ctl locate <disk> [secs] --pulse 2:2` | pulse the LED (2s on / 2s off) for the duration — easier to spot |
+| `b2ctl locate <disk> 20 --pulse 2:2` | pulse the LED (2s on / 2s off) — give it a **duration of several cycles** (e.g. 20s) to see the rhythm; a short 5s barely shows one beat |
 | `b2ctl offload` | guided: safely remove an in-pool disk |
 | `b2ctl replace` | guided: replace a disk onto a spare |
 | `b2ctl swap` | guided: swap a worn disk onto an existing spare |

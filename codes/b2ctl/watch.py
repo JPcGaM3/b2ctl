@@ -405,10 +405,21 @@ def _cmd_locate(tbw) -> None:
         except ValueError:
             print(f"{Y}  bad pulse '{pulse}' — using steady{N}")
             on = off = 0.0
+    # pulse repeats within the total duration, so it needs several cycles of room;
+    # default longer when pulsing (5s can't show even one on+off).
+    default_secs = max(int((on + off) * 4), locate.DEFAULT_SECONDS) if on and off \
+        else locate.DEFAULT_SECONDS
+    secs = default_secs
+    dur = _ask(f"  duration seconds (blank = {default_secs})> ")
+    if dur:
+        try:
+            secs = max(1, int(dur))
+        except ValueError:
+            print(f"{Y}  bad duration '{dur}' — using {default_secs}s{N}")
     where = f"bay {chosen.bay}" if locate.is_perc_pd(chosen) else chosen.dev
     rhythm = f" pulse {on:g}s/{off:g}s" if on and off else ""
-    print(f"{Y}  blinking {where} for {locate.DEFAULT_SECONDS}s{rhythm} ...{N}")
-    ok, method = locate.blink_disk(chosen, locate.DEFAULT_SECONDS, on, off)
+    print(f"{Y}  blinking {where} for {secs}s{rhythm} ...{N}")
+    ok, method = locate.blink_disk(chosen, secs, on, off)
     print((G + f"  ✔ done (via {method})" if ok else R + "  ✗ failed") + N)
 
 

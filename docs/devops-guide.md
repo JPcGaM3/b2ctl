@@ -218,7 +218,12 @@ alternates `active(dur)`/`idle(dur)` (durations clamped so it never overruns
   (activity LED flickers), `idle` = `time.sleep` (dark). Still read-only.
 - **perccli path** (PERC PDs): `active` = `hba_raid.locate(bay, True)` … `sleep`
   … `locate(bay, False)` on the dedicated locate LED; `idle` = dark.
-`ON`/`OFF` must both be > 0 (`cli._parse_pulse`), else steady behavior.
+`ON`/`OFF` must both be > 0 (`cli._parse_pulse`), else steady behavior. The
+pulse **repeats inside the total duration**, so the duration must span several
+cycles — a 5s total with `2:2` shows barely one beat. The CLI takes the total as
+the positional `secs`; the watch `[l]ocate` prompt asks for it and defaults to
+`max((on+off)*4, 5)` when pulsing. On perccli the firmware drives the LED and
+`start/stop locate` has ~1s latency, so favour larger `on`/`off` there.
 
 ---
 

@@ -209,6 +209,17 @@ resolves any identifier to the device first. `b2ctl status --locate` blinks all
 at-risk disks at once (`blink_many`). **Invariant: never construct a writing
 `dd` (`of=` is always `/dev/null`).**
 
+**Pulse (v0.8.6)** — `b2ctl locate <disk> [secs] --pulse ON:OFF` (also a watch
+`[l]ocate` prompt) beats the LED in an ON/OFF rhythm for the whole duration,
+easier to spot than a steady read. `locate._pulse(total, on, off, active, idle)`
+alternates `active(dur)`/`idle(dur)` (durations clamped so it never overruns
+`total`). Per method:
+- **dd path** (raw SATA/SAS/NVMe): no dedicated LED — `active` = a read burst
+  (activity LED flickers), `idle` = `time.sleep` (dark). Still read-only.
+- **perccli path** (PERC PDs): `active` = `hba_raid.locate(bay, True)` … `sleep`
+  … `locate(bay, False)` on the dedicated locate LED; `idle` = dark.
+`ON`/`OFF` must both be > 0 (`cli._parse_pulse`), else steady behavior.
+
 ---
 
 ## 4. The scan pipeline (`core.scan()`)

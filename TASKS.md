@@ -12,6 +12,17 @@
 > - `b2ctl locate <serial>` → exactly one bay's LED/activity blinks ~5s.
 > - If a bay number is still off, edit `bay_map.json` (reverse rule or explicit map).
 
+## FEATURE — locate LED pulse (on/off rhythm) [DONE, v0.8.6-itmode]
+
+`b2ctl locate <disk> [secs] --pulse ON:OFF` (+ watch `[l]ocate` pulse prompt)
+beats the LED ON:OFF seconds for the duration — easier to spot than a steady read.
+- locate.py: `_pulse(total, on, off, active, idle)` generic driver (clamped to
+  total); `blink`/`blink_disk` take `on`/`off` — dd path = read-burst/idle,
+  perccli path = dedicated locate LED on/off. Steady behavior unchanged when
+  on/off = 0.
+- cli.py: `--pulse` arg + `_parse_pulse` (ON/OFF > 0). Version → 0.8.6-itmode.
+- +10 tests (289 pass); docs (user-guide en/th, devops §3.7).
+
 ## FIX — bay_map/ssd_spec directory-independence + `b2ctl update` sync [DONE, v0.8.5-itmode]
 
 Symptom (real box): NVMe bays mapped only when `b2ctl` ran from the source

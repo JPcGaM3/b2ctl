@@ -83,6 +83,15 @@ def read(d: Disk, tbw_table: dict) -> None:
 
     _endurance(d, tbw_table)
 
+    # Surface a running burn-in self-test in the status table, reusing THIS -a
+    # output — no extra subprocess (parse_selftest is pure). See burnin.py.
+    from . import burnin, ui
+    stt = burnin.parse_selftest(out)
+    if stt["running"]:
+        d.selftest_running = True
+        d.selftest_pct = stt["pct"]
+        d.selftest_eta = ui.fmt_eta(stt["eta_min"])
+
 
 def _parse_ata(d: Disk, out: str) -> None:
     d.iface = d.iface or "SATA"

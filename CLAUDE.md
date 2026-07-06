@@ -53,6 +53,19 @@ read-only `badblocks -sv`, never `-w`) → `assess()` PASS/WARN(POH>40000 / grow
 defects)/FAIL(uncorrected / self-test error). All honor `--dry-run`. These map to
 the R740XD hosting runbook STEP 02–03.
 
+**Multi-disk background burn-in (v0.10.0, ADR-002):** burn-in is now **multi-select
+and non-blocking**. `watch [b]` / `b2ctl burnin <dev …>` take several disks
+(space-separated, like pool-create), start `smartctl -t long` on each (firmware) +
+optional **detached** `badblocks -sv` (`Popen`, `start_new_session`) on each; a
+`live_view` redraws per-disk self-test + scan bars + ETA (self-test ETA from the
+`-a` recommended-polling-time × remaining%; scan ETA from elapsed). **Ctrl-C leaves
+everything running**; re-attach via `b2ctl burnin --status` (state = `burnin.json`
+under `safety.LOG_DIR`, so sim redirects it). `smart.read` fills new `Disk`
+`selftest_*` fields from the SAME `-a` (zero extra subprocess) → `status` STATUS
+cell shows `TEST xx%`. Re-entrant (never restarts a running test). Retired blocking
+`_wait_selftest`/`read_scan`. NOTE: `burnin` now exits 0 once *started* — verdict
+is shown in the live view/`--status`, not the exit code.
+
 **Spare-less offload:** `[o]ffload` with no AVAIL spare on a redundant vdev does
 a guarded `zpool offline` (pool → DEGRADED, gated by `zfs.can_offline`), then
 replaces a new disk inserted in the same bay (`zpool replace` + resilver). Refuses

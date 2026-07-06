@@ -187,16 +187,35 @@ honor `--dry-run`. CLI: `b2ctl cache-add|cache-rm|log-add|log-rm <pool> <dev…>
 watch: `[e]xtend`.
 
 ### 3.6a Disk burn-in — `burnin.py` (runbook STEP 02, read-only vetting)
-| step | command |
-|------|---------|
-| start self-test | `smartctl -t long\|short <dev>` (`start_selftest`) |
-| poll progress | `smartctl -a <dev>` parsed for `% of test remaining` / `Completed without error` (`selftest_status`) |
-| surface scan (opt) | `badblocks -sv -b 4096 <dev>` — **read-only, never `-w`** (`read_scan`) |
-| verdict | `assess(disk)` → FAIL (uncorrected>0 / self-test error), WARN (POH>40000 / grown defects), else PASS |
 
-CLI `b2ctl burnin <bay\|dev> [--scan] [--short]`; watch `[b]urnin`. Only spare/new
-disks (`in_pool` is refused). The only writes are the self-test trigger and a
-read-only `badblocks`; nothing on the disk is modified.
+**Multi-disk & non-blocking (v0.10.0).** `run_multi(targets, …)` vets several disks
+at once and returns to the prompt while they run; a state file makes it
+re-attachable. See **ADR-002** for the background-process/state-file architecture.
+
+| step | command / mechanism |
+|------|---------|
+| start self-test | `smartctl -t long\|short [-d <dtype>] <dev>` (`start_selftest`) — runs on the drive firmware, returns immediately |
+| start surface scan (opt) | `subprocess.Popen(["badblocks","-sv","-b","4096",<dev>], stderr=<logfile>, start_new_session=True)` — **read-only, never `-w`**, detached (`start_scan`) |
+| self-test progress | `smartctl -a <dev>` → `parse_selftest()` reads `% of test remaining` (ATA) / `% complete` (SAS); ETA = `Extended self-test routine recommended polling time: (N) minutes` × remaining% (`_selftest_eta_min`, ATA only) |
+| scan progress | tail the badblocks logfile for the last `NN% done` (`_parse_badblocks_log`); liveness via `os.kill(pid,0)` + `waitpid(WNOHANG)` reaping (`_pid_alive`); ETA computed from our own elapsed time (`scan_progress`) |
+| live view | `live_view()` redraws `ui.render_burnin_view()` every ~2.5 s (ANSI cursor-up + clear). **Ctrl-C detaches** (saves state, keeps running); it does NOT abort |
+| verdict | on completion `_finish()` re-reads SMART (`core.scan_one`) + `assess(disk)` → FAIL (uncorrected>0 / self-test error), WARN (POH>40000 / grown defects / surface-scan bad blocks), else PASS |
+
+- **State file:** `os.path.join(safety.LOG_DIR, "burnin.json")` (records keyed by
+  serial: dev/bay/dtype/kind/do_scan/scan_pid/scan_log/started), plus per-disk
+  `scan-<serial>.log`. Path is read at call time so the sim's `safety.LOG_DIR`
+  monkeypatch redirects it to `sim/var/` (`save_state`/`load_state`).
+- **Re-entrancy:** `run_multi` polls `selftest_status` first and **never restarts**
+  a disk already under a self-test; `_finish` prunes completed records from state.
+- **Exit code note:** because the run is backgrounded, `b2ctl burnin <disk>` exits
+  `0` once the tests are *started* — the PASS/WARN/FAIL verdict is shown later in
+  the live view / `--status`, not encoded in the exit code (the old single-disk
+  synchronous FAIL→exit-1 is gone).
+
+CLI `b2ctl burnin <bay\|dev> [<bay\|dev> …] [--scan] [--short]` and
+`b2ctl burnin --status` (re-attach); watch `[b]urnin` (space-separated
+multi-select). Only spare/new disks (`in_pool` is refused). The only writes are
+the self-test trigger and a read-only `badblocks`; nothing on the disk is modified.
 
 ### 3.7 LED locate — `locate.py`
 `sas2ircu ... LOCATE <slot>` is **not used** — on this backplane it lights a

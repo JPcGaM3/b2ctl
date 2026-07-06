@@ -14,6 +14,14 @@ def fmt_poh(poh) -> str:
     return "N/A" if poh is None else f"{poh}h(~{poh/8766:.1f}y)"
 
 
+def fmt_eta(minutes) -> str:
+    """Compact remaining-time label: '~8m', '~1h10m', '' when unknown."""
+    if minutes is None:
+        return ""
+    m = max(0, int(minutes))
+    return f"~{m}m" if m < 60 else f"~{m // 60}h{m % 60:02d}m"
+
+
 def disk_label(d) -> str:
     """Human-readable one-line id for prompts: (bay) model (serial)."""
     return f"({d.bay or '?'}) {d.model or '?'} ({d.serial or 'N/A'})"
@@ -52,6 +60,9 @@ def _status_cell(d: Disk) -> str:
         if d.vdev_state in ("FAULTED", "REMOVED", "UNAVAIL", "OFFLINE"):
             return R + raw + N
         return raw
+    # Free disk running a burn-in self-test -> show TEST xx% in the blank cell.
+    if d.selftest_running and d.selftest_pct is not None:
+        return Y + f"{('TEST ' + str(d.selftest_pct) + '%')[:10]:<10}" + N
     return f"{'':10}"
 
 
@@ -150,6 +161,9 @@ def render_details(disks: list[Disk], pools: list[dict] | None = None) -> str:
         for d in config:
             out.append(f"{C}- bay {d.bay or '?'} {d.dev} "
                        f"({d.model or '?'}, SN {d.serial or 'N/A'}) [CONFIG]{N}")
+            if d.selftest_running and d.selftest_pct is not None:
+                eta = f", {d.selftest_eta} remaining" if d.selftest_eta else ""
+                out.append(f"    - self-test running: {d.selftest_pct}% complete{eta}")
             for r in d.reasons:
                 out.append(f"    - {r}")
 
@@ -185,3 +199,39 @@ def render_new_disk(d: Disk) -> str:
             f"  bay    : {d.bay or '?'}   size {size}   {d.iface or '?'}"
             f"   {'SSD' if d.is_ssd else 'HDD'}\n"
             f"  health : {d.health}   wear {wear}   endurance {end}")
+
+
+# --------------------------------------------------------------------------- #
+# Burn-in live progress (multi-disk: self-test + surface-scan bars + ETA)
+# --------------------------------------------------------------------------- #
+def _bar(pct, width: int = 14) -> str:
+    if pct is None:
+        return "[" + "-" * width + "]"
+    filled = max(0, min(width, int(round(pct / 100.0 * width))))
+    return "[" + "#" * filled + "-" * (width - filled) + "]"
+
+
+def _progress_cell(running: bool, pct, eta_min, done: bool, *, na: bool = False,
+                   bad: int = 0) -> str:
+    """One 'test' column: a bar+%+ETA while running, else a terminal label."""
+    if na:
+        return "n/a"
+    if running:
+        return f"{_bar(pct)} {(pct if pct is not None else 0):>3}%  {fmt_eta(eta_min):<7}"
+    if pct is not None or done:
+        return f"done ({bad} bad)" if bad else "done"
+    return "-"
+
+
+def render_burnin_row(row: dict) -> str:
+    dev = row["dev"].replace("/dev/", "")
+    st = _progress_cell(row["st_running"], row["st_pct"], row["st_eta"], row["done"])
+    sc = _progress_cell(row["sc_running"], row["sc_pct"], row["sc_eta"], row["done"],
+                        na=not row["do_scan"], bad=row.get("sc_bad") or 0)
+    return f" {(row.get('bay') or '?'):<8}{dev:<10}{st:<30}{sc}"
+
+
+def render_burnin_view(rows: list[dict]) -> str:
+    """Header + one row per disk (line count = 1 + len(rows), for the redraw)."""
+    hdr = f" {'BAY':<8}{'DISK':<10}{'SELF-TEST':<30}SURFACE SCAN (badblocks)"
+    return "\n".join([hdr] + [render_burnin_row(r) for r in rows])

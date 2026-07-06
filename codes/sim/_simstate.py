@@ -186,6 +186,24 @@ def resilver_pct(res) -> int:
     return int(res.get("pct", 0))
 
 
+def selftest_seed() -> dict:
+    """A wall-clock self-test record for a sim disk (mirrors resilver_seed).
+    Override the duration with B2CTL_SIM_SELFTEST_SECS (default 20)."""
+    try:
+        secs = float(os.environ.get("B2CTL_SIM_SELFTEST_SECS", "20"))
+    except ValueError:
+        secs = 20.0
+    return {"start": time.time(), "secs": secs}
+
+
+def selftest_pct(st) -> int:
+    """Percent COMPLETE of a self-test record, derived from wall-clock."""
+    if not st or "start" not in st:
+        return 100
+    secs = st.get("secs") or 1
+    return min(100, int(100 * (time.time() - st["start"]) / secs))
+
+
 def raid_pds(state: dict) -> list:
     """PERC-visible physical drives for RAID mode (F-115).
 

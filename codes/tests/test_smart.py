@@ -123,6 +123,37 @@ ID# ATTRIBUTE_NAME          FLAG     VALUE WORST THRESH TYPE      UPDATED  WHEN_
         self.assertEqual(d.lba_written, 123456789)
         self.assertEqual(d.realloc, 0)
         self.assertEqual(d.uncorr, 0)
+        self.assertFalse(d.selftest_running)     # no test in progress in this dump
+
+    @patch('b2ctl.smart.run')
+    def test_smartctl_populates_running_selftest(self, mock_run):
+        # A self-test in progress + the two-line recommended polling time -> the
+        # status table's TEST% / ETA fields, from the SAME -a output (no 2nd call).
+        mock_run.return_value = """=== START OF INFORMATION SECTION ===
+Device Model:     Samsung SSD 870 EVO 1TB
+Serial Number:    S74ZNS0W582280E
+Rotation Rate:    Solid State Device
+
+=== START OF READ SMART DATA SECTION ===
+SMART overall-health self-assessment test result: PASSED
+
+Extended self-test routine
+recommended polling time: 	(  90) minutes.
+
+Self-test execution status:      ( 249) Self-test routine in progress...
+                                        40% of test remaining.
+
+Vendor Specific SMART Attributes with Thresholds:
+ID# ATTRIBUTE_NAME          FLAG     VALUE WORST THRESH TYPE      UPDATED  WHEN_FAILED RAW_VALUE
+  5 Reallocated_Sector_Ct   0x0033   100   100   010    Pre-fail  Always       -       0
+  9 Power_On_Hours          0x0032   099   099   000    Old_age   Always       -       1234
+241 Total_LBAs_Written      0x0032   099   099   000    Old_age   Always       -       123456789
+"""
+        d = Disk(dev="/dev/sda")
+        smart.read(d, {})
+        self.assertTrue(d.selftest_running)
+        self.assertEqual(d.selftest_pct, 60)     # 100 - 40 remaining
+        self.assertEqual(d.selftest_eta, "~36m") # 90 * 40/100 = 36
 
 
 class TestSasHealthFailure(unittest.TestCase):

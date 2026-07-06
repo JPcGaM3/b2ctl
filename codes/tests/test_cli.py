@@ -123,16 +123,16 @@ class TestRaidCommands(unittest.TestCase):
     def test_create_vd_honors_dry_run(self):
         # --dry-run / [t]oggle must reach the perccli wrapper (no real mutation).
         import b2ctl.raid_actions as ra
-        import b2ctl.watch as watch
-        watch._DRY_RUN = True
+        import b2ctl.common as common
+        common.set_dry_run(True)
         try:
             with patch("b2ctl.raid_actions._require_raid", return_value=True), \
                  patch("builtins.input", side_effect=["y", "y"]), \
                  patch("b2ctl.hba_raid.add_vd", return_value=(True, "")) as add_mock:
                 ra.create_vd("raid1", ["32:0", "32:1"])
-            add_mock.assert_called_once_with("raid1", ["32:0", "32:1"], dry_run=True)
+            add_mock.assert_called_once_with("raid1", ["32:0", "32:1"], 0, dry_run=True)
         finally:
-            watch._DRY_RUN = False
+            common.set_dry_run(False)
 
     def test_raid_action_refused_in_it_mode(self):
         import b2ctl.raid_actions as ra
@@ -156,7 +156,7 @@ class TestRaidCommands(unittest.TestCase):
              patch("subprocess.run"):
             rc = ra.assign_perc(d, [d])
         assert rc == 0
-        jbod_mock.assert_called_once_with("32:4", dry_run=False)
+        jbod_mock.assert_called_once_with("32:4", 0, dry_run=False)
 
     def test_assign_perc_create_path_calls_add_vd(self):
         import b2ctl.raid_actions as ra
@@ -168,7 +168,7 @@ class TestRaidCommands(unittest.TestCase):
              patch("builtins.input", side_effect=["3", "1 2", "raid1", "y", "y"]), \
              patch("b2ctl.hba_raid.add_vd", return_value=(True, "")) as add_mock:
             ra.assign_perc(d, [d, d2])
-        add_mock.assert_called_once_with("raid1", ["32:4", "32:5"], dry_run=False)
+        add_mock.assert_called_once_with("raid1", ["32:4", "32:5"], 0, dry_run=False)
 
 
 class TestAuxAndBurninCommands(unittest.TestCase):
@@ -204,10 +204,91 @@ class TestAuxAndBurninCommands(unittest.TestCase):
     def test_log_add_single_warns_and_calls(self):
         import b2ctl.cli as cli
         with patch("b2ctl.cli._resolve_devs", return_value=["/dev/disk/by-id/x"]), \
+             patch("b2ctl.common.confirm", return_value=True), \
              patch("b2ctl.zfs.add_log", return_value=(True, "")) as mock_add:
             args = cli.build_parser().parse_args(["log-add", "tank", "sde"])
             args.func(args)
         mock_add.assert_called_once_with("tank", ["/dev/disk/by-id/x"], dry_run=False)
+
+    def test_cache_add_requires_confirmation(self):
+        # F-003: declining the prompt must NOT mutate the pool.
+        import b2ctl.cli as cli
+        with patch("b2ctl.cli._resolve_devs", return_value=["/dev/disk/by-id/x"]), \
+             patch("b2ctl.common.confirm", return_value=False), \
+             patch("b2ctl.zfs.add_cache", return_value=(True, "")) as mock_add:
+            args = cli.build_parser().parse_args(["cache-add", "tank", "sde"])
+            rc = args.func(args)
+        mock_add.assert_not_called()
+        assert rc == 1
+
+    def test_log_rm_requires_confirmation(self):
+        import b2ctl.cli as cli
+        with patch("b2ctl.cli._resolve_devs", return_value=["/dev/disk/by-id/x"]), \
+             patch("b2ctl.common.confirm", return_value=False), \
+             patch("b2ctl.zfs.remove_vdev", return_value=(True, "")) as mock_rm:
+            args = cli.build_parser().parse_args(["log-rm", "tank", "sde"])
+            rc = args.func(args)
+        mock_rm.assert_not_called()
+        assert rc == 1
+
+
+class TestResolveDevsStrict(unittest.TestCase):
+    """F-032: add paths must not pass unresolved / by-id-less tokens to zpool."""
+
+    def test_strict_aborts_on_unresolved(self):
+        import b2ctl.cli as cli
+        with patch("b2ctl.cli.core.scan_light", return_value=[]):
+            self.assertIsNone(cli._resolve_devs(["sdX"], strict=True))
+
+    def test_strict_aborts_on_empty_by_id(self):
+        import b2ctl.cli as cli
+        from b2ctl.common import Disk
+        d = Disk(dev="/dev/sdh", by_id="", serial="SNH")
+        with patch("b2ctl.cli.core.scan_light", return_value=[d]):
+            self.assertIsNone(cli._resolve_devs(["SNH"], strict=True))
+
+    def test_strict_returns_by_id_when_present(self):
+        import b2ctl.cli as cli
+        from b2ctl.common import Disk
+        d = Disk(dev="/dev/sdh", by_id="/dev/disk/by-id/ata-X", serial="SNH")
+        with patch("b2ctl.cli.core.scan_light", return_value=[d]):
+            self.assertEqual(cli._resolve_devs(["SNH"], strict=True),
+                             ["/dev/disk/by-id/ata-X"])
+
+    def test_non_strict_passes_unresolved_through(self):
+        # rm paths keep verbatim pass-through for raw zpool leaf tokens
+        import b2ctl.cli as cli
+        with patch("b2ctl.cli.core.scan_light", return_value=[]):
+            self.assertEqual(cli._resolve_devs(["cache-leaf-token"]),
+                             ["cache-leaf-token"])
+
+    def test_cache_add_aborts_when_resolution_fails(self):
+        import b2ctl.cli as cli
+        with patch("b2ctl.cli._resolve_devs", return_value=None), \
+             patch("b2ctl.zfs.add_cache") as mock_add:
+            args = cli.build_parser().parse_args(["cache-add", "tank", "sdX"])
+            rc = args.func(args)
+        mock_add.assert_not_called()
+        assert rc == 1
+
+
+class TestConfigInitNonRoot(unittest.TestCase):
+    """F-034: config init as non-root prints a clean error, no traceback."""
+
+    def test_config_init_permission_error_clean(self):
+        import b2ctl.cli as cli
+        with patch("b2ctl.cli.os.path.exists", return_value=False), \
+             patch("b2ctl.cli.os.makedirs", side_effect=PermissionError("denied")):
+            rc = cli._config_init(None)
+        assert rc == 1
+
+    def test_config_init_open_permission_error_clean(self):
+        import b2ctl.cli as cli
+        with patch("b2ctl.cli.os.path.exists", return_value=False), \
+             patch("b2ctl.cli.os.makedirs"), \
+             patch("builtins.open", side_effect=PermissionError("denied")):
+            rc = cli._config_init(None)
+        assert rc == 1
 
 
 class TestInstallParity(unittest.TestCase):
@@ -335,6 +416,42 @@ class TestUpdateSync(unittest.TestCase):
         ns = cli.build_parser().parse_args(["update", "--force"])
         assert ns.force is True
 
+    def test_sync_resource_missing_bundled(self):
+        # F-072: an absent bundled source returns "missing-bundled" instead of
+        # crashing with FileNotFoundError; nothing is written.
+        import b2ctl.cli as cli
+        tmp = tempfile.mkdtemp()
+        dest = os.path.join(tmp, "bay_map.json")
+        state = cli._sync_resource("b2ctl_absent_bundle.json", dest, force=False)
+        assert state == "missing-bundled"
+        assert not os.path.exists(dest)
+
+    def test_update_skips_binding_missing_bundled(self):
+        # F-072: `b2ctl update` completes over a _MANAGED entry with no bundled
+        # source (no traceback), does not bind config to a nonexistent path, and
+        # still syncs the remaining present entry.
+        import b2ctl.cli as cli
+        import b2ctl.config as cfg_mod
+        tmp = tempfile.mkdtemp()
+        dest_absent = os.path.join(tmp, "absent.json")
+        dest_spec = os.path.join(tmp, "ssd_spec.json")
+        cfg_path = os.path.join(tmp, "config.json")
+        managed = [("b2ctl_absent_bundle.json", dest_absent, "bay_map_path"),
+                   ("ssd_spec.json", dest_spec, "ssd_spec_path")]
+        with patch.object(cli, "_MANAGED", managed), \
+             patch.object(cfg_mod, "CONFIG_PATH", cfg_path), \
+             patch.object(cfg_mod, "STD_DIR", tmp), \
+             patch("b2ctl.config.validate", return_value=[]), \
+             patch("os.geteuid", return_value=0):
+            args = cli.build_parser().parse_args(["update"])
+            args.func(args)                       # must not raise
+        assert not os.path.exists(dest_absent)    # missing bundled -> no copy
+        assert os.path.exists(dest_spec)          # present entry still synced
+        with open(cfg_path) as f:
+            cfg = json.load(f)
+        assert cfg["ssd_spec_path"] == dest_spec
+        assert cfg.get("bay_map_path", "") != dest_absent   # not bound to a phantom
+
 
 class TestLocate(unittest.TestCase):
     """`b2ctl locate` resolves a disk and blinks it (steady)."""
@@ -344,7 +461,7 @@ class TestLocate(unittest.TestCase):
         from b2ctl.common import Disk
         d = Disk(dev="/dev/nvme0n1")
         d.serial = "S1"
-        with patch("b2ctl.core.scan", return_value=[d]), \
+        with patch("b2ctl.core.scan_light", return_value=[d]), \
              patch("b2ctl.locate.blink_disk", return_value=(True, "ledctl")) as bd:
             ns = cli.build_parser().parse_args(["locate", "S1", "6"])
             rc = ns.func(ns)
@@ -355,6 +472,54 @@ class TestLocate(unittest.TestCase):
         import b2ctl.cli as cli
         with self.assertRaises(SystemExit):
             cli.build_parser().parse_args(["locate", "S1", "--pulse", "2:2"])
+
+    def test_locate_seconds_rejects_negative(self):
+        # F-073: a negative blink duration must be rejected at parse time via the
+        # _pos_int type, so time.sleep never crashes and leaks dd readers.
+        import b2ctl.cli as cli
+        with self.assertRaises(SystemExit):
+            cli.build_parser().parse_args(["locate", "S1", "-1"])
+
+
+class TestStatusParser(unittest.TestCase):
+    """status subparser: --json vs --locate exclusivity + positive --seconds."""
+
+    def test_status_json_locate_rejected(self):
+        # F-069: --json and --locate are mutually exclusive (silently dropping
+        # the LED intent behind machine output is dishonest).
+        import b2ctl.cli as cli
+        with self.assertRaises(SystemExit):
+            cli.build_parser().parse_args(["status", "--json", "--locate"])
+
+    def test_status_seconds_rejects_negative(self):
+        # F-073: --seconds uses the _pos_int type too.
+        import b2ctl.cli as cli
+        with self.assertRaises(SystemExit):
+            cli.build_parser().parse_args(["status", "--locate", "--seconds", "-1"])
+
+
+class TestCheckOutput(unittest.TestCase):
+    """F-071: `b2ctl check` reports mapped disks + enclosures, not the number of
+    distinct bay labels mislabelled as 'Controllers found'."""
+
+    def test_check_reports_bays_mapped_not_controllers(self):
+        import b2ctl.cli as cli
+
+        class _FakeBackend:
+            name = "it"
+            def have_tool(self):
+                return True
+            def bay_map(self):
+                return {f"SN{i}": f"1:{i}" for i in range(6)}   # 6 disks, one enclosure
+
+        with patch("b2ctl.cli.run", return_value=""), \
+             patch("b2ctl.backend.get_backend", return_value=_FakeBackend()), \
+             patch("sys.stdout", new_callable=io.StringIO) as out:
+            cli._check(None)
+            text = out.getvalue()
+        self.assertIn("Bays mapped: 6 disks", text)
+        self.assertIn("across 1 enclosure(s)", text)
+        self.assertNotIn("Controllers found", text)
 
 
 if __name__ == "__main__":

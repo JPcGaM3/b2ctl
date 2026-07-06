@@ -1,10 +1,30 @@
 #!/usr/bin/env python3
-"""Fake `lsblk` for the b2ctl sim — emits `-P` KEY="value" rows from state."""
+"""Fake `lsblk` for the b2ctl sim — emits `-P` KEY="value" rows from state.
+
+In RAID mode the front-panel drives live behind the PERC virtual disk and are
+invisible to the OS; lsblk then shows only the VD block device (model 'PERC …')
+plus the OS-visible back-panel NVMe drives, so the RAID backend synthesises its
+members/UGood drives from perccli instead of double-counting lsblk rows (F-115).
+"""
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import _simstate as S  # noqa: E402
+
+# Synthetic PERC virtual-disk block device (name chosen to avoid colliding with
+# any real sim disk); model triggers hba_raid._is_perc_vd.
+_VD = {"name": "sdz", "size": 2_000_000_000_000, "serial": "", "tran": "sas",
+       "rota": 0, "model": "PERC H730P Mini"}
+
+
+def _emit(d, fields):
+    vals = {
+        "NAME": d["name"], "SIZE": str(d["size"]), "SERIAL": d.get("serial", ""),
+        "MODEL": d["model"], "TRAN": d["tran"], "ROTA": str(d["rota"]),
+        "TYPE": "disk",
+    }
+    print(" ".join(f'{f}="{vals.get(f, "")}"' for f in fields))
 
 
 def main():
@@ -14,15 +34,24 @@ def main():
         cols = argv[argv.index("-o") + 1]
     fields = [c.strip() for c in cols.split(",")]
     state = S.load()
+    dev_arg = next((a for a in argv if a.startswith("/dev/")), None)
+
+    if dev_arg is not None:
+        # Targeted query (e.g. vd_usage) — passthrough, no RAID remodeling.
+        want = dev_arg.replace("/dev/", "")
+        for d in state["disks"]:
+            if d.get("present") and d["name"] == want:
+                _emit(d, fields)
+        return 0
+
+    raid = state.get("mode") == "raid"
+    hidden = {d["name"] for d in S.raid_pds(state)} if raid else set()
     for d in state["disks"]:
-        if not d.get("present"):
+        if not d.get("present") or d["name"] in hidden:
             continue
-        vals = {
-            "NAME": d["name"], "SIZE": str(d["size"]), "SERIAL": d["serial"],
-            "MODEL": d["model"], "TRAN": d["tran"], "ROTA": str(d["rota"]),
-            "TYPE": "disk",
-        }
-        print(" ".join(f'{f}="{vals.get(f, "")}"' for f in fields))
+        _emit(d, fields)
+    if raid:
+        _emit(_VD, fields)      # the VD the front drives hide behind
     return 0
 
 

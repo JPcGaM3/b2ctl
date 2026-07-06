@@ -24,13 +24,21 @@ DEFAULT_SECONDS = 5
 _DEVNULL = subprocess.DEVNULL
 
 
-def _dd_read(dev: str, seconds: int) -> None:
-    """Sequential read for `seconds` -> activity LED flickers. Read-only."""
+def _dd_read(dev: str, seconds: int) -> bool:
+    """Sequential read for `seconds` -> activity LED flickers. Read-only.
+
+    Returns True only if the read sustained the full duration (TimeoutExpired,
+    which is the SUCCESS case here). A dd that exits early or a missing binary
+    means the LED never lit, so blink() must report that, not a false 'done'
+    (F-046)."""
     try:
-        subprocess.run(["dd", f"if={dev}", "of=/dev/null", "bs=1M", "iflag=direct"],
+        subprocess.run([_cfg.tool("dd"), f"if={dev}", "of=/dev/null", "bs=1M", "iflag=direct"],
                        stdout=_DEVNULL, stderr=_DEVNULL, timeout=seconds)
+        return False  # exited before the timeout -> couldn't sustain the read
     except subprocess.TimeoutExpired:
-        pass  # expected: we ran for the full duration then stopped
+        return True   # ran the full duration -> LED was active
+    except OSError:
+        return False  # dd missing / device gone
 
 
 def _ledctl(dev: str, on: bool) -> tuple[bool, str]:
@@ -60,8 +68,8 @@ def blink(dev: str, seconds: int = DEFAULT_SECONDS) -> tuple[bool, str]:
                 _ledctl(dev, False)         # ALWAYS leave it off
             return True, "ledctl"
         # ledctl present but couldn't drive this dev -> safe fallback
-    _dd_read(dev, seconds)
-    return True, "dd"
+    ok = _dd_read(dev, seconds)
+    return ok, "dd"
 
 
 def is_perc_pd(disk) -> bool:
@@ -75,32 +83,57 @@ def is_perc_pd(disk) -> bool:
                                or bool(getattr(disk, "pd_state", "")))
 
 
-def blink_disk(disk, seconds: int = DEFAULT_SECONDS) -> tuple[bool, str]:
+def is_resilvering(disk) -> bool:
+    """True when lighting this disk's LED is unsafe because it is actively
+    rebuilding/resilvering (CLAUDE.md §9: never light an LED on a resilvering
+    disk). A FAULTED/UNAVAIL/OFFLINE/REMOVED leaf is the legitimate pull target
+    even mid-resilver, so it returns False.
+
+    Triggers on (a) a PERC PD in Rbld/Rebuild, or (b) a healthy leaf nested in an
+    active replacing-*/spare-* sub-vdev while its pool's resilver is not complete.
+    """
+    if (getattr(disk, "pd_state", "") or "").upper() in ("RBLD", "REBUILD"):
+        return True
+    vdev = getattr(disk, "vdev", "") or ""
+    state = (getattr(disk, "vdev_state", "") or "").upper()
+    if (vdev.startswith("replacing") or vdev.startswith("spare")) and \
+            state not in ("FAULTED", "UNAVAIL", "OFFLINE", "REMOVED"):
+        pool = getattr(disk, "pool", None)
+        if pool:
+            from . import zfs
+            if not zfs.poll_resilver_status(pool).get("completed", True):
+                return True
+    return False
+
+
+def blink_disk(disk, seconds: int = DEFAULT_SECONDS, *, force: bool = False) -> tuple[bool, str]:
     """Blink a Disk's bay LED, routed by backend.
 
     PERC physical drives (VD members and Unconfigured-Good spares) have no
     per-member block device — they share the VD's /dev/sdX — so a dd/ledctl read
     would blink the wrong bay. Light the slot LED via perccli (by enc:slot) only.
     Everything else uses ledctl (else dd) on the device.
+
+    Refuses a resilvering/rebuilding disk unless force=True (used only by the
+    post-resilver 'pull this bay' prompt).
     """
+    if not force and is_resilvering(disk):
+        return False, "resilvering"
     if is_perc_pd(disk):
         from . import hba_raid
-        ok, _ = hba_raid.locate(disk.bay, True)
+        cs = getattr(disk, "ctrl_slot", "") or disk.bay   # raw enc:slot, not the display bay (F-016)
+        ctrl = getattr(disk, "ctrl", None)                # target this PD's controller (F-085)
+        ctrl = ctrl if ctrl is not None else hba_raid.CONTROLLER
+        ok, _ = hba_raid.locate(cs, True, ctrl)
         if ok:
-            time.sleep(seconds)
-            hba_raid.locate(disk.bay, False)
+            try:
+                time.sleep(seconds)
+            finally:
+                hba_raid.locate(cs, False, ctrl)   # never leave the LED latched on (F-047)
         return ok, "perccli"
     return blink(disk.dev, seconds)
 
-
-def blink_many(devs: list[str], seconds: int = DEFAULT_SECONDS) -> str:
-    """Blink several disks at once for `seconds`, then stop."""
-    import time
-    procs = [subprocess.Popen(["dd", f"if={d}", "of=/dev/null", "bs=1M", "iflag=direct"],
-                              stdout=_DEVNULL, stderr=_DEVNULL) for d in devs]
-    time.sleep(seconds)
-    for p in procs:
-        p.kill()
-    for p in procs:
-        p.wait()
-    return "dd"
+# blink_many (a raw dd fan-out over device paths) was removed: it dd-read the
+# shared PERC VD device, blinking the wrong bay (F-017). `status --locate` now
+# routes each at-risk disk through blink_disk (perccli by enc:slot for PERC PDs,
+# ledctl/dd for raw disks) via a thread pool — see cli._status.

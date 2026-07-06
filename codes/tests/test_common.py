@@ -133,8 +133,6 @@ class TestRunCheckDryRun(unittest.TestCase):
 
     def test_dry_run_write_cmd_no_subprocess(self):
         import b2ctl.common as common
-        import b2ctl.safety as safety
-        safety.WRITE_CMDS = {"zpool", "wipefs", "sgdisk", "dd"}
         with patch("subprocess.run") as mock_run:
             ok, out = common.run_check(["zpool", "replace", "tank", "x", "y"], dry_run=True)
         mock_run.assert_not_called()
@@ -142,14 +140,12 @@ class TestRunCheckDryRun(unittest.TestCase):
         self.assertEqual(out, "")
 
     def test_dry_run_read_cmd_executes(self):
-        # "smartctl" is not in WRITE_CMDS — it is a read-only cmd that must
-        # pass through even when dry_run=True.
+        # "lsblk" is not in WRITE_CMDS — a read-only cmd passes through even
+        # when dry_run=True.
         import b2ctl.common as common
-        import b2ctl.safety as safety
-        safety.WRITE_CMDS = {"zpool", "wipefs", "sgdisk", "dd"}
         with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="pool: tank\n", stderr="")
-            ok, out = common.run_check(["smartctl", "-a", "/dev/sda"], dry_run=True)
+            mock_run.return_value = MagicMock(returncode=0, stdout="tank\n", stderr="")
+            ok, out = common.run_check(["lsblk", "-P", "/dev/sda"], dry_run=True)
         mock_run.assert_called_once()
         self.assertTrue(ok)
 
@@ -160,6 +156,81 @@ class TestRunCheckDryRun(unittest.TestCase):
             ok, out = common.run_check(["zpool", "offline", "tank", "x"])
         mock_run.assert_called_once()
         self.assertTrue(ok)
+
+    def test_dry_run_perccli_absolute_path_suppressed(self):
+        # F-004/F-008: a config-resolved absolute perccli path must be gated by
+        # basename, so a --dry-run RAID replace never really offlines a member.
+        import b2ctl.common as common
+        with patch("subprocess.run") as mock_run:
+            ok, out = common.run_check(
+                ["/usr/sbin/perccli64", "/c0/e32/s4", "set", "offline"], dry_run=True)
+        mock_run.assert_not_called()
+        self.assertTrue(ok)
+        self.assertEqual(out, "")
+
+    def test_dry_run_bare_perccli_suppressed(self):
+        import b2ctl.common as common
+        with patch("subprocess.run") as mock_run:
+            ok, _ = common.run_check(["perccli", "/c0/v0", "del", "force"], dry_run=True)
+        mock_run.assert_not_called()
+        self.assertTrue(ok)
+
+    def test_dry_run_smartctl_selftest_suppressed(self):
+        # burnin.start_selftest runs `smartctl -t long` via run_check — a write.
+        import b2ctl.common as common
+        with patch("subprocess.run") as mock_run:
+            ok, _ = common.run_check(["smartctl", "-t", "long", "/dev/sda"], dry_run=True)
+        mock_run.assert_not_called()
+        self.assertTrue(ok)
+
+
+# ========================================================================== #
+# Disk properties — is_spare / is_poolable invariants
+# ========================================================================== #
+
+class TestDiskProperties:
+    """Disk.is_spare (F-074) and Disk.is_poolable (F-103) contract tests."""
+
+    def test_is_spare_excludes_spare_n_member(self):
+        # F-074: only the pool's spares SECTION (vdev == "spares") is a hot
+        # spare. The FAULTED original leaf nested under a transient spare-N
+        # vdev during activation must stay a regular member, not a spare.
+        assert _disk(vdev="spare-1", vdev_state="REMOVED").is_spare is False
+        assert _disk(vdev="spares", vdev_state="AVAIL").is_spare is True
+
+    def test_disk_is_poolable(self):
+        # F-103: the single authority for the "free, poolable disk" invariant.
+        from b2ctl.common import Disk
+        # hidden PERC member shares the VD's /dev/sda (smart_dtype set) -> never
+        # poolable (would sgdisk --zap-all the OS's hardware VD).
+        assert Disk(dev="/dev/sda", smart_dtype="megaraid,4").is_poolable is False
+        # GHOST has no /dev node (dev == "-").
+        assert Disk(dev="-", health="GHOST").is_poolable is False
+        # JBOD'd raw disk with its own block device -> poolable.
+        assert Disk(dev="/dev/sdb").is_poolable is True
+        # a pool member is not free.
+        assert Disk(dev="/dev/sdc", pool="tank").is_poolable is False
+
+
+# ========================================================================== #
+# Dry-run single source of truth (F-098)
+# ========================================================================== #
+
+class TestDryRunSingleSource(unittest.TestCase):
+    """F-098: the dry-run flag lives at the bottom layer (common); mid-layer
+    action modules read it via common.is_dry_run() — no import of the
+    interactive watch UI just to read a flag."""
+
+    def test_dry_run_single_source(self):
+        import b2ctl.common as common
+        import b2ctl.raid_actions as raid_actions
+        common.set_dry_run(True)
+        try:
+            self.assertTrue(common.is_dry_run())
+            self.assertTrue(raid_actions._dry())   # observed without importing watch
+        finally:
+            common.set_dry_run(False)
+        self.assertFalse(raid_actions._dry())
 
 
 if __name__ == "__main__":

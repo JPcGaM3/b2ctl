@@ -37,6 +37,19 @@ class TestSpecLookup:
         table = {"samsung ssd 870 evo 1tb": 600}
         assert spec.lookup("WD Red", table) is None
 
+    def test_truncated_model_ambiguous_returns_none(self):
+        # F-097: a capacity-less model contained in two different-capacity keys
+        # must NOT silently pick the first-inserted rating — ambiguous -> None,
+        # so a 16-char SCSI-truncated model never shows a false 0% endurance.
+        table = {"samsung ssd 870 evo 1tb": 600, "samsung ssd 870 evo 2tb": 1200}
+        assert spec.lookup("Samsung SSD 870 EVO", table) is None
+
+    def test_longest_contained_key_wins(self):
+        # F-097: when the full model contains several spec keys, the most
+        # specific (longest) capacity key wins — not the first inserted.
+        table = {"samsung ssd 870": 500, "samsung ssd 870 evo 1tb": 600}
+        assert spec.lookup("Samsung SSD 870 EVO 1TB Series", table) == 600
+
 
 class TestSpecLoadPath:
     """spec.load() resolves the file via config.ssd_spec_path()."""

@@ -15,24 +15,13 @@ import json
 import os
 import sys
 
-from . import core, watch, zfs, spec, locate as locatemod
+from . import core, watch, zfs, spec, locate as locatemod, common
+from . import zfs_actions
 from . import backend as _backend_mod, config as _cfg_mod
 from . import installer as _installer_mod
 from .common import need_root, run, R, Y, G, C, N
 from . import ui
-
-__version__ = "0.8.8-itmode"
-
-
-def _resolve_dev(target: str, disks=None):
-    """Resolve a bay label / serial / sdX / /dev path to a /dev device."""
-    if target.startswith("/dev/"):
-        return target
-    disks = disks if disks is not None else core.scan()
-    for d in disks:
-        if target in (d.bay, d.serial, d.dev, d.dev.replace("/dev/", "")):
-            return d.dev
-    return None
+from ._version import __version__      # single source of truth (F-066)
 
 
 def _status(args) -> int:
@@ -48,15 +37,24 @@ def _status(args) -> int:
     print(ui.render_details(disks, pools))
 
     if args.locate:
-        risky = [d for d in disks if d.level in ("WARNING", "CRITICAL")]
+        # F-001/F-002: skip ghosts (no /dev node) and rebuilding/resilvering
+        # disks (CLAUDE.md §9), and route each survivor through blink_disk — PERC
+        # PDs light their slot LED via perccli by enc:slot, raw disks via
+        # ledctl/dd — never a raw dd fan-out on the shared VD device.
+        risky = [d for d in disks
+                 if d.level in ("WARNING", "CRITICAL")
+                 and d.dev not in ("-", "") and d.health != "GHOST"
+                 and not locatemod.is_resilvering(d)]
         if not risky:
-            print(f"{G}[OK] nothing at risk — no LED lit{N}")
+            print(f"{G}[OK] nothing at risk to blink (ghosts/resilvering disks skipped){N}")
             return 0
-        devs = [d.dev for d in risky]
         bays = ", ".join(d.bay or d.dev for d in risky)
         print(f"{Y}[!] blinking {args.seconds}s on: {bays}{N}")
-        method = locatemod.blink_many(devs, args.seconds)
-        print(f"{G}[+] done (via {method}){N}")
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=max(1, len(risky))) as ex:
+            results = list(ex.map(lambda d: locatemod.blink_disk(d, args.seconds), risky))
+        lit = sum(1 for ok, _ in results if ok)
+        print(f"{G}[+] blinked {lit}/{len(risky)} disk(s){N}")
     return 0
 
 
@@ -65,64 +63,100 @@ def _watch(_args) -> int:
 
 
 def _locate(args) -> int:
-    disks = core.scan()
+    disks = core.scan_light()       # locate only needs identity + topology (F-102)
     d = next((x for x in disks if args.target in
               (x.bay, x.serial, x.dev, x.dev.replace("/dev/", ""))), None)
     if d is None:
         print(f"{R}[-] could not resolve '{args.target}' to a disk{N}")
         return 1
+    if d.dev == "-" or d.health == "GHOST":
+        print(f"{R}[-] cannot locate a GHOST disk (OS rejected it, no /dev node){N}")
+        return 1
     where = f"bay {d.bay}" if locatemod.is_perc_pd(d) else d.dev
     print(f"{Y}[*] blinking {where} for {args.seconds}s ...{N}")
     ok, method = locatemod.blink_disk(d, args.seconds)
+    if method == "resilvering":
+        print(f"{R}[-] refuse: '{args.target}' is resilvering/rebuilding — never pull "
+              f"a disk mid-resilver (CLAUDE.md §9){N}")
+        return 1
     print((G + f"[+] done (via {method})" if ok else R + "[-] failed") + N)
     return 0 if ok else 1
 
 
+# ZFS lifecycle subcommands go through the public zfs_actions contract (not
+# watch's underscore-privates) and propagate a real exit code (F-070).
 def _offload(_args) -> int:
-    watch._cmd_offload(spec.load())
-    return 0
+    return zfs_actions.offload()
 
 
 def _replace(_args) -> int:
-    watch._cmd_replace(spec.load())
-    return 0
+    return zfs_actions.replace()
 
 
 def _create(args) -> int:
-    watch._cmd_create(spec.load(),
-                      raid_type="raid10" if getattr(args, "raid10", False) else None)
-    return 0
+    return zfs_actions.create(raid10=getattr(args, "raid10", False))
 
 
 def _destroy(args) -> int:
-    watch._cmd_destroy(spec.load(), target=getattr(args, "pool", None))
-    return 0
+    return zfs_actions.destroy(pool=getattr(args, "pool", None))
 
 
 def _swap(_args) -> int:
-    watch._cmd_swap(spec.load())
-    return 0
+    return zfs_actions.swap()
 
 
 def _demote(_args) -> int:
-    watch._cmd_demote(spec.load())
-    return 0
+    return zfs_actions.demote()
 
 
-def _resolve_devs(tokens) -> list[str]:
-    """Map bay/serial/dev/by-id tokens to stable by-id paths (never /dev/sdX)."""
-    disks = core.scan(spec.load())
+def _resolve_devs(tokens, *, strict: bool = False):
+    """Map bay/serial/dev/by-id tokens to stable by-id paths.
+
+    strict=True (the pool ADD paths, cache-add/log-add) enforces §9 'always act
+    on by-id, never /dev/sdX': it returns None (after printing why) if a token
+    does not resolve to a scanned disk, or resolves to a disk with no by-id link
+    yet — so a freshly hot-plugged disk is never added under an unstable /dev/sdX
+    that shuffles on reboot (F-032). The rm paths stay permissive: a raw zpool
+    leaf token that matches no disk is passed straight to `zpool remove`.
+    """
+    disks = core.scan_light()       # resolution needs by-id/bay/serial, not SMART (F-102)
     out = []
     for t in tokens:
         match = next((d for d in disks if t in (d.bay, d.serial, d.dev,
                       d.dev.replace("/dev/", ""), d.by_id)), None)
-        out.append((match.by_id or match.dev) if match else t)
+        if strict:
+            if match is None:
+                print(f"{R}[-] '{t}' matches no disk — check the bay/serial, or "
+                      f"wait for udev if just inserted.{N}")
+                return None
+            if not match.by_id:
+                print(f"{R}[-] {match.dev} has no stable by-id link yet — wait for "
+                      f"udev / re-insert before adding it to a pool.{N}")
+                return None
+            out.append(match.by_id)
+        else:
+            out.append((match.by_id or match.dev) if match else t)
     return out
+
+
+def _confirm_pool_op(op: str, pool: str, devs: list[str]) -> bool:
+    """Confirm a pool-mutating aux-vdev op, printing the RESOLVED by-id devices,
+    pool, and operation (CLAUDE.md §9). Auto-proceeds under --dry-run (run_check
+    then prints the [DRY-RUN] preview and mutates nothing)."""
+    if watch._DRY_RUN:
+        return True
+    from .common import confirm
+    print(f"{Y}[?] {op} on pool '{pool}': {' '.join(devs)}{N}")
+    return confirm(f"    {op}?")
 
 
 def _cache_add(args) -> int:
     from . import zfs
-    devs = _resolve_devs(args.devs)
+    devs = _resolve_devs(args.devs, strict=True)
+    if devs is None:
+        return 1
+    if not _confirm_pool_op("add L2ARC cache", args.pool, devs):
+        print(f"{Y}[-] cancelled{N}"); return 1
     ok, out = zfs.add_cache(args.pool, devs, dry_run=watch._DRY_RUN)
     print((f"{G}[+] L2ARC cache added to {args.pool}" if ok else f"{R}[-] {out}") + N)
     return 0 if ok else 1
@@ -130,18 +164,25 @@ def _cache_add(args) -> int:
 
 def _cache_rm(args) -> int:
     from . import zfs
-    ok, out = zfs.remove_vdev(args.pool, _resolve_devs([args.dev])[0], dry_run=watch._DRY_RUN)
+    dev = _resolve_devs([args.dev])[0]
+    if not _confirm_pool_op("remove cache device", args.pool, [dev]):
+        print(f"{Y}[-] cancelled{N}"); return 1
+    ok, out = zfs.remove_vdev(args.pool, dev, dry_run=watch._DRY_RUN)
     print((f"{G}[+] removed from {args.pool}" if ok else f"{R}[-] {out}") + N)
     return 0 if ok else 1
 
 
 def _log_add(args) -> int:
     from . import zfs
-    devs = _resolve_devs(args.devs)
+    devs = _resolve_devs(args.devs, strict=True)
+    if devs is None:
+        return 1
     if len(devs) == 1:
         print(f"{Y}[!] SLOG not mirrored: losing this log device can lose "
               f"in-flight sync writes.{N}")
     print(f"{Y}[!] ensure this SSD has Power-Loss Protection (PLP).{N}")
+    if not _confirm_pool_op("add SLOG log", args.pool, devs):
+        print(f"{Y}[-] cancelled{N}"); return 1
     ok, out = zfs.add_log(args.pool, devs, dry_run=watch._DRY_RUN)
     print((f"{G}[+] SLOG added to {args.pool}" if ok else f"{R}[-] {out}") + N)
     return 0 if ok else 1
@@ -149,7 +190,10 @@ def _log_add(args) -> int:
 
 def _log_rm(args) -> int:
     from . import zfs
-    ok, out = zfs.remove_vdev(args.pool, _resolve_devs([args.dev])[0], dry_run=watch._DRY_RUN)
+    dev = _resolve_devs([args.dev])[0]
+    if not _confirm_pool_op("remove log device", args.pool, [dev]):
+        print(f"{Y}[-] cancelled{N}"); return 1
+    ok, out = zfs.remove_vdev(args.pool, dev, dry_run=watch._DRY_RUN)
     print((f"{G}[+] removed from {args.pool}" if ok else f"{R}[-] {out}") + N)
     return 0 if ok else 1
 
@@ -238,8 +282,11 @@ def _check(_args) -> int:
         print(f"  {ok_mark} Detected backend: {bk.name.upper()}-mode")
         if bk.have_tool():
             bm = bk.bay_map()
-            print(f"  {ok_mark} Controllers found: {len(set(bm.values()) or {0})} "
-                  f"({len(bm)} disks in bay map)")
+            # bm is serial->'enc:slot', so its values are BAYS, not controllers;
+            # report the mapped-disk count and distinct enclosures (F-071).
+            encl = {v.split(":")[0] for v in bm.values() if ":" in v}
+            print(f"  {ok_mark} Bays mapped: {len(bm)} disks"
+                  + (f" across {len(encl)} enclosure(s)" if encl else ""))
     except SystemExit:
         print(f"  {fail_mark} Backend detection failed — set controller.mode in config")
 
@@ -304,11 +351,16 @@ _MANAGED = [
 def _sync_resource(bundled_name: str, dest: str, force: bool) -> str:
     """Copy a bundled data file to its /etc destination without clobbering
     operator edits. Returns one of: created / current / customized-kept /
-    updated (backup .bak). A file that differs from the bundled copy is treated
-    as operator-customized and preserved unless force=True (then backed up)."""
+    updated (backup .bak) / missing-bundled. A file that differs from the bundled
+    copy is treated as operator-customized and preserved unless force=True (then
+    backed up)."""
     import shutil as _shutil
     import filecmp
     src = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", bundled_name))
+    if not os.path.exists(src):
+        # install.sh deploys bay_map.json only if present, so a checkout without
+        # it is a legitimate install — don't crash `b2ctl update` (F-072).
+        return "missing-bundled"
     if not os.path.exists(dest):
         _shutil.copy2(src, dest)
         return "created"
@@ -354,12 +406,17 @@ def _update(args) -> int:
 
     print(f"\n{C}[sync {_cfg_mod.STD_DIR}]{N}")
     _SYNC_ICON = {"created": f"{G}[✔]{N}", "current": f"{G}[✔]{N}",
-                  "customized-kept": f"{Y}[i]{N}"}
+                  "customized-kept": f"{Y}[i]{N}", "missing-bundled": f"{Y}[i]{N}"}
     for bundled_name, dest, key in _MANAGED:
         state = _sync_resource(bundled_name, dest, force)
-        cfg[key] = dest  # bind to the absolute /etc path (directory-independent)
+        # Bind the /etc path only if a file is actually there — a missing bundled
+        # copy with no /etc file must not point config at a nonexistent path (F-072).
+        if state != "missing-bundled" or os.path.exists(dest):
+            cfg[key] = dest  # bind to the absolute /etc path (directory-independent)
         icon = _SYNC_ICON.get(state, f"{G}[✔]{N}")
         note = "  (use --force to overwrite)" if state == "customized-kept" else ""
+        if state == "missing-bundled":
+            note = "  (no bundled copy — skipped)"
         print(f"  {icon} {os.path.basename(dest):<14} {state}{note}  →  {dest}")
 
     with open(cfg_path, "w") as f:
@@ -381,10 +438,17 @@ def _config_init(_args) -> int:
     if os.path.exists(path):
         print(f"{Y}[!] {path} already exists. Delete it first to regenerate.{N}")
         return 1
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    cfg = _cfg_mod.load()
-    with open(path, "w") as f:
-        json.dump(cfg, f, indent=2)
+    # 'config' is exempt from the root gate, so a non-root user reaches here and
+    # the write fails with PermissionError — surface the house-style one-liner
+    # instead of a raw traceback (F-034).
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        cfg = _cfg_mod.load()
+        with open(path, "w") as f:
+            json.dump(cfg, f, indent=2)
+    except OSError as exc:
+        print(f"{R}[-] cannot write {path} — run as root ({exc}){N}")
+        return 1
     print(f"{G}[+] Written: {path}{N}")
     print(f"    Edit tool_paths to override binary locations.")
     print(f"    Set controller.mode to 'it' or 'raid' to skip auto-detection.")
@@ -436,21 +500,37 @@ def _rollback_cmd(op_id: str):
         print("Cancelled.")
         return
     from .common import run_check
-    cmd = hint.split()
+    # F-013: the create-op hint ends with a '# WARNING …' comment; strip it
+    # before splitting so the comment words never become command tokens.
+    cmd = hint.split("#", 1)[0].split()
+    if not cmd:
+        print("  Rollback hint is empty after stripping its comment — resolve manually.")
+        return
     if any(t.startswith("<") and t.endswith(">") for t in cmd):
         print("  Rollback hint contains unresolved placeholders — resolve manually:")
         print(f"     {hint}")
         return
+    # F-013: honor --dry-run so a rollback PREVIEW never runs the stored zpool cmd.
+    dry = watch._DRY_RUN
     rb_op_id = safety.begin_op(
         f"rollback-{entry.get('op')}", entry.get("disk_serial", ""),
         entry.get("disk_bay"), entry.get("dev_path", ""),
-        entry.get("pool", ""), entry.get("vdev", ""), [cmd]
+        entry.get("pool", ""), entry.get("vdev", ""), [cmd], dry_run=dry
     )
-    ok, out = run_check(cmd)
-    safety.end_op(rb_op_id, ok, out, "" if ok else out, 0 if ok else 1)
+    ok, out = run_check(cmd, dry_run=dry)
+    safety.end_op(rb_op_id, ok, out, "" if ok else out, 0 if ok else 1, dry_run=dry)
     print(f"{'✓' if ok else '✗'} rollback {'complete' if ok else 'failed'}")
     if not ok:
         print(f"  {R}{out}{N}")
+
+
+def _pos_int(s: str) -> int:
+    """argparse type: a strictly-positive int. Rejects '-1'/'0' so a negative
+    blink duration can't crash time.sleep and leak dd readers (F-073)."""
+    v = int(s)
+    if v <= 0:
+        raise argparse.ArgumentTypeError("must be a positive number of seconds")
+    return v
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -462,11 +542,14 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd")
 
     st = sub.add_parser("status", help="health table + details")
-    st.add_argument("--locate", action="store_true",
-                    help="blink LEDs on at-risk disks for a few seconds")
-    st.add_argument("--seconds", type=int, default=locatemod.DEFAULT_SECONDS,
-                    help="blink duration (default 5)")
-    st.add_argument("--json", action="store_true", help="machine-readable output")
+    # --locate is a physical side effect; --json is machine output. Rejecting the
+    # combination is honester than silently dropping the LED intent (F-069).
+    st_mode = st.add_mutually_exclusive_group()
+    st_mode.add_argument("--locate", action="store_true",
+                         help="blink LEDs on at-risk disks for a few seconds")
+    st_mode.add_argument("--json", action="store_true", help="machine-readable output")
+    st.add_argument("--seconds", type=_pos_int, default=locatemod.DEFAULT_SECONDS,
+                    help="blink duration in seconds (default 5, must be > 0)")
     st.set_defaults(func=_status)
 
     w = sub.add_parser("watch", help="interactive hotplug-aware loop")
@@ -475,9 +558,9 @@ def build_parser() -> argparse.ArgumentParser:
     lo = sub.add_parser("locate",
                         help="blink ONE disk's LED (perccli / ledctl, else dd)")
     lo.add_argument("target", help="bay label (1:4), serial, sdX, or /dev/sdX")
-    lo.add_argument("seconds", nargs="?", type=int,
+    lo.add_argument("seconds", nargs="?", type=_pos_int,
                     default=locatemod.DEFAULT_SECONDS,
-                    help="blink duration (default 5)")
+                    help="blink duration in seconds (default 5, must be > 0)")
     lo.set_defaults(func=_locate)
 
     off = sub.add_parser("offload", help="safely detach or resilver a disk to offload it")
@@ -557,7 +640,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     # install
     inst_p = sub.add_parser("install",
-                            help="download and install tool binaries (sas2ircu/perccli)")
+                            help="report tool status; with flags, download+install "
+                                 "(sas2ircu/perccli)")
     inst_grp = inst_p.add_mutually_exclusive_group()
     inst_grp.add_argument("--with-tools", dest="with_tools", action="store_true",
                           help="download + install both tools (sas2ircu + perccli)")
@@ -566,7 +650,7 @@ def build_parser() -> argparse.ArgumentParser:
     inst_grp.add_argument("--flash", action="store_true",
                           help="install sas2ircu + set controller.mode=it")
     inst_grp.add_argument("--tool", choices=["sas2ircu", "perccli"],
-                          metavar="TOOL", help="install only this tool (default: all missing)")
+                          metavar="TOOL", help="install only this tool")
     inst_p.set_defaults(func=_install)
 
     # update
@@ -608,11 +692,17 @@ def main(argv=None) -> int:
     if getattr(args, "dry_run", False):
         from . import watch as _watch
         _watch._DRY_RUN = True
+        common.set_dry_run(True)      # bottom-layer owner read by raid_actions/burnin
     if not getattr(args, "cmd", None):
         args = parser.parse_args(["status"])
     if args.cmd not in ("version", "check", "config", "log", "rollback", "install", "update"):
         need_root()
-    return args.func(args)
+    try:
+        return args.func(args)
+    except KeyboardInterrupt:
+        # F-022: Ctrl-C at any prompt exits cleanly, not with a traceback.
+        print(f"\n{Y}[-] interrupted{N}")
+        return 130
 
 
 if __name__ == "__main__":

@@ -16,9 +16,19 @@ def main():
     if not dev:
         return 1
     state = S.load()
-    d = S.disk_by_name(state, dev)
-    if not d or not d.get("present"):
-        return 2  # no such device → b2ctl marks NOREAD
+    # `-d megaraid,<DID>` reads a PD behind the PERC VD via passthrough — resolve
+    # the DID to the same drive the fake perccli assigned it (F-115), NOT the VD
+    # block device named on the command line.
+    did = next((a.split(",", 1)[1] for a in argv if a.startswith("megaraid,")), None)
+    if did is not None and did.isdigit():
+        pds = S.raid_pds(state)
+        d = pds[int(did)] if int(did) < len(pds) else None
+        if not d:
+            return 2
+    else:
+        d = S.disk_by_name(state, dev)
+        if not d or not d.get("present"):
+            return 2  # no such device → b2ctl marks NOREAD
 
     # `smartctl -t long|short <dev>` — start a (fake) self-test, return immediately.
     if "-t" in argv:

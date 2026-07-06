@@ -119,17 +119,6 @@ class TestArrayColumn:
         d.pool = None; d.array_type = "HW"; d.array_name = "vd0/raid1"
         assert "HW:vd0/raid1" in ui.render_table([d])
 
-    def test_render_raid_volumes(self):
-        from b2ctl import ui
-        out = ui.render_raid_volumes([
-            {"vd": "0", "raid": "RAID1", "state": "Optl",
-             "size": "640.0 GB", "name": "MainSSD", "members": 2}])
-        assert "vd0" in out and "RAID1" in out and "members=2" in out
-
-    def test_render_raid_volumes_empty(self):
-        from b2ctl import ui
-        assert ui.render_raid_volumes([]) == ""
-
     def test_nvme_bay_renders_pcie_label(self):
         from b2ctl import ui
         d = _disk(dev="/dev/nvme0n1")

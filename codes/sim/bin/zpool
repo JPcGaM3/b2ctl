@@ -17,16 +17,37 @@ def _present(state, name):
     return bool(d and d.get("present"))
 
 
+def _down(state, pool, name):
+    """A member counts as 'down' for redundancy if physically absent OR the
+    operator offlined it (F-118) — either way it is not protecting the vdev."""
+    return (not _present(state, name)) or (name in pool.get("offline", []))
+
+
+def _member_state(state, pool, name):
+    if name in pool.get("offline", []):
+        return "OFFLINE"
+    return "ONLINE" if _present(state, name) else "REMOVED"
+
+
 def _vdev_label(pool):
     return {"raidz1": "raidz1-0", "raidz2": "raidz2-0",
             "mirror": "mirror-0", "stripe": None}.get(pool["type"])
 
 
 def _pool_health(state, pool):
-    removed = [m for m in pool["members"] if not _present(state, m)]
-    if len(removed) > S.parity_of(pool):
+    if pool.get("type") == "raid10":
+        # raid10 survives as long as no single mirror group loses BOTH legs; one
+        # down leg anywhere is DEGRADED, not SUSPENDED (F-065).
+        groups = S.raid10_groups(pool)
+        if any(all(_down(state, pool, m) for m in g) for g in groups):
+            return "SUSPENDED"
+        if any(_down(state, pool, m) for m in pool["members"]) or pool.get("replacements"):
+            return "DEGRADED"
+        return "ONLINE"
+    down = [m for m in pool["members"] if _down(state, pool, m)]
+    if len(down) > S.parity_of(pool):
         return "SUSPENDED"
-    if removed or pool.get("replacements"):
+    if down or pool.get("replacements"):
         return "DEGRADED"
     return "ONLINE"
 
@@ -54,14 +75,42 @@ def cmd_list(args, state):
 # status
 # --------------------------------------------------------------------------- #
 
+def _render_aux_and_spares(state, pool, lines):
+    for aux in ("log", "cache"):
+        devs = pool.get(aux, [])
+        if devs:
+            lines.append(f"\t{aux}")
+            for dv in devs:
+                st = "ONLINE" if _present(state, dv) else "REMOVED"
+                lines.append(f"\t    /dev/{dv:<24} {st}")
+    if pool["spares"]:
+        lines.append("\tspares")
+        inuse = {r["spare"] for r in pool.get("replacements", [])}
+        for s in pool["spares"]:
+            st = "INUSE     currently in use" if s in inuse else "AVAIL"
+            lines.append(f"\t    /dev/{s:<24} {st}")
+
+
+def _render_repl(m, rec, state, pool, indent):
+    """Render a replacing-N (fresh disk) or spare-N (hot spare) sub-vdev holding
+    the old member + the incoming device, exactly like real ZFS keeps until the
+    resilver finishes / the old leg is detached (F-117)."""
+    kind = rec.get("kind", "spare")
+    label = "replacing-0" if kind == "replacing" else "spare-0"
+    old_state = _member_state(state, pool, m)
+    return [f"{indent}{label:<27} DEGRADED",
+            f"{indent}  /dev/{m:<20} {old_state}",
+            f"{indent}  /dev/{rec['spare']:<20} ONLINE"]
+
+
 def _render_status(state, pool):
     health = _pool_health(state, pool)
     lines = [f"  pool: {pool['name']}", f" state: {health}"]
 
-    # scan line (resilver progress / completion)
+    # scan line: pct is time-derived, so reads never advance it (F-116)
     res = pool.get("resilver")
     if res is not None:
-        pct = res.get("pct", 0)
+        pct = S.resilver_pct(res)
         if pct >= 100:
             lines.append("  scan: resilvered 590M in 00:00:02 with 0 errors on Tue Jan  1 00:00:00 2030")
         else:
@@ -71,39 +120,37 @@ def _render_status(state, pool):
     lines += ["config:", "", "\tNAME                              STATE     READ WRITE CKSUM"]
     lines.append(f"\t{pool['name']:<33} {health}")
 
-    repl = {r["removed"]: r["spare"] for r in pool.get("replacements", [])}
+    repl = {r["removed"]: r for r in pool.get("replacements", [])}
+
+    # raid10: render each mirror group as its own mirror-N sub-vdev so b2ctl's
+    # topology parser classifies the pool as 'mirror', not 'stripe' (F-065).
+    if pool.get("type") == "raid10":
+        for gi, group in enumerate(S.raid10_groups(pool)):
+            gstate = "DEGRADED" if any(_down(state, pool, m) for m in group) else "ONLINE"
+            lines.append(f"\t  mirror-{gi:<25} {gstate}")
+            for m in group:
+                if m in repl:
+                    lines += _render_repl(m, repl[m], state, pool, "\t    ")
+                else:
+                    lines.append(f"\t    /dev/{m:<22} {_member_state(state, pool, m)}")
+        _render_aux_and_spares(state, pool, lines)
+        lines.append("")
+        lines.append("errors: No known data errors")
+        return "\n".join(lines)
+
     vlabel = _vdev_label(pool)
     indent_member = "\t    " if vlabel else "\t  "
     if vlabel:
         vstate = "DEGRADED" if (health != "ONLINE") else "ONLINE"
         lines.append(f"\t  {vlabel:<31} {vstate}")
 
-    snum = 1
     for m in pool["members"]:
         if m in repl:
-            sp = repl[m]
-            lines.append(f"{indent_member}spare-{snum:<26} DEGRADED")
-            lines.append(f"{indent_member}  /dev/{m:<22} REMOVED")
-            lines.append(f"{indent_member}  /dev/{sp:<22} ONLINE")
-            snum += 1
+            lines += _render_repl(m, repl[m], state, pool, indent_member)
         else:
-            st = "ONLINE" if _present(state, m) else "REMOVED"
-            lines.append(f"{indent_member}/dev/{m:<24} {st}")
+            lines.append(f"{indent_member}/dev/{m:<24} {_member_state(state, pool, m)}")
 
-    for aux in ("log", "cache"):
-        devs = pool.get(aux, [])
-        if devs:
-            lines.append(f"\t{aux}")
-            for dv in devs:
-                st = "ONLINE" if _present(state, dv) else "REMOVED"
-                lines.append(f"\t    /dev/{dv:<24} {st}")
-
-    if pool["spares"]:
-        lines.append("\tspares")
-        inuse = {r["spare"] for r in pool.get("replacements", [])}
-        for s in pool["spares"]:
-            st = "INUSE     currently in use" if s in inuse else "AVAIL"
-            lines.append(f"\t    /dev/{s:<24} {st}")
+    _render_aux_and_spares(state, pool, lines)
 
     lines.append("")
     lines.append("errors: No known data errors")
@@ -113,16 +160,23 @@ def _render_status(state, pool):
 def cmd_status(args, state):
     pos = [a for a in args if not a.startswith("-")]
     targets = [pool for pool in state["pools"] if not pos or pool["name"] in pos]
-    bump = False
-    out = []
+    changed = False
     for p in targets:
-        out.append(_render_status(state, p))
-        # advance resilver one step per status read (simulates poll loop)
-        if p.get("resilver") is not None and p["resilver"].get("pct", 0) < 100:
-            p["resilver"]["pct"] = min(100, p["resilver"]["pct"] + 50)
-            bump = True
-    print("\n".join(out))
-    if bump:
+        # F-116: reads are side-effect-free — progress is time-derived, not
+        # bumped per read. The ONLY persisted transition is the one-time
+        # completion of a fresh-disk replace: real ZFS auto-detaches the old
+        # member from a replacing-N group when the resilver finishes (F-117).
+        # Collapse BEFORE rendering so the completing read is self-consistent.
+        res = p.get("resilver")
+        if res is not None and S.resilver_pct(res) >= 100:
+            for r in list(p.get("replacements", [])):
+                if r.get("kind") == "replacing":
+                    p["members"] = [r["spare"] if m == r["removed"] else m
+                                    for m in p["members"]]
+                    p["replacements"].remove(r)
+                    changed = True
+    print("\n".join(_render_status(state, p) for p in targets))
+    if changed:
         S.save(state)
     return 0
 
@@ -146,11 +200,16 @@ def cmd_replace(args, state):
     new = a[2].replace("/dev/", "")
     old = (S.disk_by_token(state, old) or {}).get("name", old)
     new = (S.disk_by_token(state, new) or {}).get("name", new)
-    # finalize any replacement for old, swap member old->new
-    pool["replacements"] = [r for r in pool.get("replacements", []) if r["removed"] != old]
-    pool["members"] = [new if m == old else m for m in pool["members"]]
-    pool["spares"] = [s for s in pool["spares"] if s != new]
-    pool["resilver"] = {"pct": 0}
+    # F-117: model the INTERMEDIATE state real ZFS keeps until the resilver
+    # finishes / the old leg is detached, instead of finalizing instantly. Old
+    # stays in members under a spare-N (hot spare) or replacing-N (fresh disk)
+    # sub-vdev; the completion is handled by detach (spare) or cmd_status
+    # auto-collapse at pct>=100 (replacing).
+    pool.setdefault("replacements", [])
+    pool["replacements"] = [r for r in pool["replacements"] if r["removed"] != old]
+    kind = "spare" if new in pool.get("spares", []) else "replacing"
+    pool["replacements"].append({"removed": old, "spare": new, "kind": kind})
+    pool["resilver"] = S.resilver_seed()
     S.save(state)
     return 0
 
@@ -194,7 +253,7 @@ def cmd_attach(args, state):
     new = a[2].replace("/dev/", "")
     if new not in pool["members"]:
         pool["members"].append(new)
-    pool["resilver"] = {"pct": 0}
+    pool["resilver"] = S.resilver_seed()
     S.save(state)
     return 0
 
@@ -204,8 +263,8 @@ def cmd_detach(args, state):
     pool = next((p for p in state["pools"] if p["name"] == a[0]), None)
     if not pool or len(a) < 2:
         return 1
-    dev = a[1].replace("/dev/", "")
-    dev = (S.disk_by_token(state, dev) or {}).get("name", dev)
+    raw = a[1].replace("/dev/", "")
+    dev = (S.disk_by_token(state, raw) or {}).get("name", raw)
     # detaching a removed-old token finalizes the spare into the vdev
     for r in list(pool.get("replacements", [])):
         if r["removed"] == dev:
@@ -213,6 +272,12 @@ def cmd_detach(args, state):
             pool["spares"] = [s for s in pool["spares"] if s != r["spare"]]
             pool["replacements"].remove(r)
             S.save(state); return 0
+    # F-117: a token that is neither a lingering replacement's old leg nor a
+    # current member/spare is not in the pool — real zpool errors, so must sim,
+    # or a wrong-token detach regression would silently 'pass' the harness.
+    if dev not in pool["members"] and dev not in pool["spares"]:
+        print(f"cannot detach {a[1]}: no such device in pool", file=sys.stderr)
+        return 1
     pool["members"] = [m for m in pool["members"] if m != dev]
     pool["spares"] = [s for s in pool["spares"] if s != dev]
     S.save(state)
@@ -248,7 +313,12 @@ def cmd_create(args, state):
         rtype = "raid10" if (rest[0] == "mirror" and rest.count("mirror") > 1) else rest[0]
     devs = [d for d in rest if d not in _vkw]          # drop vdev keyword tokens
     members = [(S.disk_by_token(state, d.replace("/dev/", "")) or {}).get("name", d.replace("/dev/", "")) for d in devs]
+    # raid10: record the mirror groups (pairs in order) so status renders
+    # mirror-0/mirror-1 and health is group-aware (F-065).
+    groups = ([members[i:i + 2] for i in range(0, len(members), 2)]
+              if rtype == "raid10" else None)
     state["pools"].append({"name": name, "type": rtype, "members": members,
+                           "groups": groups,
                            "spares": [], "replacements": [], "cache": [], "log": [],
                            "resilver": None})
     for m in members:
@@ -269,6 +339,35 @@ def cmd_destroy(args, state):
     if len(state["pools"]) == before:
         print(f"cannot open '{name}': no such pool", file=sys.stderr)
         return 1
+    S.save(state)
+    return 0
+
+
+def cmd_offline(args, state):
+    a = _strip_flags(args)               # pool dev
+    pool = next((p for p in state["pools"] if p["name"] == a[0]), None)
+    if not pool or len(a) < 2:
+        return 1
+    dev = a[1].replace("/dev/", "")
+    dev = (S.disk_by_token(state, dev) or {}).get("name", dev)
+    if dev not in pool["members"]:
+        print(f"cannot offline {a[1]}: no such device in pool", file=sys.stderr)
+        return 1
+    off = pool.setdefault("offline", [])
+    if dev not in off:
+        off.append(dev)                  # F-118: member now renders OFFLINE, pool DEGRADED
+    S.save(state)
+    return 0
+
+
+def cmd_online(args, state):
+    a = _strip_flags(args)               # pool dev
+    pool = next((p for p in state["pools"] if p["name"] == a[0]), None)
+    if not pool or len(a) < 2:
+        return 1
+    dev = a[1].replace("/dev/", "")
+    dev = (S.disk_by_token(state, dev) or {}).get("name", dev)
+    pool["offline"] = [m for m in pool.get("offline", []) if m != dev]
     S.save(state)
     return 0
 
@@ -294,10 +393,11 @@ def main():
         "add": cmd_add, "attach": cmd_attach, "detach": cmd_detach,
         "remove": cmd_remove, "create": cmd_create, "destroy": cmd_destroy,
         "labelclear": cmd_labelclear,
+        "offline": cmd_offline, "online": cmd_online,     # F-118: real state change
     }
     if sub == "version":
         print("zfs-2.4.2-sim"); return 0
-    if sub in ("online", "offline", "clear", "trim", "scrub"):
+    if sub in ("clear", "trim", "scrub"):     # genuinely no-ops for the sim
         return 0
     fn = table.get(sub)
     if fn is None:

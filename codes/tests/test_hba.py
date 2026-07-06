@@ -72,6 +72,38 @@ Device is a Hard disk
         self.assertIn("S74ZNS0W582280E", mapping)
         self.assertEqual(mapping["S74ZNS0W582280E"], "1:0")
 
+    @patch('b2ctl.hba.run')
+    def test_bay_map_ignores_enclosure_services_device(self, mock_run):
+        # F-036: an SES section carries Enclosure/Slot/Serial too — its serial
+        # must NOT enter the map (else a permanent phantom GHOST row).
+        mock_run.return_value = """Physical device information
+Device is a Hard disk
+  Enclosure #                             : 1
+  Slot #                                  : 0
+  Serial No                               : DISKSERIAL01
+  Drive Type                              : SATA_SSD
+
+Device is a Enclosure services device
+  Enclosure #                             : 1
+  Slot #                                  : 8
+  Serial No                               : 7A00FG2
+  Protocol                                : SAS
+"""
+        mapping = hba.bay_map(0)
+        self.assertIn("DISKSERIAL01", mapping)
+        self.assertNotIn("7A00FG2", mapping)      # backplane SEP serial excluded
+
+    @patch('b2ctl.hba.run')
+    def test_ses_serial_produces_no_ghost(self, mock_run):
+        mock_run.return_value = """Device is a Enclosure services device
+  Enclosure #                             : 1
+  Slot #                                  : 8
+  Serial No                               : 7A00FG2
+"""
+        bm = hba.bay_map(0)
+        ghosts = hba.get_ghost_disks([Disk(dev="/dev/sda", serial="REAL")], bm=bm)
+        self.assertEqual(ghosts, [])
+
 
 class TestHbaBmReuse:
     """attach_bays / get_ghost_disks reuse a provided bay map (no re-query)."""
@@ -103,6 +135,29 @@ class TestHbaBmReuse:
         assert len(ghosts) == 1
         assert ghosts[0].serial == "SN999"
 
+    @patch("b2ctl.hba.run")
+    @patch("b2ctl.baymap.load", return_value=[])
+    def test_attach_bays_with_bm_spawns_no_sas2ircu(self, _load, mock_run):
+        # F-037: a provided bm proves the tool works — do not probe `sas2ircu list`
+        d = Disk(dev="/dev/sda", serial="SN001")
+        hba.attach_bays([d], bm={"SN001": "2:3"})
+        mock_run.assert_not_called()
+        assert d.bay == "2:3"
+
+
+class TestHaveSas2ircuMemo:
+    """F-037: have_sas2ircu() is probed once per process, then cached."""
+
+    def test_probe_memoized(self):
+        hba._reset_have_cache()
+        table = "  0  SAS2308_2     ...\n"
+        with patch("b2ctl.hba.run", return_value=table) as mock_run, \
+             patch("b2ctl.config.tool", return_value="sas2ircu"):
+            assert hba.have_sas2ircu() is True
+            assert hba.have_sas2ircu() is True
+        assert mock_run.call_count == 1        # second call hit the memo
+        hba._reset_have_cache()
+
 
 class TestVdUsage(unittest.TestCase):
     """vd_usage reads lsblk FS columns of a VD block device's mounted FS."""
@@ -112,13 +167,13 @@ class TestVdUsage(unittest.TestCase):
             'NAME="sdb" FSUSED="" FSSIZE="" MOUNTPOINT=""\n'
             'NAME="sdb1" FSUSED="1048576" FSSIZE="104857600" MOUNTPOINT="/boot"\n'
             'NAME="sdb2" FSUSED="12884901888" FSSIZE="687194767360" MOUNTPOINT="/mnt/data"\n')
-        with patch("b2ctl.hba.run", return_value=out):
+        with patch("b2ctl.blockdev.run", return_value=out):     # impl now in blockdev (F-099)
             self.assertEqual(hba.vd_usage("/dev/sdb"), (12884901888, 687194767360))
 
     def test_none_when_nothing_mounted(self):
         out = ('NAME="sdb" FSUSED="" FSSIZE="" MOUNTPOINT=""\n'
                'NAME="sdb1" FSUSED="" FSSIZE="" MOUNTPOINT=""\n')
-        with patch("b2ctl.hba.run", return_value=out):
+        with patch("b2ctl.blockdev.run", return_value=out):
             self.assertIsNone(hba.vd_usage("/dev/sdb"))
 
 
@@ -135,6 +190,30 @@ class TestByIdIndexNvmePreference(unittest.TestCase):
         idx = hba._by_id_index()
         self.assertTrue(idx["/dev/nvme0n1"].endswith(
             "nvme-Samsung_SSD_990_EVO_Plus_4TB_S7XX12345"))
+
+    @patch("b2ctl.hba.os.path.realpath")
+    @patch("b2ctl.hba.os.listdir")
+    @patch("b2ctl.hba.os.path.isdir", return_value=True)
+    def test_by_id_index_prefers_friendly_nvme_over_uuid_and_suffixed(
+            self, _isdir, mock_ls, mock_real):
+        # F-081: the un-suffixed friendly nvme-<model>_<serial> link must beat
+        # nvme-uuid.*, nvme-eui.* AND the systemd >=256 namespace-suffixed
+        # nvme-..._1 duplicate — deterministically, whatever os.listdir order.
+        import itertools
+        friendly = "nvme-Samsung_SSD_990_EVO_Plus_4TB_S7XX12345"
+        links = [
+            "nvme-uuid.86f1e3aa-0000-0000-0000-000000000000",
+            friendly + "_1",                       # namespace-suffixed duplicate
+            friendly,                              # the friendly winner
+            "nvme-eui.0025385991b1c0f4",
+        ]
+        mock_real.side_effect = lambda p: "/dev/nvme0n1"   # all point at one dev
+        for order in itertools.permutations(links):
+            mock_ls.return_value = list(order)
+            idx = hba._by_id_index()
+            self.assertTrue(
+                idx["/dev/nvme0n1"].endswith(friendly),
+                f"friendly link lost for listdir order {order}")
 
 
 class TestEnumerateNvmeByIdBay(unittest.TestCase):

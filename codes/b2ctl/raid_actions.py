@@ -35,9 +35,19 @@ def _require_raid() -> bool:
 
 
 def _dry() -> bool:
-    """Current --dry-run / [t]oggle state (shared with the watch loop)."""
-    from . import watch
-    return watch._DRY_RUN
+    """Current --dry-run / [t]oggle state (owned by common, not the UI — F-098)."""
+    from .common import is_dry_run
+    return is_dry_run()
+
+
+def _ctrl(d) -> int:
+    """Controller index for a member's perccli actions (F-085).
+
+    Enumeration is multi-controller aware (d.ctrl tags which /cN a PD lives on);
+    actions must target that same controller, not a hardcoded /c0, or a two-
+    controller box would offline/blink a drive on an unrelated VD.
+    """
+    return d.ctrl if getattr(d, "ctrl", None) is not None else hba_raid.CONTROLLER
 
 
 def _hw_members(disks) -> list:
@@ -45,26 +55,52 @@ def _hw_members(disks) -> list:
 
 
 def _pick_member(disks, target):
+    if not target:
+        return None
     for d in _hw_members(disks):
-        if target in (d.bay, d.serial, d.dev, d.dev.replace("/dev/", "")):
+        # Match ONLY per-drive identifiers. Every HW member shares the
+        # controller's VD block device (/dev/sda), so matching d.dev/'sda' would
+        # silently return the FIRST member regardless of which drive was meant —
+        # a wrong-target footgun on a replace/offline (F-048).
+        if target in (d.bay, d.ctrl_slot, d.serial):
             return d
     return None
 
 
-def _wait_rebuild(bay: str) -> bool:
-    """Poll perccli rebuild progress and render a bar until done."""
+_ONLN = ("ONLN", "ONLINE", "OPTL", "OPTIMAL")
+
+
+def _wait_rebuild(cs: str, controller: int = 0) -> bool:
+    """Poll perccli rebuild progress and render a bar until the PD is back Onln.
+
+    Completion is confirmed by the PD returning to Onln — NOT merely by
+    'Not in progress', which also reads true for a drive that never started
+    rebuilding (F-007). If the controller reports not-in-progress while the PD is
+    neither Onln nor Rbld for several polls, the rebuild has stalled -> False.
+    """
+    stall = 0
     try:
         while True:
             time.sleep(3)
-            st = hba_raid.rebuild_progress(bay)
+            state = hba_raid.pd_state(cs, controller).upper()
+            st = hba_raid.rebuild_progress(cs, controller)
             pct = st["pct"]
             filled = int(pct // 5)
             bar = "#" * filled + "-" * (20 - filled)
-            sys.stdout.write(f"\r{Y}  rebuilding {bay}: [{bar}] {pct:.0f}%{N}")
+            sys.stdout.write(f"\r{Y}  rebuilding {cs}: [{bar}] {pct:.0f}% (PD {state or '?'}){N}")
             sys.stdout.flush()
-            if st["done"]:
-                sys.stdout.write(f"\r{G}  ✔ rebuild complete on {bay}{' ' * 24}{N}\n")
+            if state in _ONLN:
+                sys.stdout.write(f"\r{G}  ✔ rebuild complete on {cs}{' ' * 24}{N}\n")
                 return True
+            if st["done"] and state not in ("RBLD", "REBUILD"):
+                stall += 1
+                if stall >= 5:
+                    sys.stdout.write(
+                        f"\n{R}  ✗ rebuild not progressing on {cs} (PD state={state or '?'}) "
+                        f"— check: perccli /cX/eE/sS show rebuild{N}\n")
+                    return False
+            else:
+                stall = 0
     except KeyboardInterrupt:
         sys.stdout.write(f"\n{Y}  (stopped watching; rebuild continues on the controller){N}\n")
         return False
@@ -97,35 +133,58 @@ def replace(target: str | None = None) -> int:
         return 1
 
     dr = _dry()
-    cmds = [["perccli", hba_raid._pd(d.bay), "set", "offline"],
-            ["perccli", hba_raid._pd(d.bay), "set", "missing"]]
+    cs = d.ctrl_slot or d.bay           # raw controller enc:slot for perccli (F-016)
+    ctrl = _ctrl(d)                     # target this PD's controller, not /c0 (F-085)
+    sel = hba_raid._pd(cs, ctrl)
+    # Audit exactly what runs: same _tool() + selector the wrappers execute (F-089).
+    cmds = [hba_raid.build_cmd(sel, "set", "offline"),
+            hba_raid.build_cmd(sel, "set", "missing")]
     op_id = safety.begin_op("raid_replace", d.serial, d.bay, d.dev,
                             d.array_name, d.array_name, cmds, dry_run=dr)
-    ok, out = hba_raid.set_offline(d.bay, dry_run=dr)
+    ok, out = hba_raid.set_offline(cs, ctrl, dry_run=dr)
     if ok:
-        ok, out = hba_raid.set_missing(d.bay, dry_run=dr)
+        ok, out = hba_raid.set_missing(cs, ctrl, dry_run=dr)
     if not ok:
         safety.end_op(op_id, False, "", out, 1, dry_run=dr)
         print(f"{R}[-] failed: {out}{N}")
         return 1
 
-    hba_raid.locate(d.bay, True, dry_run=dr)
-    print(f"{Y}[!] LED ON at bay {d.bay} — pull that drive, insert the replacement.{N}")
     try:
-        input("press Enter once the new drive is inserted... ")
-    except (EOFError, KeyboardInterrupt):
-        print()
+        hba_raid.locate(cs, True, ctrl, dry_run=dr)
+        print(f"{Y}[!] LED ON at bay {d.bay} — pull that drive, insert the replacement.{N}")
+        try:
+            input("press Enter once the new drive is inserted... ")
+        except (EOFError, KeyboardInterrupt):
+            # F-090: aborting here must NOT fall through to the rebuild logic (which
+            # would poll an empty bay and, via the old 'Not in progress'==done
+            # conflation, falsely report success). The drive is already
+            # offline+missing, so record the failure and tell the operator how to
+            # resume. The finally block still turns the locate LED off.
+            print()
+            safety.end_op(op_id, False, "", "aborted at insert prompt", 1, dry_run=dr)
+            print(f"{Y}[-] aborted — {disk_label(d)} is already offline+missing. "
+                  f"Insert the replacement, then rerun `b2ctl raid-replace` to "
+                  f"resume the rebuild.{N}")
+            return 1
 
-    if dr:
-        hba_raid.locate(d.bay, False, dry_run=dr)
-        safety.end_op(op_id, True, "", "", 0, dry_run=dr)
-        print(f"{Y}[dry-run] would start rebuild on {d.bay} and wait for resilver{N}")
-        return 0
-    st = hba_raid.rebuild_progress(d.bay)
-    if not st["done"] and st["pct"] == 0.0:
-        hba_raid.start_rebuild(d.bay)
-    done = _wait_rebuild(d.bay)
-    hba_raid.locate(d.bay, False)
+        if dr:
+            safety.end_op(op_id, True, "", "", 0, dry_run=dr)
+            print(f"{Y}[dry-run] would start rebuild on {cs} and wait for resilver{N}")
+            return 0
+
+        # F-007: 'Not in progress' also reads true for a drive that never began
+        # rebuilding (no auto-rebuild policy / foreign config). Kick off a rebuild
+        # unless the PD is already rebuilding/online, and check that it started.
+        state = hba_raid.pd_state(cs, ctrl).upper()
+        if state not in ("RBLD", "REBUILD") + _ONLN:
+            ok_r, out_r = hba_raid.start_rebuild(cs, ctrl)
+            if not ok_r:
+                safety.end_op(op_id, False, "", f"start_rebuild failed: {out_r}", 1)
+                print(f"{R}[-] rebuild did not start on {cs}: {out_r}{N}")
+                return 1
+        done = _wait_rebuild(cs, ctrl)
+    finally:
+        hba_raid.locate(cs, False, ctrl, dry_run=dr)   # never leave the LED latched on
     safety.end_op(op_id, done, "", "", 0 if done else 1)
     print((G + "[+] replace complete" if done
            else Y + "[-] rebuild not confirmed finished — check: perccli /cX/vall show") + N)
@@ -146,24 +205,27 @@ def offline(target: str) -> int:
         print("cancelled")
         return 1
     dr = _dry()
-    cmds = [["perccli", hba_raid._pd(d.bay), "set", "offline"],
-            ["perccli", hba_raid._pd(d.bay), "set", "missing"]]
+    cs = d.ctrl_slot or d.bay
+    ctrl = _ctrl(d)
+    sel = hba_raid._pd(cs, ctrl)
+    cmds = [hba_raid.build_cmd(sel, "set", "offline"),
+            hba_raid.build_cmd(sel, "set", "missing")]
     op_id = safety.begin_op("raid_offline", d.serial, d.bay, d.dev,
                             d.array_name, d.array_name, cmds, dry_run=dr)
-    ok, out = hba_raid.set_offline(d.bay, dry_run=dr)
+    ok, out = hba_raid.set_offline(cs, ctrl, dry_run=dr)
     if ok:
-        ok, out = hba_raid.set_missing(d.bay, dry_run=dr)
+        ok, out = hba_raid.set_missing(cs, ctrl, dry_run=dr)
     safety.end_op(op_id, ok, "", out, 0 if ok else 1, dry_run=dr)
     if ok:
-        hba_raid.locate(d.bay, True, dry_run=dr)
-        print(f"{G}[+] {d.bay} offline+missing; LED ON — pull it. "
-              f"Stop LED later with: b2ctl locate {d.bay} off{N}")
+        hba_raid.locate(cs, True, ctrl, dry_run=dr)
+        print(f"{G}[+] bay {d.bay} offline+missing; LED ON — pull it. "
+              f"Stop the LED later with: perccli {sel} stop locate{N}")
     else:
         print(f"{R}[-] failed: {out}{N}")
     return 0 if ok else 1
 
 
-def create_vd(level: str, drives: list[str]) -> int:
+def create_vd(level: str, drives: list[str], controller: int | None = None) -> int:
     """Create a virtual disk (wipes the member drives)."""
     if not _require_raid():
         return 1
@@ -179,11 +241,12 @@ def create_vd(level: str, drives: list[str]) -> int:
         print("cancelled")
         return 1
     dr = _dry()
-    cmds = [["perccli", "/c0", "add", "vd", hba_raid._raid_token(level),
-             f"drives={','.join(drives)}"]]
+    ctrl = controller if controller is not None else hba_raid.CONTROLLER
+    cmds = [hba_raid.build_cmd(f"/c{ctrl}", "add", "vd", hba_raid._raid_token(level),
+            f"drives={','.join(drives)}")]
     op_id = safety.begin_op("raid_create", "", ",".join(drives), "",
                             level, level, cmds, dry_run=dr)
-    ok, out = hba_raid.add_vd(level, drives, dry_run=dr)
+    ok, out = hba_raid.add_vd(level, drives, ctrl, dry_run=dr)
     safety.end_op(op_id, ok, out, "" if ok else out, 0 if ok else 1, dry_run=dr)
     print((G + "[+] VD created" if ok else R + f"[-] failed: {out}") + N)
     return 0 if ok else 1
@@ -218,7 +281,7 @@ def assign_perc(d, candidates: list) -> int:
         if not _confirm(f"set {disk_label(d)} to JBOD (expose to the OS for ZFS)?"):
             print("cancelled")
             return 1
-        ok, out = hba_raid.set_jbod(d.bay, dry_run=_dry())
+        ok, out = hba_raid.set_jbod(d.ctrl_slot or d.bay, _ctrl(d), dry_run=_dry())
         if ok and not _dry():
             import subprocess
             subprocess.run(["udevadm", "settle", "--timeout=10"], check=False)
@@ -242,7 +305,7 @@ def assign_perc(d, candidates: list) -> int:
                     print(f"{Y}  invalid selection — cancelled{N}")
                     return 1
         level = input("  raid level (raid0/raid1/raid5/raid10) [raid1]> ").strip() or "raid1"
-        return create_vd(level, [p.bay for p in picks])
+        return create_vd(level, [p.ctrl_slot or p.bay for p in picks], controller=_ctrl(d))
 
     if choice == "4":
         dg = input("  drive-group # to protect (blank = global spare)> ").strip()
@@ -251,10 +314,12 @@ def assign_perc(d, candidates: list) -> int:
             print("cancelled")
             return 1
         dr = _dry()
-        cmds = [["perccli", hba_raid._pd(d.bay), "add", "hotsparedrive"]
+        cs = d.ctrl_slot or d.bay
+        ctrl = _ctrl(d)
+        cmds = [hba_raid.build_cmd(hba_raid._pd(cs, ctrl), "add", "hotsparedrive")
                 + ([f"DGs={dg}"] if dg else [])]
         op_id = safety.begin_op("raid_hotspare", d.serial, d.bay, d.dev, tgt, tgt, cmds, dry_run=dr)
-        ok, out = hba_raid.add_hotspare(d.bay, dg or None, dry_run=dr)
+        ok, out = hba_raid.add_hotspare(cs, dg or None, ctrl, dry_run=dr)
         safety.end_op(op_id, ok, out, "" if ok else out, 0 if ok else 1, dry_run=dr)
         print((G + "  ✔ hot spare added" if ok else R + f"  ✗ failed: {out}") + N)
         return 0 if ok else 1
@@ -274,9 +339,10 @@ def delete_vd(vd: int) -> int:
         print("cancelled")
         return 1
     dr = _dry()
-    cmds = [["perccli", f"/c0/v{vd}", "del", "force"]]
+    ctrl = hba_raid.CONTROLLER
+    cmds = [hba_raid.build_cmd(f"/c{ctrl}/v{vd}", "del", "force")]
     op_id = safety.begin_op("raid_del_vd", "", "", "", f"vd{vd}", f"vd{vd}", cmds, dry_run=dr)
-    ok, out = hba_raid.del_vd(int(vd), dry_run=dr)
+    ok, out = hba_raid.del_vd(int(vd), ctrl, dry_run=dr)
     safety.end_op(op_id, ok, out, "" if ok else out, 0 if ok else 1, dry_run=dr)
     print((G + f"[+] vd{vd} deleted" if ok else R + f"[-] failed: {out}") + N)
     return 0 if ok else 1

@@ -7,6 +7,7 @@ download dir or /opt/MegaRAID — matching install.sh.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -19,6 +20,12 @@ _GDRIVE = {
     "sas2ircu": "1rP7f8weCvXEaqWSAj5MDNwMDvK2RXTCt",
     "perccli":  "1hJt5Sr2xNW4OHCD-AoefiHhjJCeWVWVk",
 }
+# Pinned SHA-256 per archive. These binaries run as root on both nodes, so a
+# swapped/tampered Drive file must be rejected before extraction (F-043). Fill
+# from a trusted copy: `sha256sum SAS2IRCU_P20.zip`. Left empty = unverified
+# (still size-checked); populate once the archives are pinned, and keep it in
+# lockstep with install.sh's `sha256sum -c`.
+_SHA256: dict[str, str] = {}
 _BASE = "https://drive.usercontent.google.com/download?export=download&confirm=t&id="
 _ARCHIVE_NAME = {
     "sas2ircu": "SAS2IRCU_P20.zip",
@@ -51,14 +58,29 @@ def tool_ok(name: str) -> bool:
     return path is not None and _executes(path, _PROBE.get(name, []))
 
 
-def download(file_id: str, dest_path: str) -> None:
-    """Download a Google Drive file to dest_path. Raises RuntimeError if result < 1 KB."""
+def download(file_id: str, dest_path: str, *, sha256: str | None = None) -> None:
+    """Download a Google Drive file to dest_path.
+
+    Uses urlopen with a 60 s timeout so a black-holed connection can't hang the
+    install forever (F-043). Raises RuntimeError on a <1 KB result (HTML error
+    page) or, when a hash is pinned, on a SHA-256 mismatch (tampered archive).
+    """
     url = _BASE + file_id
     print(f"    downloading...", end="", flush=True)
-    urllib.request.urlretrieve(url, dest_path)
+    with urllib.request.urlopen(url, timeout=60) as resp, open(dest_path, "wb") as f:
+        shutil.copyfileobj(resp, f)
     size = os.path.getsize(dest_path)
     if size < 1024:
         raise RuntimeError(f"download too small ({size} bytes) — may be HTML error page")
+    if sha256:
+        h = hashlib.sha256()
+        with open(dest_path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        got = h.hexdigest()
+        if got != sha256:
+            raise RuntimeError(f"sha256 mismatch — expected {sha256}, got {got}; "
+                               f"refusing to install a tampered archive")
     print(f" {size // 1024} KB")
 
 
@@ -103,7 +125,9 @@ def install_perccli(archive: str) -> tuple[bool, str]:
     tmp = tempfile.mkdtemp()
     try:
         with tarfile.open(archive) as tf:
-            tf.extractall(tmp)
+            # filter="data" (stdlib 3.12+) rejects '../' path-traversal members —
+            # a tampered archive can't write /usr/sbin/zpool as root (F-086).
+            tf.extractall(tmp, filter="data")
         rpm = None
         for root, _dirs, files in os.walk(tmp):
             for f in files:
@@ -128,8 +152,16 @@ def install_perccli(archive: str) -> tuple[bool, str]:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def ensure_prereqs() -> None:
-    """Install + verify apt prerequisites the tool binaries need.
+# Prereq package tiers — the single source of truth shared with install.sh
+# (F-087/F-111). Per-tool prereqs install ONLY when that tool is requested so
+# --perc never registers i386 on a RAID box; runtime deps are always useful.
+PREREQ_SAS2IRCU = ["libc6-i386"]        # 32-bit ELF loader (needs dpkg i386 arch)
+PREREQ_PERCCLI = ["alien"]              # RPM -> .deb conversion
+RUNTIME_PKGS = ["smartmontools", "zfsutils-linux", "gdisk"]
+
+
+def ensure_prereqs(tools: list[str] | None = None) -> None:
+    """Install + verify apt prerequisites for the requested tool subset.
 
     - alien      : perccli ships only as an RPM; alien converts it to a .deb.
     - libc6-i386 : sas2ircu is a 32-bit ELF and needs the i386 multiarch loader.
@@ -140,23 +172,33 @@ def ensure_prereqs() -> None:
     Verifies the OUTCOME (does the 32-bit loader exist?) rather than trusting
     apt's exit code, and surfaces the apt error tail when it really failed.
     """
-    print("  [*] ensuring prerequisites (alien, libc6-i386)...")
-    subprocess.run(["dpkg", "--add-architecture", "i386"],
-                   capture_output=True, check=False)
+    tools = tools if tools is not None else ["sas2ircu", "perccli"]
+    want_sas = "sas2ircu" in tools
+    want_perc = "perccli" in tools
+    pkgs = list(RUNTIME_PKGS)
+    if want_sas:
+        pkgs += PREREQ_SAS2IRCU
+    if want_perc:
+        pkgs += PREREQ_PERCCLI
+    print(f"  [*] ensuring prerequisites ({', '.join(pkgs)})...")
+    if want_sas:                         # only touch i386 when sas2ircu is wanted
+        subprocess.run(["dpkg", "--add-architecture", "i386"],
+                       capture_output=True, check=False)
     subprocess.run(["apt-get", "update", "-qq"],
                    capture_output=True, check=False)
-    r = subprocess.run(["apt-get", "install", "-y", "alien", "libc6-i386"],
+    r = subprocess.run(["apt-get", "install", "-y", *pkgs],
                        capture_output=True, text=True, check=False)
 
-    loader_ok = any(os.path.exists(p) for p in
-                    ("/lib/ld-linux.so.2", "/lib32/ld-linux.so.2"))
-    if not loader_ok:
-        print("  [✗] libc6-i386 not active — sas2ircu (32-bit) will not run.")
-        for ln in (r.stderr or r.stdout or "").strip().splitlines()[-3:]:
-            print(f"        apt: {ln}")
-        print("        fix: dpkg --add-architecture i386 && apt-get update "
-              "&& apt-get install -y libc6-i386")
-    if shutil.which("alien") is None:
+    if want_sas:
+        loader_ok = any(os.path.exists(p) for p in
+                        ("/lib/ld-linux.so.2", "/lib32/ld-linux.so.2"))
+        if not loader_ok:
+            print("  [✗] libc6-i386 not active — sas2ircu (32-bit) will not run.")
+            for ln in (r.stderr or r.stdout or "").strip().splitlines()[-3:]:
+                print(f"        apt: {ln}")
+            print("        fix: dpkg --add-architecture i386 && apt-get update "
+                  "&& apt-get install -y libc6-i386")
+    if want_perc and shutil.which("alien") is None:
         print("  [✗] alien not installed — perccli install will fail.")
 
 
@@ -166,12 +208,12 @@ def install_tools(tools: list[str] | None = None) -> None:
         "sas2ircu": install_sas2ircu,
         "perccli":  install_perccli,
     }
-    ensure_prereqs()
     if tools is None:
         tools = [t for t in _install_fn if not tool_ok(t)]
         if not tools:
             print("  all tools already installed")
             return
+    ensure_prereqs(tools)                # only the prereqs the subset needs (F-111)
 
     tmp = tempfile.mkdtemp()
     try:
@@ -183,8 +225,10 @@ def install_tools(tools: list[str] | None = None) -> None:
             print(f"  [*] {name}...")
             archive = os.path.join(tmp, _ARCHIVE_NAME[name])
             try:
-                download(_GDRIVE[name], archive)
-            except RuntimeError as exc:
+                download(_GDRIVE[name], archive, sha256=_SHA256.get(name))
+            except (RuntimeError, OSError) as exc:
+                # OSError covers urllib URLError/HTTPError/socket errors on an
+                # offline box — print the clean line, don't traceback (F-044).
                 print(f"  [✗] {name}: {exc}")
                 continue
             ok, msg = fn(archive)
@@ -224,5 +268,12 @@ def install_profile(profile: str) -> None:
         return
     install_tools(tools)
     mode = _PROFILE_MODE[profile]
-    _cfg.set_mode(mode)
-    print(f"  [✔] controller.mode = {mode}  ({_cfg.CONFIG_PATH})")
+    # Only commit the mode if every requested tool is actually present AND
+    # executable — otherwise the box is forced onto a backend it cannot serve
+    # (e.g. mode=raid with no working perccli), breaking every later run (F-045).
+    if all(tool_ok(t) for t in tools):
+        _cfg.set_mode(mode)
+        print(f"  [✔] controller.mode = {mode}  ({_cfg.CONFIG_PATH})")
+    else:
+        print(f"  [!] controller.mode left unchanged — {profile} tool install "
+              f"failed; fix it then re-run, or set controller.mode by hand.")

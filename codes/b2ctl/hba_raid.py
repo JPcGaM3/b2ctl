@@ -23,6 +23,14 @@ CONTROLLER = 0
 _TOOL_CANDIDATES = ("perccli64", "perccli")
 
 _tool_cache: str | None = None
+_have_tool_cache: bool | None = None
+
+
+def _reset_caches() -> None:
+    """Clear the per-process perccli memos (tests / a forced re-probe, F-040)."""
+    global _tool_cache, _have_tool_cache
+    _tool_cache = None
+    _have_tool_cache = None
 
 
 def _ctrlcount(tool: str) -> int | None:
@@ -62,14 +70,27 @@ def _tool() -> str:
     return _tool_cache
 
 
+def build_cmd(*parts) -> list[str]:
+    """Full argv for a perccli action: resolved tool binary + parts.
+
+    Used by BOTH the runner and the audit trail (raid_actions.begin_op) so
+    ops.jsonl records the exact command that ran — not a hand-written 'perccli
+    …' literal that drifts from the real _tool() path / controller index (F-089).
+    """
+    return [_tool(), *parts]
+
+
 def have_tool() -> bool:
-    """Return True if some storcli/perccli binary reports a controller."""
-    from . import config as _cfg
-    for name in _TOOL_CANDIDATES:
-        cnt = _ctrlcount(_cfg.tool(name))
-        if cnt and cnt > 0:
-            return True
-    return False
+    """Return True if some storcli/perccli binary reports a controller.
+
+    Memoized: one RAID-mode scan probed `show ctrlcount` up to ~10x, and perccli
+    is slow (F-040/F-041). Cleared by _reset_caches (tests / hotplug refresh)."""
+    global _have_tool_cache
+    if _have_tool_cache is None:
+        from . import config as _cfg
+        _have_tool_cache = any((_ctrlcount(_cfg.tool(n)) or 0) > 0
+                               for n in _TOOL_CANDIDATES)
+    return _have_tool_cache
 
 
 def _list_controllers() -> list[int]:
@@ -87,7 +108,13 @@ def _ctrl_indices(controller: int | None = None) -> list[int]:
     if controller is not None:
         return [controller]
     setting = _cfg.controller_index_setting()
-    return _list_controllers() if setting == "all" else [int(setting)]
+    if setting == "all":
+        return _list_controllers()
+    try:
+        return [int(setting)]
+    except (TypeError, ValueError):
+        # F-039: malformed controller.index -> fall back to detection, don't crash.
+        return _list_controllers()
 
 
 def bay_map(controller: int | None = None) -> dict:
@@ -121,17 +148,8 @@ def _parse_bay_map(text: str, mapping: dict) -> None:
                 current_slot = None
 
 
-def _lsblk_pairs(cols: str) -> list[dict]:
-    """Parse lsblk -P KEY="value" lines (reuse same logic as hba.py)."""
-    from . import config as _cfg
-    import re as _re
-    _PAIR_RE = _re.compile(r'(\w+)="(.*?)"')
-    out = run([_cfg.tool("lsblk"), "-dnb", "-P", "-o", cols])
-    rows = []
-    for line in out.splitlines():
-        if line.strip():
-            rows.append(dict(_PAIR_RE.findall(line)))
-    return rows
+# (hba_raid._lsblk_pairs was a dead duplicate of hba._lsblk_pairs — removed,
+# F-083. The RAID backend reuses hba.enumerate_disks / hba._lsblk_pairs.)
 
 
 # Block-device models that mean "this is a PERC virtual disk, not a real disk".
@@ -243,14 +261,24 @@ def enumerate_disks() -> list[Disk]:
     # Any block device on the controller is a valid megaraid SMART target.
     ctrl_dev = (perc_devs[0].dev if perc_devs
                 else (raw[0].dev if raw else "/dev/sda"))
-    # enc:slot -> serial (from eall/sall) so members carry SN before SMART runs.
-    bay_to_sn = {bay: sn for sn, bay in bay_map().items()}
+    # Fetch eall/sall ONCE per controller and reuse the text for both the
+    # serial map and the non-member PD pass — the old code ran it twice, plus a
+    # third time inside bay_map() (F-040/F-041).
+    t = _tool()
+    eall_by_ctrl = {idx: run([t, f"/c{idx}/eall/sall", "show", "all"])
+                    for idx in _ctrl_indices()}
+    bm: dict = {}
+    for text in eall_by_ctrl.values():
+        _parse_bay_map(text, bm)
+    bay_to_sn = {bay: sn for sn, bay in bm.items()}
 
     member_disks: list[Disk] = []
     member_bays = set()
     for m in members:
         d = Disk(dev=ctrl_dev)
         d.bay = m["bay"]
+        d.ctrl_slot = m["bay"]          # raw perccli enc:slot (never remapped)
+        d.ctrl = m.get("controller")    # which /cN this PD lives on (F-085)
         d.did = int(m["did"]) if str(m["did"]).isdigit() else None
         d.smart_dtype = f"megaraid,{m['did']}"
         d.model = m["model"]
@@ -267,19 +295,21 @@ def enumerate_disks() -> list[Disk]:
     # ghosts — the controller just hides them from the OS. Surface them as real
     # disks (megaraid SMART) so they show health + state, not false GHOST rows.
     raw_serials = {d.serial for d in raw if d.serial}
-    t = _tool()
     for idx in _ctrl_indices():
-        for pd in _parse_pd_rows(run([t, f"/c{idx}/eall/sall", "show", "all"])):
+        for pd in _parse_pd_rows(eall_by_ctrl.get(idx, "")):
             if pd["bay"] in member_bays:
                 continue
             sn = bay_to_sn.get(pd["bay"], "")
             if sn and sn in raw_serials:        # OS-exposed JBOD: tag the real disk
                 for r in raw:
                     if r.serial == sn:
-                        r.bay, r.pd_state = pd["bay"], pd["state"]
+                        r.bay, r.pd_state, r.ctrl_slot = pd["bay"], pd["state"], pd["bay"]
+                        r.ctrl = idx
                 continue
             d = Disk(dev=ctrl_dev)              # hidden drive: synthesise + megaraid SMART
             d.bay = pd["bay"]
+            d.ctrl_slot = pd["bay"]            # raw perccli enc:slot (never remapped)
+            d.ctrl = idx                       # which /cN this PD lives on (F-085)
             d.did = int(pd["did"]) if str(pd["did"]).isdigit() else None
             d.smart_dtype = f"megaraid,{pd['did']}"
             d.model = pd["model"]
@@ -312,22 +342,16 @@ def raid_volumes() -> list[dict]:
 
 
 def attach_bays(disks: list[Disk], controller: int | None = None, bm=None) -> None:
-    """Fill disk.bay from perccli, same algorithm as hba.attach_bays."""
+    """Fill disk.bay from perccli via the shared baymap.assign_bays loop (F-084)."""
     from . import baymap
-    if not have_tool():
+    # A populated bm proves the tool works; only probe when nothing was passed
+    # (a direct call, not core.scan) — F-041.
+    if bm is None and not have_tool():
         return
     panels = baymap.load()
     if bm is None:
         bm = bay_map(controller)
-    for d in disks:
-        if d.serial:
-            if d.serial in bm:
-                d.bay = baymap.remap_slot(bm[d.serial], panels)
-            else:
-                for bm_serial, bay_val in bm.items():
-                    if d.serial.startswith(bm_serial) or bm_serial.startswith(d.serial):
-                        d.bay = baymap.remap_slot(bay_val, panels)
-                        break
+    baymap.assign_bays(disks, bm, panels)      # shared serial-match loop (F-084)
 
 
 def get_ghost_disks(disks: list[Disk], controller: int | None = None, bm=None) -> list[Disk]:
@@ -348,7 +372,17 @@ def udev_rescue_ghost(serial: str) -> bool:
 
 
 def _pd(enc_slot: str, controller: int = CONTROLLER) -> str:
-    """Return the perccli physical-drive selector '/cC/eE/sS' for an enc:slot."""
+    """Return the perccli physical-drive selector '/cC/eE/sS' for an enc:slot.
+
+    Rejects a non-numeric enc:slot (e.g. a remapped display bay label leaking in)
+    so a mutating action can never silently target the wrong physical slot
+    (F-016). Callers pass Disk.ctrl_slot — the raw controller locator — not the
+    display bay.
+    """
+    if not re.fullmatch(r"\d+:\d+", enc_slot or ""):
+        raise ValueError(
+            f"invalid controller enc:slot {enc_slot!r} — refusing to build a "
+            f"perccli selector from a display bay label")
     enc, slot = enc_slot.split(":")
     return f"/c{controller}/e{enc}/s{slot}"
 
@@ -360,7 +394,7 @@ def locate(enc_slot: str, on: bool, controller: int = CONTROLLER, *,
     perccli syntax is verb-first: `/cC/eE/sS start locate` / `... stop locate`.
     """
     action = "start" if on else "stop"
-    return run_check([_tool(), _pd(enc_slot, controller), action, "locate"],
+    return run_check(build_cmd(_pd(enc_slot, controller), action, "locate"),
                      dry_run=dry_run)
 
 
@@ -371,32 +405,54 @@ def locate(enc_slot: str, on: bool, controller: int = CONTROLLER, *,
 def set_offline(enc_slot: str, controller: int = CONTROLLER, *,
                 dry_run: bool = False) -> tuple[bool, str]:
     """Mark a physical drive offline (prepare to fail it out)."""
-    return run_check([_tool(), _pd(enc_slot, controller), "set", "offline"], dry_run=dry_run)
+    return run_check(build_cmd(_pd(enc_slot, controller), "set", "offline"), dry_run=dry_run)
 
 
 def set_missing(enc_slot: str, controller: int = CONTROLLER, *,
                 dry_run: bool = False) -> tuple[bool, str]:
     """Mark an offline drive as missing so it can be pulled."""
-    return run_check([_tool(), _pd(enc_slot, controller), "set", "missing"], dry_run=dry_run)
+    return run_check(build_cmd(_pd(enc_slot, controller), "set", "missing"), dry_run=dry_run)
 
 
 def start_rebuild(enc_slot: str, controller: int = CONTROLLER, *,
                   dry_run: bool = False) -> tuple[bool, str]:
     """Start a rebuild onto the drive in enc:slot."""
-    return run_check([_tool(), _pd(enc_slot, controller), "start", "rebuild"], dry_run=dry_run)
+    return run_check(build_cmd(_pd(enc_slot, controller), "start", "rebuild"), dry_run=dry_run)
+
+
+def pd_state(enc_slot: str, controller: int = CONTROLLER) -> str:
+    """Current PD state (Onln/Rbld/UGood/Offln/...) for an enc:slot, or ''.
+
+    Used to disambiguate rebuild_progress's 'Not in progress' — which reads the
+    same whether a rebuild finished (PD Onln) or never started (PD still
+    UGood/Offln). Re-parses the live PD table (F-007).
+    """
+    out = run([_tool(), f"/c{controller}/eall/sall", "show", "all"])
+    for pd in _parse_pd_rows(out):
+        if pd["bay"] == enc_slot:
+            return pd["state"]
+    return ""
 
 
 def rebuild_progress(enc_slot: str, controller: int = CONTROLLER) -> dict:
     """Parse `perccli /cC/eE/sS show rebuild`.
 
-    Returns {"pct": float, "done": bool}. 'done' is True when the controller
-    reports the drive is no longer in a rebuild ('Not in progress'/100%).
+    Returns {"pct": float, "done": bool, "in_progress": bool}. Real perccli/
+    storcli prints a table row ('/c0/e32/s4  28  In progress  0 Minutes') whose
+    percent is a BARE integer under a 'Progress%' header — no trailing '%' — so
+    the table-row match is tried first and the '%'-suffixed MegaCli form is kept
+    only as a fallback (F-042). 'in_progress' lets the replace guard tell a
+    28%-underway rebuild from a not-yet-started one.
     """
     out = run([_tool(), _pd(enc_slot, controller), "show", "rebuild"])
-    m = re.search(r"(\d+(?:\.\d+)?)\s*%", out)
+    low = out.lower()
+    m = re.search(r"^/c\d+/e\d+/s\d+\s+(\d+(?:\.\d+)?)\s", out, re.M)
+    if not m:
+        m = re.search(r"(\d+(?:\.\d+)?)\s*%", out)      # MegaCli-style fallback
     pct = float(m.group(1)) if m else 0.0
-    done = ("not in progress" in out.lower()) or pct >= 100.0
-    return {"pct": pct, "done": done}
+    in_progress = re.search(r"(?<!not )in progress", low) is not None
+    done = ("not in progress" in low) or pct >= 100.0
+    return {"pct": pct, "done": done, "in_progress": in_progress}
 
 
 def _raid_token(level: str) -> str:
@@ -413,8 +469,8 @@ def add_vd(level: str, drives: list[str], controller: int = CONTROLLER, *,
 
     perccli takes the level as r0/r1/r5/... (not type=raidN).
     """
-    return run_check([_tool(), f"/c{controller}", "add", "vd",
-                      _raid_token(level), f"drives={','.join(drives)}"], dry_run=dry_run)
+    return run_check(build_cmd(f"/c{controller}", "add", "vd",
+                     _raid_token(level), f"drives={','.join(drives)}"), dry_run=dry_run)
 
 
 def add_hotspare(enc_slot: str, dg=None, controller: int = CONTROLLER, *,
@@ -423,7 +479,7 @@ def add_hotspare(enc_slot: str, dg=None, controller: int = CONTROLLER, *,
 
     dg=None -> global spare; dg=<n> -> dedicated to that drive group.
     """
-    cmd = [_tool(), _pd(enc_slot, controller), "add", "hotsparedrive"]
+    cmd = build_cmd(_pd(enc_slot, controller), "add", "hotsparedrive")
     if dg is not None and str(dg) != "":
         cmd.append(f"DGs={dg}")
     return run_check(cmd, dry_run=dry_run)
@@ -435,10 +491,10 @@ def set_jbod(enc_slot: str, controller: int = CONTROLLER, *,
 
     The drive leaves the controller's RAID management and appears as /dev/sdX.
     """
-    return run_check([_tool(), _pd(enc_slot, controller), "set", "jbod"], dry_run=dry_run)
+    return run_check(build_cmd(_pd(enc_slot, controller), "set", "jbod"), dry_run=dry_run)
 
 
 def del_vd(vd: int, controller: int = CONTROLLER, *,
            dry_run: bool = False) -> tuple[bool, str]:
     """Delete a virtual disk (DESTRUCTIVE): `perccli /cC/vV del force`."""
-    return run_check([_tool(), f"/c{controller}/v{vd}", "del", "force"], dry_run=dry_run)
+    return run_check(build_cmd(f"/c{controller}/v{vd}", "del", "force"), dry_run=dry_run)

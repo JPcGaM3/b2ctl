@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import patch
 
 import b2ctl.hba_raid as raid
+import b2ctl.raid_actions as ra
 
 
 # Real `perccli /c0/vall show all` output from a Dell R640 / PERC H730P Mini.
@@ -152,13 +153,79 @@ class TestEnumerate(unittest.TestCase):
         self.assertEqual(out[0]["members"], 2)
 
 
+class TestPerccliCaching(unittest.TestCase):
+    """F-040/F-041: perccli probes are not re-run redundantly per scan."""
+
+    def test_have_tool_memoized(self):
+        raid._reset_caches()
+        with patch.object(raid, "run", return_value="Controller Count = 1") as mock_run, \
+             patch("b2ctl.config.tool", side_effect=lambda n: n):
+            assert raid.have_tool() is True
+            assert raid.have_tool() is True
+        # one probe per candidate on the first call, none on the second
+        assert mock_run.call_count <= len(raid._TOOL_CANDIDATES)
+        raid._reset_caches()
+
+    def test_enumerate_fetches_eall_sall_once_per_controller(self):
+        from b2ctl.common import Disk
+        sda = Disk(dev="/dev/sda"); sda.model = "PERC H730P Mini"
+        vols, members = raid._parse_vall(_VALL)
+        calls = []
+
+        def _run(cmd, **kw):
+            calls.append(cmd)
+            return ""
+
+        with patch.object(raid, "have_tool", return_value=True), \
+             patch.object(raid, "_vall_data", return_value=(vols, members)), \
+             patch.object(raid, "_ctrl_indices", return_value=[0]), \
+             patch.object(raid, "_tool", return_value="perccli"), \
+             patch.object(raid, "run", side_effect=_run), \
+             patch("b2ctl.hba.enumerate_disks", return_value=[sda]):
+            raid.enumerate_disks()
+        eall_calls = [c for c in calls if "/c0/eall/sall" in c]
+        self.assertEqual(len(eall_calls), 1)   # fetched once, not 2-3x
+
+    def test_attach_bays_with_bm_does_not_probe(self):
+        from b2ctl.common import Disk
+        d = Disk(dev="/dev/sda", serial="SN1")
+        with patch.object(raid, "run") as mock_run, \
+             patch("b2ctl.baymap.load", return_value=[]):
+            raid.attach_bays([d], bm={"SN1": "32:0"})
+        mock_run.assert_not_called()
+        self.assertEqual(d.bay, "32:0")
+
+
 class TestActions(unittest.TestCase):
 
     def test_pd_selector(self):
         self.assertEqual(raid._pd("32:0"), "/c0/e32/s0")
         self.assertEqual(raid._pd("8:5", controller=1), "/c1/e8/s5")
 
-    def test_rebuild_progress_in_progress(self):
+    # Real PERC H730P `show rebuild` — a table with a BARE integer under
+    # 'Progress%', no trailing '%' (F-042).
+    _REBUILD_TABLE = """Controller = 0
+Status = Success
+
+--------------------------------------------------------
+Drive-ID    Progress% Status      Estimated Time Left
+--------------------------------------------------------
+/c0/e32/s4         28 In progress 0 Minutes
+--------------------------------------------------------
+"""
+
+    def test_rebuild_progress_perccli_table_format(self):
+        with patch.object(raid, "run", return_value=self._REBUILD_TABLE), \
+             patch("b2ctl.config.tool", side_effect=lambda n: n):
+            raid._tool_cache = "perccli"
+            st = raid.rebuild_progress("32:4")
+        raid._tool_cache = None
+        self.assertAlmostEqual(st["pct"], 28.0)
+        self.assertFalse(st["done"])
+        self.assertTrue(st["in_progress"])
+
+    def test_rebuild_progress_percent_fallback(self):
+        # other firmware may still print an explicit NN% — keep parsing it
         with patch.object(raid, "run", return_value="Rebuild Progress on Drive = 42.5%"), \
              patch("b2ctl.config.tool", side_effect=lambda n: n):
             raid._tool_cache = "perccli"
@@ -224,6 +291,85 @@ class TestActions(unittest.TestCase):
     def test_set_jbod(self):
         cmd = self._capture(lambda: raid.set_jbod("32:4"))
         self.assertEqual(cmd, ["perccli", "/c0/e32/s4", "set", "jbod"])
+
+
+class TestParseBayMap(unittest.TestCase):
+    """F-082: the perccli 'Drive /cN/eE/sS Device attributes' -> 'SN =' pairing
+    that attributes every RAID member's serial to its enclosure:slot. Realistic
+    multi-drive `/cX/eall/sall show all` detailed section."""
+
+    # Two drives, each a 'Device attributes' header followed by an SN line and
+    # interleaved attribute noise (WWN/Model), mirroring the R640 output style.
+    _EALL = """\
+Drive /c0/e32/s0 Device attributes :
+====================================
+SN = S8C5NX0R123456
+Manufacturer Id = ATA
+Model Number = Samsung SSD 870 EVO 1TB
+WWN = 5002538E40A1B2C3
+
+Drive /c0/e32/s1 Device attributes :
+====================================
+SN = S8C5NX0R654321
+Manufacturer Id = ATA
+Model Number = Samsung SSD 870 EVO 1TB
+WWN = 5002538E40A1B2D4
+"""
+
+    def test_two_drives_serial_to_encslot(self):
+        mapping = {}
+        raid._parse_bay_map(self._EALL, mapping)
+        self.assertEqual(mapping, {"S8C5NX0R123456": "32:0",
+                                   "S8C5NX0R654321": "32:1"})
+
+    def test_sn_line_only_binds_to_preceding_drive_header(self):
+        # An 'SN =' line with no preceding Drive header is ignored; the SN that
+        # follows a header binds to that header's enc:slot.
+        text = ("SN = ORPHAN_NO_HEADER\n"
+                "Drive /c0/e32/s0 Device attributes :\n"
+                "State = Onln\n"
+                "SN = S0REAL\n"
+                "Model Number = Samsung SSD 870 EVO 1TB\n")
+        mapping = {}
+        raid._parse_bay_map(text, mapping)
+        self.assertEqual(mapping, {"S0REAL": "32:0"})
+        self.assertNotIn("ORPHAN_NO_HEADER", mapping)
+
+    def test_missing_sn_skipped(self):
+        # A drive whose 'Device attributes' section carries no SN before the
+        # next Drive header is not mapped; only the drive that does have an SN
+        # ends up in the mapping.
+        text = ("Drive /c0/e32/s4 Device attributes :\n"
+                "====================================\n"
+                "WWN = 5002538E40A1B2C3\n"
+                "Model Number = Samsung SSD 870 EVO 1TB\n"
+                "Drive /c0/e32/s5 Device attributes :\n"
+                "====================================\n"
+                "SN = S5ONLY\n"
+                "WWN = 5002538E40A1B2D4\n")
+        mapping = {}
+        raid._parse_bay_map(text, mapping)
+        self.assertEqual(mapping, {"S5ONLY": "32:5"})
+        self.assertNotIn("32:4", mapping.values())
+
+
+class TestActionController(unittest.TestCase):
+    """F-085: a member enumerated on /c1 must have its perccli action target
+    /c1, not the hardcoded /c0."""
+
+    def test_actions_target_member_controller(self):
+        from b2ctl.common import Disk
+        d = Disk(dev="/dev/sda", ctrl=1, ctrl_slot="32:2")
+        seen = {}
+        with patch.object(raid, "run_check",
+                          side_effect=lambda c, **k: (seen.setdefault("cmd", c),
+                                                      (True, ""))[1]), \
+             patch("b2ctl.config.tool", side_effect=lambda n: n):
+            raid._tool_cache = "perccli"
+            # ra._ctrl(d) resolves the member's controller (1), threaded into _pd.
+            raid.set_offline(d.ctrl_slot, ra._ctrl(d))
+        raid._tool_cache = None
+        self.assertEqual(seen["cmd"], ["perccli", "/c1/e32/s2", "set", "offline"])
 
 
 if __name__ == "__main__":

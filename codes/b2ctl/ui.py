@@ -139,22 +139,6 @@ def render_pools(pools: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def render_raid_volumes(vols: list[dict]) -> str:
-    """Render the hardware (PERC) RAID volumes table. Empty string if none."""
-    if not vols:
-        return ""
-    lines = ["RAID volumes (hardware):"]
-    for v in vols:
-        bad = not str(v.get("state", "")).lower().startswith("optl")
-        tag = R if bad else G
-        lines.append(
-            f"  {tag}vd{v.get('vd','?'):<3} {str(v.get('raid','?')):<7}"
-            f"{str(v.get('state','?')):<7} {str(v.get('size','?')):<11}"
-            f"members={v.get('members','?')}{N}"
-            f"{('  ' + v['name']) if v.get('name') else ''}")
-    return "\n".join(lines)
-
-
 def render_details(disks: list[Disk], pools: list[dict] | None = None) -> str:
     out = []
     config = [d for d in disks if d.level == "CONFIG"]

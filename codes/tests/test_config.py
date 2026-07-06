@@ -145,6 +145,50 @@ class TestConfig:
         assert cfg["tool_paths"]["sas2ircu"] == ""
         assert cfg["bay_map_path"] == ""
 
+    def test_load_survives_wrong_shape_config(self):
+        # F-014: valid JSON of the wrong shape must fall back to defaults, not
+        # crash every command with AttributeError.
+        import json
+        import os
+        import tempfile
+        import b2ctl.config as cfg_mod
+        tmp = tempfile.mkdtemp()
+        path = os.path.join(tmp, "config.json")
+        old = cfg_mod.CONFIG_PATH
+        cfg_mod.CONFIG_PATH = path
+        try:
+            for bad in ('{"tool_paths": "/usr/sbin"}',
+                        '{"controller": "raid"}',
+                        '[1, 2, 3]',
+                        '"just a string"'):
+                with open(path, "w") as f:
+                    f.write(bad)
+                cfg_mod._cache = None
+                cfg = cfg_mod.load()   # must not raise
+                assert cfg["controller"]["mode"] == "auto"
+                assert cfg["tool_paths"]["sas2ircu"] == ""
+        finally:
+            cfg_mod.CONFIG_PATH = old
+            cfg_mod._cache = None
+
+    def test_load_partial_good_section_still_applies(self):
+        # A good controller section applies even though tool_paths is malformed.
+        import json, os, tempfile
+        import b2ctl.config as cfg_mod
+        tmp = tempfile.mkdtemp()
+        path = os.path.join(tmp, "config.json")
+        old = cfg_mod.CONFIG_PATH
+        cfg_mod.CONFIG_PATH = path
+        try:
+            with open(path, "w") as f:
+                f.write('{"tool_paths": "oops", "controller": {"mode": "raid"}}')
+            cfg_mod._cache = None
+            cfg = cfg_mod.load()
+            assert cfg["controller"]["mode"] == "raid"
+        finally:
+            cfg_mod.CONFIG_PATH = old
+            cfg_mod._cache = None
+
     def test_controller_mode_returns_auto_by_default(self):
         import b2ctl.config as cfg_mod
         cfg_mod._cache = None
@@ -186,3 +230,81 @@ class TestConfig:
             assert False, "expected ValueError"
         except ValueError:
             pass
+
+    def test_set_mode_malformed_file_raises_and_preserves(self):
+        # F-075: an unparseable existing config must NOT be silently reset to
+        # {"controller": {...}} (erasing tool_paths/bay_map_path). set_mode
+        # raises ValueError and leaves the file byte-identical.
+        import os
+        import tempfile
+        import b2ctl.config as cfg_mod
+        tmp = tempfile.mkdtemp()
+        path = os.path.join(tmp, "config.json")
+        with open(path, "w") as f:
+            f.write('{"tool_paths": {"zpool": "/x"},}')   # trailing comma -> invalid
+        with open(path, "rb") as f:
+            before = f.read()
+        old = cfg_mod.CONFIG_PATH
+        cfg_mod.CONFIG_PATH = path
+        try:
+            cfg_mod._cache = None
+            try:
+                cfg_mod.set_mode("it")
+                assert False, "expected ValueError on malformed config"
+            except ValueError:
+                pass
+            with open(path, "rb") as f:
+                assert f.read() == before          # left untouched, not clobbered
+        finally:
+            cfg_mod.CONFIG_PATH = old
+            cfg_mod._cache = None
+
+    def test_set_mode_non_dict_toplevel_raises(self):
+        # F-075: a valid-JSON but non-object top level (a list) must be refused,
+        # not crash setdefault with AttributeError.
+        import os
+        import tempfile
+        import b2ctl.config as cfg_mod
+        tmp = tempfile.mkdtemp()
+        path = os.path.join(tmp, "config.json")
+        with open(path, "w") as f:
+            f.write("[1, 2, 3]")
+        old = cfg_mod.CONFIG_PATH
+        cfg_mod.CONFIG_PATH = path
+        try:
+            cfg_mod._cache = None
+            try:
+                cfg_mod.set_mode("raid")
+                assert False, "expected ValueError on non-object top level"
+            except ValueError:
+                pass
+        finally:
+            cfg_mod.CONFIG_PATH = old
+            cfg_mod._cache = None
+
+    def test_set_mode_preserves_existing_keys(self):
+        # F-075: a successful write flips mode and preserves every other key.
+        import json
+        import os
+        import tempfile
+        import b2ctl.config as cfg_mod
+        tmp = tempfile.mkdtemp()
+        path = os.path.join(tmp, "config.json")
+        with open(path, "w") as f:
+            json.dump({"tool_paths": {"zpool": "/usr/sbin/zpool"},
+                       "bay_map_path": "/srv/bay_map.json",
+                       "controller": {"mode": "auto", "index": "0"}}, f)
+        old = cfg_mod.CONFIG_PATH
+        cfg_mod.CONFIG_PATH = path
+        try:
+            cfg_mod._cache = None
+            cfg_mod.set_mode("raid")
+            with open(path) as f:
+                data = json.load(f)
+            assert data["controller"]["mode"] == "raid"
+            assert data["controller"]["index"] == "0"           # preserved
+            assert data["tool_paths"]["zpool"] == "/usr/sbin/zpool"
+            assert data["bay_map_path"] == "/srv/bay_map.json"
+        finally:
+            cfg_mod.CONFIG_PATH = old
+            cfg_mod._cache = None

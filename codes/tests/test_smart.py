@@ -6,7 +6,8 @@ from unittest.mock import patch
 
 import pytest
 
-from helpers import _disk, _ATA_OUTPUT, _SAS_OUTPUT
+from helpers import (_disk, _ATA_OUTPUT, _SAS_OUTPUT, _SAS_UNCORR_OUTPUT,
+                     _NVME_OUTPUT)
 from b2ctl import smart
 from b2ctl.common import Disk
 
@@ -33,6 +34,19 @@ class TestSmartParsing:
         assert d.poh == 50451
         assert d.wear_val == 99  # 100 - 1%
         assert d.realloc == 0
+
+    def test_parse_sas_uncorrected_errors_bump_critical(self):
+        # F-095: column 7 (total uncorrected errors) of the SAS error-counter log
+        # feeds d.uncorr even when grown defects are zero; assess() then CRITICAL.
+        from b2ctl.common import assess
+        d = Disk(dev="/dev/sdw")
+        smart._parse_sas(d, _SAS_UNCORR_OUTPUT)
+        assert d.uncorr == 14      # read: row column 7
+        assert d.realloc == 0      # zero grown defects — uncorr is the only signal
+        d.readable = True
+        assess(d)
+        assert d.level == "CRITICAL"
+        assert any("uncorrectable errors" in r for r in d.reasons)
 
     def test_endurance_calculation(self):
         d = _disk(lba_written=19305985024, is_ssd=True, model="Samsung SSD 870")
@@ -111,6 +125,36 @@ ID# ATTRIBUTE_NAME          FLAG     VALUE WORST THRESH TYPE      UPDATED  WHEN_
         self.assertEqual(d.uncorr, 0)
 
 
+class TestSasHealthFailure(unittest.TestCase):
+    """F-018: a SAS drive predicting failure must map to health=FAILED."""
+
+    @patch('b2ctl.smart.run')
+    def test_sas_failure_prediction_maps_to_failed(self, mock_run):
+        mock_run.return_value = """=== START OF INFORMATION SECTION ===
+Vendor:               SEAGATE
+Product:              ST1000
+Serial number:        SAS12345
+Device type:          disk
+
+Elements in grown defect list: 0
+
+SMART Health Status: FAILURE PREDICTION THRESHOLD EXCEEDED [asc=5d, ascq=0]
+"""
+        d = Disk(dev="/dev/sdz")
+        smart.read(d, {})
+        self.assertEqual(d.health, "FAILED")
+        from b2ctl.common import assess
+        assess(d)
+        self.assertEqual(d.level, "CRITICAL")
+
+    @patch('b2ctl.smart.run')
+    def test_sas_ok_maps_to_passed(self, mock_run):
+        mock_run.return_value = _SAS_OUTPUT
+        d = Disk(dev="/dev/sdy")
+        smart.read(d, {})
+        self.assertEqual(d.health, "PASSED")
+
+
 class TestMegaraidDtype(unittest.TestCase):
     """RAID-mode: smartctl must try -d megaraid,<DID> first when smart_dtype set."""
 
@@ -119,7 +163,7 @@ class TestMegaraidDtype(unittest.TestCase):
         import b2ctl.smart as smart
         seen = []
 
-        def _run(cmd):
+        def _run(cmd, **kw):
             seen.append(cmd)
             # Return valid SMART only for the megaraid attempt.
             if "megaraid,7" in cmd:
@@ -132,6 +176,124 @@ class TestMegaraidDtype(unittest.TestCase):
         assert "ATTRIBUTE_NAME" in out
         # first attempt used the forced megaraid type
         assert seen[0] == ["smartctl", "-a", "-d", "megaraid,7", "/dev/sda"]
+
+    def test_megaraid_dtype_never_falls_back_to_raw(self):
+        # F-049: a forced megaraid dtype must not attempt the raw VD node — that
+        # would read the shared /dev/sda and misattribute the VD SMART.
+        seen = []
+
+        def _run(cmd, **kw):
+            seen.append(cmd)
+            return ""   # every attempt fails
+
+        with patch("b2ctl.smart.run", side_effect=_run), \
+             patch("b2ctl.config.tool", return_value="smartctl"):
+            out = smart._smartctl("/dev/sda", "megaraid,7")
+        assert out == ""
+        # only the two passthrough forms, never a bare '-a dev' (raw auto-detect)
+        assert all("-d" in c for c in seen)
+        assert len(seen) == 2
+
+
+class TestSmartTimeout(unittest.TestCase):
+    """F-049: a hung disk must not be retried through the whole attempt ladder."""
+
+    def test_ladder_breaks_on_first_timeout(self):
+        seen = []
+
+        def _run(cmd, timeout=None, none_on_timeout=False):
+            seen.append(cmd)
+            return None if none_on_timeout else ""   # simulate TimeoutExpired
+
+        with patch("b2ctl.smart.run", side_effect=_run), \
+             patch("b2ctl.config.tool", return_value="smartctl"):
+            out = smart._smartctl("/dev/sdx", "")
+        assert out == ""
+        assert len(seen) == 1   # broke after the first timeout, no retry
+
+    def test_read_marks_noread_on_timeout(self):
+        def _run(cmd, timeout=None, none_on_timeout=False):
+            return None if none_on_timeout else ""
+
+        d = Disk(dev="/dev/sdx")
+        with patch("b2ctl.smart.run", side_effect=_run), \
+             patch("b2ctl.config.tool", return_value="smartctl"):
+            smart.read(d, {})
+        assert d.readable is False and d.health == "NOREAD"
+
+
+class TestAtaCompositeRaw(unittest.TestCase):
+    """F-050/F-051: composite raw parsing + attribute-241 vendor units."""
+
+    _HDR = ("ID# ATTRIBUTE_NAME          FLAG     VALUE WORST THRESH TYPE      "
+            "UPDATED  WHEN_FAILED RAW_VALUE\n")
+
+    def _ata(self, rows):
+        return "Device Model:     TestDrive\nSerial Number:    SN1\n" + self._HDR + rows
+
+    def test_composite_poh_takes_leading_integer(self):
+        rows = "  9 Power_On_Hours          0x0032   099 099 000 Old_age Always - 29229h+18m+27.459s\n"
+        d = Disk(dev="/dev/sdx")
+        smart._parse_ata(d, self._ata(rows))
+        assert d.poh == 29229
+
+    def test_attr241_32mib_units(self):
+        rows = "241 Host_Writes_32MiB       0x0032   099 099 000 Old_age Always - 300000\n"
+        d = Disk(dev="/dev/sdx"); d.is_ssd = True
+        smart._parse_ata(d, self._ata(rows))
+        smart._endurance(d, {})
+        # 300000 * 32MiB = 10.07 TB
+        assert d.written_tb == pytest.approx(10.066, abs=0.05)
+
+    def test_attr241_plain_lbas_unchanged(self):
+        rows = "241 Total_LBAs_Written      0x0032   099 099 000 Old_age Always - 123456789\n"
+        d = Disk(dev="/dev/sdx"); d.is_ssd = True
+        smart._parse_ata(d, self._ata(rows))
+        assert d.lba_written == 123456789
+
+    def test_attr241_gb_units(self):
+        rows = "241 Total_GB_Written        0x0032   099 099 000 Old_age Always - 100\n"
+        d = Disk(dev="/dev/sdx"); d.is_ssd = True
+        smart._parse_ata(d, self._ata(rows))
+        smart._endurance(d, {})
+        assert d.written_tb == pytest.approx(0.1, abs=0.001)
+
+
+class TestNvmeParsing(unittest.TestCase):
+    """F-096: cover smart._parse_nvme and the NVMe dispatch branch."""
+
+    def test_parse_nvme_extracts_wear_poh_written_uncorr(self):
+        d = Disk(dev="/dev/nvme0n1")
+        smart._parse_nvme(d, _NVME_OUTPUT)
+        self.assertEqual(d.iface, "NVMe")
+        self.assertIn("990", d.model)
+        self.assertEqual(d.wear_val, 95)              # 100 - 5%
+        self.assertEqual(d.poh, 1234)                 # 'Power On Hours: 1,234'
+        self.assertEqual(d.lba_written, 12345678 * 1000)
+        self.assertEqual(d.uncorr, 7)                 # Media and Data Integrity Errors
+
+    @patch('b2ctl.smart.run')
+    def test_read_dispatches_nvme_not_sas(self, mock_run):
+        mock_run.return_value = _NVME_OUTPUT
+        d = Disk(dev="/dev/nvme0n1")
+        smart.read(d, {})
+        self.assertTrue(d.readable)
+        self.assertEqual(d.health, "PASSED")
+        # Dispatched to _parse_nvme, NOT _parse_sas: the SAS path would set
+        # iface='SAS' and leave wear_val/poh unset (it looks for different field
+        # names), so these values prove the NVMe branch ran.
+        self.assertEqual(d.iface, "NVMe")
+        self.assertIn("990", d.model)
+        self.assertEqual(d.wear_val, 95)
+        self.assertEqual(d.poh, 1234)
+        self.assertEqual(d.lba_written, 12345678 * 1000)
+
+    def test_data_units_written_1000x_conversion(self):
+        d = Disk(dev="/dev/nvme0n1")
+        smart._parse_nvme(d, _NVME_OUTPUT)
+        units = 12345678
+        self.assertEqual(d.lba_written, units * 1000)
+        self.assertNotEqual(d.lba_written, units)     # guard a dropped *1000
 
 
 if __name__ == "__main__":

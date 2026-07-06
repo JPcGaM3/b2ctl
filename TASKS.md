@@ -1,5 +1,25 @@
 # TASKS.md — b2ctl work queue
 
+> **STATUS (v0.9.0-itmode):** Fable5 audit (`reviews/REVIEW_FABLE_001.md`, 123
+> findings) **DONE** — all P0–P4 resolved, the 4 Appendix-B refuted findings left
+> untouched. Blueprint: `prompts/FIX_fable5_audit.md`; architecture: `docs/adr/
+> ADR-001`. Full unit suite green; sim validated IT + RAID. Version now lives in
+> `codes/b2ctl/_version.py`. **Next:** verify on hardware (both nodes), then
+> resume the FEATURE queue below.
+
+## FABLE5 AUDIT — 123 code-review findings [DONE, v0.9.0-itmode]
+
+Fixed every finding in `reviews/REVIEW_FABLE_001.md` (P0×9, P1×17, P2×39, P3×54,
+P4×4). Highlights: append-only audit log + named rollback hints (safety), public
+`zfs_actions`/`blockdev`/`_version` modules, `Disk.ctrl` multi-controller PERC
+actions, `scan_light`/targeted `scan_one`, `Disk.is_poolable`, shared
+`baymap.assign_bays`, spec/smart/spares parsing fixes, and a RAID-capable sim
+(perccli VD/PD/rebuild, megaraid SMART, time-based resilver, replacing-N/offline
+state). Docs (user-guide en/th locate syntax, module map, ADR-001) updated.
+See `prompts/FIX_fable5_audit.md` for the per-finding blueprint and test plan.
+
+---
+
 > **STATUS (v0.2.1-itmode):** HOTFIX 1, 2, 3 are **DONE**; code-review hotfix (10 findings) **IN PROGRESS**.
 > HOTFIX 1, 2, 3 original notes: (implemented & mock-tested;
 > docs updated). The live queue now starts at **FEATURE 1c**. The hotfix specs

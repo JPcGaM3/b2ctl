@@ -17,8 +17,8 @@ class TestBlinkDisk(unittest.TestCase):
             ok, method = locate.blink_disk(d, seconds=5)
         assert ok and method == "perccli"
         # LED on then off, by enc:slot
-        assert loc.call_args_list[0].args == ("32:0", True)
-        assert loc.call_args_list[1].args == ("32:0", False)
+        assert loc.call_args_list[0].args == ("32:0", True, 0)   # ctrl threaded (F-085)
+        assert loc.call_args_list[1].args == ("32:0", False, 0)
 
     def test_ugood_perc_drive_uses_perccli(self):
         # A UGood spare (array_type="" but pd_state set + a bay) is still a PERC
@@ -30,8 +30,8 @@ class TestBlinkDisk(unittest.TestCase):
              patch("time.sleep"):
             ok, method = locate.blink_disk(d, seconds=5)
         assert ok and method == "perccli"
-        assert loc.call_args_list[0].args == ("32:4", True)
-        assert loc.call_args_list[1].args == ("32:4", False)
+        assert loc.call_args_list[0].args == ("32:4", True, 0)   # ctrl threaded (F-085)
+        assert loc.call_args_list[1].args == ("32:4", False, 0)
 
     def test_direct_disk_uses_dd(self):
         d = Disk(dev="/dev/nvme0n1")            # array_type "" by default
@@ -52,12 +52,55 @@ class TestBlinkDisk(unittest.TestCase):
         dd.assert_called_once_with("/dev/sda", 3)
 
 
+class TestResilverGuard(unittest.TestCase):
+    """F-006: blink_disk refuses a resilvering/rebuilding disk (CLAUDE.md §9)."""
+
+    def test_rebuilding_perc_pd_refused(self):
+        d = Disk(dev="/dev/sda"); d.array_type = "HW"; d.bay = "32:0"
+        d.pd_state = "Rbld"
+        with patch("b2ctl.hba_raid.locate") as loc, patch("b2ctl.locate._dd_read") as dd:
+            ok, method = locate.blink_disk(d)
+        assert not ok and method == "resilvering"
+        loc.assert_not_called()
+        dd.assert_not_called()
+
+    def test_active_spare_leaf_refused_during_resilver(self):
+        d = Disk(dev="/dev/sdc", by_id="/dev/disk/by-id/ata-X")
+        d.pool = "tank"; d.vdev = "spare-0"; d.vdev_state = "ONLINE"
+        with patch("b2ctl.zfs.poll_resilver_status",
+                   return_value={"completed": False, "done": 42.0}), \
+             patch("b2ctl.locate._dd_read") as dd:
+            ok, method = locate.blink_disk(d)
+        assert not ok and method == "resilvering"
+        dd.assert_not_called()
+
+    def test_faulted_leaf_still_blinks_mid_resilver(self):
+        # the FAULTED original under spare-0 IS the pull target — must blink.
+        d = Disk(dev="/dev/sdb", by_id="/dev/disk/by-id/ata-Y")
+        d.pool = "tank"; d.vdev = "spare-0"; d.vdev_state = "FAULTED"
+        with patch("b2ctl.zfs.poll_resilver_status",
+                   return_value={"completed": False}), \
+             patch("b2ctl.locate._have_ledctl", return_value=False), \
+             patch("b2ctl.locate._dd_read") as dd:
+            ok, method = locate.blink_disk(d)
+        assert ok and method == "dd"
+        dd.assert_called_once()
+
+    def test_force_overrides_guard(self):
+        d = Disk(dev="/dev/sda"); d.array_type = "HW"; d.bay = "32:0"
+        d.pd_state = "Rbld"
+        with patch("b2ctl.hba_raid.locate", return_value=(True, "")), \
+             patch("time.sleep"):
+            ok, method = locate.blink_disk(d, force=True)
+        assert ok and method == "perccli"
+
+
 class TestBlinkSteady(unittest.TestCase):
     """Steady blink (no pulse) — dd fallback path."""
 
     def test_blink_steady_calls_dd_read_once(self):
         with patch("b2ctl.locate._have_ledctl", return_value=False), \
-             patch("b2ctl.locate._dd_read") as dd:
+             patch("b2ctl.locate._dd_read", return_value=True) as dd:
             ok, method = locate.blink("/dev/sdx", seconds=5)
         assert (ok, method) == (True, "dd")
         dd.assert_called_once_with("/dev/sdx", 5)
@@ -79,7 +122,7 @@ class TestLedctl(unittest.TestCase):
     def test_falls_back_to_dd_when_ledctl_cannot_drive(self):
         with patch("b2ctl.locate._have_ledctl", return_value=True), \
              patch("b2ctl.locate._ledctl", return_value=(False, "")), \
-             patch("b2ctl.locate._dd_read") as dd:
+             patch("b2ctl.locate._dd_read", return_value=True) as dd:
             ok, method = locate.blink("/dev/sdx", seconds=5)
         assert (ok, method) == (True, "dd")
         dd.assert_called_once_with("/dev/sdx", 5)

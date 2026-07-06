@@ -852,7 +852,9 @@ b2ctl raid-replace          # pick the member, or: b2ctl raid-replace 32:0
 It fails the drive out, **lights its bay LED**, waits for you to pull it and
 insert the replacement, then watches the controller **rebuild** with a live
 progress bar. Related: `b2ctl raid-offline <bay>` (just fail it out + LED),
-`b2ctl locate <bay> on`, and (destructive, double-confirmed) `b2ctl raid-create
+`b2ctl locate <bay|serial|dev> [secs]` (a timed blink — the LED is always
+turned back off; there is no latched `on`/`off` form, by design), and
+(destructive, double-confirmed) `b2ctl raid-create
 --level raid1 --drives 32:0,32:1` / `b2ctl raid-del <vd>`.
 
 > Note: on a 2×M.2 NVMe card, if only one NVMe shows, enable **PCIe bifurcation

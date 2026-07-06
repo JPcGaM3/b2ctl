@@ -417,12 +417,12 @@ swap which #&gt; N
 cd codes && python3 -m pytest tests/ -q
 ```
 
-**ผลรอบนี้ (dev machine):** `286 passed, 0 failed` ✅ *(เพิ่ม unified Storage summary, +v0.8.5 bay_map/ssd_spec directory-independence + `b2ctl update` resource sync, +v0.8.7 ledctl locate + dd fallback; v0.8.8 ถอด locate --pulse ออก)*
+**ผลรอบนี้ (dev machine):** `454 passed, 0 failed` ✅ *(v0.9.0-itmode: Fable5 audit 123 findings — +87 tests: safety append-only/named-hint, RAID ctrl/build_cmd/abort, zfs_actions exit codes, blockdev, scan_light/scan_one, is_poolable, assign_bays, spec/smart/spares parsing, sim RAID+resilver+offline)*
 
 | ID | Scenario | Expected | Status | Actual | Comment |
 |----|----------|----------|:------:|--------|---------|
 | E1 | Test suite รันได้ | suite รันจบ ไม่ error การ import | ✅ | tests collected, รันจบ | OK |
-| E2 | Pass rate | tests ผ่านทั้งหมด | ✅ | **286 passed / 0 failed** | +26 (v0.8.0) add_cache/add_log/remove_vdev, raid10, burnin; +6 (v0.8.1) nvme by-id/serial remap; +2 (v0.8.2) watch RAID-volumes render; +5 (v0.8.3) install parity; +v0.8.4 storage summary; +13 (v0.8.5) bay_map/ssd_spec path precedence + `b2ctl update` sync; +5 (v0.8.7) ledctl locate + dd fallback (steady/fallback/always-off/perc-skip); −8 (v0.8.8) removed locate --pulse |
+| E2 | Pass rate | tests ผ่านทั้งหมด | ✅ | **454 passed / 0 failed** (+4 subtests) | …prior deltas… ; +87 (v0.9.0) Fable5 audit: safety cluster (F-091/092/093/094), raid_actions replace/offline/abort + hba_raid parse (F-082/085/088/089/090), core scan_light/scan_one/sort/workers (F-077/078/079/102), watch retry/assign menu (F-100/101), zfs read-side + dedup + shared topo (F-104/105/107), baymap assign_bays (F-084), blockdev (F-080), zfs_actions exit codes (F-070), common is_poolable/is_spare/dry-run (F-074/098/103), spec (F-097), smart SAS-uncorr/NVMe (F-095/096), cli/config/hba (F-069/071/072/073/075/081), burnin.run (F-067), sim (F-114/116/117/118/123), installer (F-122/087) |
 | E3 | sim NVMe walk | `sim/run status` โชว์ nvme0n1/nvme1n1 = PCIe2:0/1, `burnin nvme0n1` = PASS | ✅ | NVMe enumerated + serial-relabelled + burn-in PASS ใน sim | NVMe by-id ต้องเครื่องจริง (sysfs/by-id แฟกไม่ได้) |
 
 <details>

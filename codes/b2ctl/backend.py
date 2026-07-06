@@ -60,7 +60,12 @@ class ITBackend(Backend):
         setting = _cfg.controller_index_setting()
         if setting == "all":
             return _detect_sas2ircu_controllers() or [0]
-        return [int(setting)]
+        try:
+            return [int(setting)]
+        except (TypeError, ValueError):
+            # F-027: a malformed controller.index must fall back to defaults, not
+            # crash every scan (config's 'malformed -> defaults' contract).
+            return _detect_sas2ircu_controllers() or [0]
 
     def bay_map(self, controller: int | None = None) -> dict:
         from . import hba
@@ -146,23 +151,27 @@ def _detect_backend() -> Backend:
     if mode == "raid":
         return RaidBackend()
     import os as _os, shutil as _shutil, sys as _sys
-    # auto-detect: try sas2ircu first
+    # auto-detect: sas2ircu must report an ACTUAL controller, not merely print
+    # output — sas2ircu on a RAID box prints its banner + 'MPTLib2 Error 1' to
+    # stdout, which the old truthy test misread as IT-mode (F-010).
     sas = _cfg.tool("sas2ircu")
-    if run([sas, "list"]):
-        return ITBackend()
-    # Binary exists but can't execute? (32-bit sas2ircu needs libc6-i386)
-    # Prefer IT-mode over RAID when the sas2ircu binary is present — on a
-    # crossflashed PERC the box is IT/HBA even if perccli is also installed.
-    _sas_path = _shutil.which(sas) or sas
-    if _os.path.isfile(_sas_path):
-        print(
-            f"[!] sas2ircu found at {_sas_path} but failed to execute.\n"
-            f"    Fix: apt-get install -y libc6-i386\n"
-            f"    Forcing IT-mode — set controller.mode='it' in config to suppress.",
-            file=_sys.stderr,
-        )
-        return ITBackend()
-    # try perccli (the PERC RAID tool); a controller count > 0 means RAID mode
+    out = run([sas, "list"])
+    if re.findall(r"^\s*(\d+)\s+SAS", out, re.MULTILINE):
+        return ITBackend()                       # a controller table => IT/HBA
+    if not out.strip():
+        # No output at all: the binary is absent, or present-but-can't-execute
+        # (32-bit sas2ircu needs libc6-i386). Present -> force IT (crossflashed
+        # PERC boxes are IT/HBA even if perccli is also installed).
+        _sas_path = _shutil.which(sas) or sas
+        if _os.path.isfile(_sas_path):
+            print(
+                f"[!] sas2ircu found at {_sas_path} but failed to execute.\n"
+                f"    Fix: apt-get install -y libc6-i386\n"
+                f"    Forcing IT-mode — set controller.mode='it' in config to suppress.",
+                file=_sys.stderr,
+            )
+            return ITBackend()
+    # sas2ircu ran but reported zero controllers (RAID box) -> try perccli.
     from . import hba_raid
     if hba_raid.have_tool():
         return RaidBackend()

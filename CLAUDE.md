@@ -119,7 +119,8 @@ docs/
   test-checklist.md    # pass/fail test report
 ```
 Run on the box as root (no `sudo` on Proxmox): `b2ctl status`, `b2ctl watch`,
-`b2ctl locate <bay> on|off`, `b2ctl swap`, `b2ctl version`.
+`b2ctl locate <bay|serial|dev> [secs]` (timed blink — the LED is always left
+off; there is no latched on/off verb, by design §9), `b2ctl swap`, `b2ctl version`.
 
 **Install parity (v0.8.3):** `./install.sh` and `b2ctl install` share one
 contract — no-flag = **b2ctl only** (`install.sh` deploys the package, `b2ctl
@@ -150,16 +151,24 @@ tool is actually added.
 
 | module | role | external cmds |
 |--------|------|---------------|
-| common.py | colours, run/run_check, `Disk` (now carries `pool_token`), `assess()` (levels NORMAL/CONFIG/WARNING/CRITICAL; END_WARN=30, END_CRIT=10) | — |
-| spec.py | load/lookup TBW from `ssd_spec.json` | — |
-| hba.py | `enumerate_disks()` (lsblk **-P** pairs), `_by_id_index()` (ata->scsi-SATA->wwn->scsi), `attach_bays()`/`bay_map()`, `get_ghost_disks()` | lsblk, sas2ircu |
-| smart.py | direct SMART parse (ATA + SAS, SSD/HDD), TBW endurance | smartctl |
-| zfs.py | `topology()` (zpool status **-P -v**), `attach_membership()`, `degraded_leaves()`, `spares()`, actions (add_spare/add_mirror/attach/replace/swap_to_spare/wipe) | zpool, wipefs, sgdisk |
-| core.py | `scan()` pipeline + `scan_one()` | composes above |
+| _version.py | single source of `__version__` (imported by `__init__`/`cli`; light import, no app graph — F-066) | — |
+| common.py | colours, run/run_check (`none_on_timeout=`), `Disk` (`pool_token`, `ctrl`, `is_poolable`, `is_spare`), dry-run flag (`DRY_RUN`/`set_dry_run`/`is_dry_run`), `assess()` (levels NORMAL/CONFIG/WARNING/CRITICAL; END_WARN=30, END_CRIT=10) | — |
+| spec.py | load/lookup TBW from `ssd_spec.json` (exact→longest-contained→unambiguous, else None) | — |
+| blockdev.py | shared backend-agnostic block listing: `lsblk_pairs()` (**-P** pairs), `EXCLUDE`, `vd_usage()` (moved out of hba — F-099) | lsblk |
+| baymap.py | panel parse + `assign_bays()` (shared serial-match loop for both backends — F-084), `remap_slot`/`remap_nvme`, `serial_match` | — |
+| hba.py | `enumerate_disks()`, `_by_id_index()` (ata->scsi-SATA->wwn->scsi; nvme-uuid ranked, tie-break shortest friendly link), `attach_bays()`/`bay_map()`, `get_ghost_disks()` | lsblk, sas2ircu |
+| hba_raid.py | RAID backend: `enumerate_disks()` (perccli vall/eall, megaraid SMART, sets `Disk.ctrl`), `build_cmd()`, mutating actions (locate/set_offline/…/add_vd — all take `controller`) | perccli, smartctl |
+| smart.py | direct SMART parse (ATA + SAS incl. uncorrected-errors + NVMe), TBW endurance | smartctl |
+| zfs.py | `topology()` (zpool status **-P -v**), `attach_membership()`, `degraded_leaves()`, `spares()` (deduped), guards `can_detach/can_offline/detach_safety(…, topo=None)`, actions (add_spare/attach/replace/swap_to_spare/demote_to_spare/create_pool/destroy_pool/add_cache/add_log/remove_vdev/wipe) | zpool, wipefs, sgdisk |
+| core.py | `scan()` pipeline, `scan_light()` (no SMART — locate/resolve), targeted `scan_one()` | composes above |
+| zfs_actions.py | public CLI contract for ZFS lifecycle (offload/replace/create/destroy/swap/demote) → int exit code; delegates to watch (F-070) | — |
+| raid_actions.py | public CLI contract for PERC lifecycle (replace/offline/create_vd/assign_perc/delete_vd) → int exit code | perccli |
+| safety.py | audit trail (append-only ops.jsonl, in-memory fallback), snapshots, rollback hints (named old/new dev), `_post_op_verify` | zpool, smartctl |
 | ui.py | `render_table/pools/details/new_disk` (reference style), `disk_label()` | — |
-| watch.py | interactive `select()` loop: hotplug detect + prompts, commands r/a/o/s/d/n/l/q | lsblk |
-| locate.py | LED locate: perccli (PERC PD) / ledctl → dd (raw); timed | perccli, ledctl, dd |
-| cli.py | argparse: status/watch/locate/swap/demote/create/version | sas2ircu |
+| watch.py | interactive `select()` loop: hotplug detect + prompts, commands r/a/o/s/d/t/n/e/b/x/l/q | lsblk |
+| locate.py | LED locate: perccli (PERC PD) / ledctl → dd (raw); timed, resilver-guarded | perccli, ledctl, dd |
+| installer.py | download+install sas2ircu/perccli (pinned SHA-256, `filter="data"`, tiered prereqs) | apt/alien |
+| cli.py | argparse: status/watch/locate/swap/demote/create/destroy/burnin/check/install/… | sas2ircu |
 
 ## 6. Gotchas already solved (don't regress these)
 
@@ -253,4 +262,5 @@ Working code (compiles + mock-tested) **and** the two docs updated
 (reader + DevOps) per §4, plus an ADR if the change is architectural. Update
 ADR-001 to record that the build is now IT-mode/HBA on Proxmox ZFS-on-root and
 that `tank` is raidz1+spare (the original "OS on hardware RAID1, no boot pool"
-assumption is void). Bump the version string in `cli.py`.
+assumption is void). Bump the version string in **`b2ctl/_version.py`** (it moved
+out of `cli.py` so importing the version no longer loads the whole app — F-066).

@@ -53,20 +53,29 @@ def load() -> dict:
         try:
             with open(CONFIG_PATH) as f:
                 user = json.load(f)
-            for k, v in user.get("tool_paths", {}).items():
+        except (json.JSONDecodeError, OSError):
+            return cfg
+        # Merge per-section with shape guards, so a hand-edit that gives one
+        # section the wrong type (e.g. "tool_paths": "/usr/sbin", or a top-level
+        # list) falls back to defaults for THAT section instead of crashing every
+        # command — the module's "malformed -> defaults apply" contract.
+        if not isinstance(user, dict):
+            return cfg
+        tp = user.get("tool_paths")
+        if isinstance(tp, dict):
+            for k, v in tp.items():
                 if v:
                     cfg["tool_paths"][k] = v
-            ctrl = user.get("controller", {})
+        ctrl = user.get("controller")
+        if isinstance(ctrl, dict):
             if ctrl.get("mode"):
                 cfg["controller"]["mode"] = ctrl["mode"]
             if ctrl.get("index") is not None:
                 cfg["controller"]["index"] = str(ctrl["index"])
-            if user.get("bay_map_path"):
-                cfg["bay_map_path"] = user["bay_map_path"]
-            if user.get("ssd_spec_path"):
-                cfg["ssd_spec_path"] = user["ssd_spec_path"]
-        except (json.JSONDecodeError, OSError, KeyError):
-            pass
+        if isinstance(user.get("bay_map_path"), str) and user["bay_map_path"]:
+            cfg["bay_map_path"] = user["bay_map_path"]
+        if isinstance(user.get("ssd_spec_path"), str) and user["ssd_spec_path"]:
+            cfg["ssd_spec_path"] = user["ssd_spec_path"]
     return cfg
 
 
@@ -138,12 +147,27 @@ def set_mode(mode: str) -> None:
         try:
             with open(CONFIG_PATH) as f:
                 data = json.load(f)
-        except (json.JSONDecodeError, OSError):
+        except json.JSONDecodeError as exc:
+            # Refuse to overwrite an unparseable file — silently resetting it to
+            # {"controller": {...}} would erase tool_paths/bay_map_path (F-075).
+            raise ValueError(f"{CONFIG_PATH} is not valid JSON ({exc}); fix it "
+                             f"before setting the mode") from exc
+        except OSError:
             data = {}
-    data.setdefault("controller", {})["mode"] = mode
-    with open(CONFIG_PATH, "w") as f:
+    if not isinstance(data, dict):
+        raise ValueError(f"{CONFIG_PATH} top-level is not an object; fix it first")
+    ctrl = data.get("controller")
+    if not isinstance(ctrl, dict):
+        ctrl = {}
+        data["controller"] = ctrl
+    ctrl["mode"] = mode
+    # Atomic write: tmp in the same dir + os.replace so a crash/ENOSPC can't leave
+    # a truncated config that load() would silently read as all-defaults (F-075).
+    tmp = CONFIG_PATH + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(data, f, indent=2)
         f.write("\n")
+    os.replace(tmp, CONFIG_PATH)
     _cache = None
 
 
@@ -162,8 +186,15 @@ def validate() -> list[tuple[str, str, str]]:
     if os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH) as f:
-                json.load(f)
-            results.append(("config", "ok", CONFIG_PATH))
+                raw = json.load(f)
+            bad = [s for s in ("tool_paths", "controller")
+                   if s in raw and not isinstance(raw.get(s), dict)] if isinstance(raw, dict) else ["<root>"]
+            if bad:
+                results.append(("config", "error",
+                                f"{CONFIG_PATH}: wrong shape for {', '.join(bad)} — "
+                                f"defaults applied for those"))
+            else:
+                results.append(("config", "ok", CONFIG_PATH))
         except json.JSONDecodeError as exc:
             results.append(("config", "error", f"{CONFIG_PATH}: JSON parse error: {exc}"))
     else:
@@ -176,6 +207,10 @@ def validate() -> list[tuple[str, str, str]]:
         try:
             subprocess.run([path], capture_output=True, timeout=5)
             can_run = True
+        except subprocess.TimeoutExpired:
+            # F-076: a hung probe binary must not crash `b2ctl update`/config check.
+            results.append((name, "warn", f"probe timed out at {path}"))
+            continue
         except (FileNotFoundError, PermissionError, OSError):
             can_run = False
         if can_run:

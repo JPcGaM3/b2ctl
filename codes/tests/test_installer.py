@@ -69,6 +69,7 @@ class TestInstallProfile(unittest.TestCase):
 
     def test_perc_profile(self):
         with patch("b2ctl.installer.install_tools") as it, \
+             patch("b2ctl.installer.tool_ok", return_value=True), \
              patch("b2ctl.config.set_mode") as sm:
             installer.install_profile("perc")
         it.assert_called_once_with(["perccli"])
@@ -76,6 +77,7 @@ class TestInstallProfile(unittest.TestCase):
 
     def test_flash_profile(self):
         with patch("b2ctl.installer.install_tools") as it, \
+             patch("b2ctl.installer.tool_ok", return_value=True), \
              patch("b2ctl.config.set_mode") as sm:
             installer.install_profile("flash")
         it.assert_called_once_with(["sas2ircu"])
@@ -87,6 +89,53 @@ class TestInstallProfile(unittest.TestCase):
             installer.install_profile("bogus")
         it.assert_not_called()
         sm.assert_not_called()
+
+    def test_mode_not_set_when_tool_install_failed(self):
+        # F-045: a failed tool install must NOT persist controller.mode.
+        with patch("b2ctl.installer.install_tools"), \
+             patch("b2ctl.installer.tool_ok", return_value=False), \
+             patch("b2ctl.config.set_mode") as sm:
+            installer.install_profile("perc")
+        sm.assert_not_called()
+
+
+class TestDownload(unittest.TestCase):
+    """F-043/F-044: integrity + timeout + offline handling."""
+
+    def _fake_urlopen(self, payload):
+        import contextlib
+
+        @contextlib.contextmanager
+        def _cm(url, timeout=None):
+            import io
+            yield io.BytesIO(payload)
+        return _cm
+
+    def test_hash_mismatch_raises(self):
+        tmp = tempfile.mkdtemp()
+        dest = os.path.join(tmp, "a.bin")
+        with patch("urllib.request.urlopen", self._fake_urlopen(b"x" * 4096)):
+            with self.assertRaises(RuntimeError):
+                installer.download("id", dest, sha256="0" * 64)
+
+    def test_matching_hash_passes(self):
+        import hashlib
+        payload = b"y" * 4096
+        digest = hashlib.sha256(payload).hexdigest()
+        tmp = tempfile.mkdtemp()
+        dest = os.path.join(tmp, "a.bin")
+        with patch("urllib.request.urlopen", self._fake_urlopen(payload)):
+            installer.download("id", dest, sha256=digest)   # must not raise
+        self.assertTrue(os.path.exists(dest))
+
+    def test_install_tools_offline_prints_error(self):
+        import urllib.error
+        with patch("b2ctl.installer.ensure_prereqs"), \
+             patch("b2ctl.installer.tool_ok", return_value=False), \
+             patch("b2ctl.installer.download",
+                   side_effect=urllib.error.URLError("offline")):
+            # must complete without raising (URLError is an OSError)
+            installer.install_tools(["sas2ircu"])
 
 
 class TestInstallBase(unittest.TestCase):
@@ -111,6 +160,53 @@ class TestInstallBase(unittest.TestCase):
         dl.assert_not_called()
         it.assert_not_called()
         ep.assert_not_called()
+
+
+def _install_sh_text() -> str:
+    here = os.path.dirname(os.path.abspath(__file__))
+    codes = os.path.dirname(here)
+    with open(os.path.join(codes, "install.sh")) as f:
+        return f.read()
+
+
+class TestGDriveParity(unittest.TestCase):
+    """F-122: the Google Drive file IDs are duplicated in install.sh; the
+    fallback IDs it hardcodes must stay equal to installer._GDRIVE."""
+
+    def test_gdrive_ids_match_install_sh(self):
+        import re
+        sh = _install_sh_text()
+        m_sas = re.search(r"_GDRIVE_SAS2IRCU:=([A-Za-z0-9_-]+)", sh)
+        m_perc = re.search(r"_GDRIVE_PERCCLI:=([A-Za-z0-9_-]+)", sh)
+        self.assertIsNotNone(m_sas, "sas2ircu fallback ID not found in install.sh")
+        self.assertIsNotNone(m_perc, "perccli fallback ID not found in install.sh")
+        self.assertEqual(m_sas.group(1), installer._GDRIVE["sas2ircu"])
+        self.assertEqual(m_perc.group(1), installer._GDRIVE["perccli"])
+
+
+class TestPrereqParity(unittest.TestCase):
+    """F-087: drift-guard — every apt package installer.py declares as a prereq
+    must also appear in install.sh's apt set (the documented '1:1 mirror')."""
+
+    def _install_sh_pkgs(self):
+        import re
+        pkgs = set()
+        for chunk in re.findall(r'_pkgs="([^"]*)"', _install_sh_text()):
+            for tok in chunk.split():
+                if "$" in tok or "{" in tok:      # skip the ${_pkgs} back-ref
+                    continue
+                pkgs.add(tok)
+        return pkgs
+
+    def test_installer_prereqs_are_in_install_sh(self):
+        sh_pkgs = self._install_sh_pkgs()
+        self.assertTrue(sh_pkgs, "no _pkgs= assignments parsed from install.sh")
+        declared = set(installer.RUNTIME_PKGS
+                       + installer.PREREQ_SAS2IRCU
+                       + installer.PREREQ_PERCCLI)
+        missing = declared - sh_pkgs
+        self.assertEqual(missing, set(),
+                         f"installer prereqs missing from install.sh: {missing}")
 
 
 if __name__ == "__main__":

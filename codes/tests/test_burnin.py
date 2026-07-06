@@ -6,9 +6,27 @@ import b2ctl.burnin as burnin
 from helpers import _disk
 
 
-_ATA_DONE = """SMART Self-test log structure revision number 1
+# Real ATA `smartctl -a` output carries BOTH the execution-status block (the
+# CURRENT test) and the persistent self-test log table (history). The parser
+# must read the former, not the latter.
+_ATA_DONE = """Self-test execution status:      (   0) The previous self-test routine completed
+                                        without error or no self-test has ever
+                                        been run.
+
+SMART Self-test log structure revision number 1
 Num  Test_Description    Status                  Remaining  LifeTime(hours)
 # 1  Extended offline    Completed without error       00%      18000
+"""
+
+# The killer case (F-030): current test ABORTED, but an old history row still
+# says "Completed without error". The gate must FAIL, not read the stale row.
+_ATA_ABORTED_STALE = """Self-test execution status:      (  25) The previous self-test routine was
+                                        aborted by the host.
+
+SMART Self-test log structure revision number 1
+Num  Test_Description    Status                  Remaining  LifeTime(hours)
+# 1  Extended offline    Completed without error       00%      18000
+# 2  Short offline       Completed without error       00%      17900
 """
 
 _ATA_RUNNING = """Self-test execution status:      ( 249) Self-test routine in progress...
@@ -16,6 +34,11 @@ _ATA_RUNNING = """Self-test execution status:      ( 249) Self-test routine in p
 """
 
 _SAS_RUNNING = "Background self-test in progress ... 20% complete\n"
+
+_SAS_DONE = """SMART Self-test log
+Num  Test              Status                 segment  LifeTime  LBA_first_err
+# 1  Background long   Completed                   -   50450                 -
+"""
 
 
 class TestSelftestStatus(unittest.TestCase):
@@ -38,6 +61,28 @@ class TestSelftestStatus(unittest.TestCase):
             st = burnin.selftest_status("/dev/sda")
         self.assertTrue(st["running"])
         self.assertEqual(st["pct"], 20)
+
+    def test_sas_done_reads_log_row(self):
+        with patch.object(burnin, "_run", return_value=_SAS_DONE):
+            st = burnin.selftest_status("/dev/sda")
+        self.assertFalse(st["running"])
+        self.assertIn("completed", st["result"].lower())
+
+    def test_selftest_status_aborted_ignores_history(self):
+        # F-030: current abort must not be masked by a stale passing log row.
+        with patch.object(burnin, "_run", return_value=_ATA_ABORTED_STALE):
+            st = burnin.selftest_status("/dev/sda")
+        self.assertFalse(st["running"])
+        self.assertIn("aborted", st["result"].lower())
+        self.assertNotIn("without error", st["result"].lower())
+
+    def test_aborted_selftest_makes_assess_fail(self):
+        # end-to-end: an aborted current test -> assess() verdict FAIL
+        d = _disk(health="PASSED", uncorr=0, realloc=0, poh=10000)
+        with patch.object(burnin, "_run", return_value=_ATA_ABORTED_STALE):
+            verdict, reasons = burnin.assess(d)
+        self.assertEqual(verdict, "FAIL")
+        self.assertTrue(any("self-test" in r.lower() for r in reasons))
 
 
 class TestAssess(unittest.TestCase):
@@ -103,6 +148,61 @@ class TestStartSelftest(unittest.TestCase):
              patch("b2ctl.config.tool", side_effect=lambda n: n):
             burnin.start_selftest("/dev/sdb", "long")
         self.assertEqual(seen["cmd"], ["smartctl", "-t", "long", "/dev/sdb"])
+
+    def test_selftest_passes_megaraid_dtype(self):
+        # F-011: RAID-mode passthrough needs -d <dtype> to actually start.
+        seen = {}
+        with patch.object(burnin, "run_check",
+                          side_effect=lambda c, **k: (seen.setdefault("cmd", c), (True, ""))[1]), \
+             patch("b2ctl.config.tool", side_effect=lambda n: n):
+            burnin.start_selftest("/dev/sda", "long", "megaraid,7")
+        self.assertEqual(seen["cmd"],
+                         ["smartctl", "-t", "long", "-d", "megaraid,7", "/dev/sda"])
+
+
+class TestRunFlow(unittest.TestCase):
+    """F-067 — burnin.run() orchestration: target resolution, the in-pool
+    refusal guard, dry-run early return, and the FAIL -> exit 1 mapping."""
+
+    def test_refuses_in_pool_member(self):
+        d = _disk(dev="/dev/sdb", pool="tank", vdev="raidz1-0")   # in a pool
+        with patch.object(burnin, "start_selftest") as start:
+            rc = burnin.run(d)
+        self.assertEqual(rc, 1)
+        start.assert_not_called()                # never self-test an active member
+
+    def test_resolves_string_target_by_serial(self):
+        target = _disk(dev="/dev/sdh", serial="SER-NEW", pool=None,
+                       vdev=None, vdev_state=None)
+        started = {}
+        with patch("b2ctl.core.scan", return_value=[target]), \
+             patch("b2ctl.spec.load", return_value={}), \
+             patch.object(burnin, "start_selftest",
+                          side_effect=lambda dev, *a, **k: (started.setdefault("dev", dev), (True, ""))[1]), \
+             patch.object(burnin, "_wait_selftest", return_value=True), \
+             patch("b2ctl.smart.read"), \
+             patch.object(burnin, "assess", return_value=("PASS", [])):
+            rc = burnin.run("SER-NEW")
+        self.assertEqual(rc, 0)
+        self.assertEqual(started["dev"], "/dev/sdh")   # resolved the right disk
+
+    def test_dry_run_skips_wait(self):
+        d = _disk(dev="/dev/sdh", pool=None, vdev=None, vdev_state=None)
+        with patch.object(burnin, "start_selftest", return_value=(True, "")), \
+             patch.object(burnin, "_wait_selftest") as wait, \
+             patch("b2ctl.smart.read"):
+            rc = burnin.run(d, dry_run=True)
+        self.assertEqual(rc, 0)
+        wait.assert_not_called()                 # dry-run returns before polling
+
+    def test_fail_verdict_exits_1(self):
+        d = _disk(dev="/dev/sdh", pool=None, vdev=None, vdev_state=None)
+        with patch.object(burnin, "start_selftest", return_value=(True, "")), \
+             patch.object(burnin, "_wait_selftest", return_value=True), \
+             patch("b2ctl.smart.read"), \
+             patch.object(burnin, "assess", return_value=("FAIL", ["uncorrected errors = 3"])):
+            rc = burnin.run(d)
+        self.assertEqual(rc, 1)
 
 
 if __name__ == "__main__":

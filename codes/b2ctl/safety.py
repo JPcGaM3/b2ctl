@@ -11,15 +11,28 @@ LOG_DIR  = "/var/log/b2ctl"
 SNAP_DIR = "/var/log/b2ctl/snapshots"
 LOG_FILE = "/var/log/b2ctl/ops.jsonl"
 
-# Commands whose first token is considered a write op (suppressed in dry-run)
-WRITE_CMDS = {"zpool", "wipefs", "sgdisk", "dd"}
+# Commands whose basename is considered a write op (suppressed in dry-run).
+# Matched by os.path.basename in common.run_check, so config-resolved absolute
+# paths (e.g. /usr/sbin/perccli64) and bare names both hit. perccli/smartctl/
+# badblocks mutate hardware (set offline/missing, -t self-test, surface scan) and
+# are threaded through run_check with dry_run=, so they MUST be listed here or a
+# --dry-run preview executes them for real (RAID-mode replace/destroy, burn-in).
+WRITE_CMDS = {"zpool", "wipefs", "sgdisk", "dd",
+              "perccli", "perccli64", "smartctl", "badblocks"}
 
-# Rollback hint table: op -> lambda(entry) -> hint_str or None
+# Rollback hint table: op -> lambda(entry) -> hint_str or None.
+# The 'replace' hint prefers the named old_dev/new_dev fields recorded at
+# begin_op time (F-091); it only falls back to positional cmd indices for
+# entries written before those fields existed. Never index into cmds when the
+# named fields are present — a future cmd-shape change (extra flag) would move
+# the positions and produce a plausible-but-wrong executable rollback.
 _ROLLBACK: dict = {
     "offline":   lambda e: f"zpool online {e['pool']} {e['dev_path']}",
     "add_spare": lambda e: f"zpool remove {e['pool']} {e['dev_path']}",
     "replace":   lambda e: (
-        f"zpool replace {e['pool']} {e['cmds'][0][5]} {e['cmds'][0][4]}"
+        f"zpool replace {e['pool']} {e['new_dev']} {e['old_dev']}"
+        if e.get("new_dev") and e.get("old_dev")
+        else f"zpool replace {e['pool']} {e['cmds'][0][5]} {e['cmds'][0][4]}"
         if e.get("cmds") and len(e["cmds"][0]) > 5
         else f"zpool replace {e['pool']} <new-disk> {e['dev_path']}"
     ),
@@ -29,6 +42,12 @@ _ROLLBACK: dict = {
     "create":    lambda e: f"zpool destroy {e['pool']}  # WARNING: destroys all data",
 }
 _NO_ROLLBACK = {"wipefs", "sgdisk", "wipe"}
+
+# In-memory copy of every op's entry, keyed by op_id (F-092). end_op falls back
+# to this when the on-disk log is unwritable (disk full / read-only /var) so the
+# op result, rollback hint and post-op verification still run.
+_PENDING: dict = {}
+_log_warned = False
 
 
 def begin_op(
@@ -40,9 +59,14 @@ def begin_op(
     vdev: str,
     cmds: list[list[str]],
     *,
+    details: dict | None = None,
     dry_run: bool = False,
 ) -> str:
-    """Write pending audit entry + snapshot. Return op_id."""
+    """Write pending audit entry + snapshot. Return op_id.
+
+    `details` may carry named fields (currently old_dev/new_dev for replace) so
+    rollback hints are built from names, not fragile positional cmd indices.
+    """
     try:
         os.makedirs(LOG_DIR, exist_ok=True)
         os.makedirs(SNAP_DIR, exist_ok=True)
@@ -59,6 +83,8 @@ def begin_op(
         "pool":        pool,
         "vdev":        vdev,
         "cmds":        cmds,
+        "old_dev":     None,
+        "new_dev":     None,
         "status":      "pending",
         "exit_code":   None,
         "stdout":      "",
@@ -68,18 +94,30 @@ def begin_op(
         "rollback_hint": None,
         "snapshot_path": None,
     }
+    if details:
+        for k in ("old_dev", "new_dev"):
+            if details.get(k):
+                entry[k] = details[k]
     # dry-run is a pure preview — don't write a pre-op snapshot to disk.
     snap_path = None if dry_run else _capture_snapshot(op_id, pool, dev_path)
     if snap_path:
         entry["snapshot_path"] = snap_path
+    _PENDING[op_id] = entry
     _append_jsonl(entry)
     return op_id
 
 
 def end_op(op_id: str, success: bool, stdout: str, stderr: str, exit_code: int,
            *, dry_run: bool = False) -> None:
-    """Update audit entry status + print rollback hint."""
-    entry = _load_entry(op_id)
+    """Update audit entry status + print rollback hint.
+
+    Falls back to the in-memory pending entry when the on-disk log is
+    unwritable, so the operator still gets the result, hint and post-op
+    verification even on a full/read-only root (F-092). Appends an 'end' record
+    rather than rewriting the whole file (F-093) — load merges begin+end by
+    op_id (last record wins).
+    """
+    entry = _load_entry(op_id) or _PENDING.get(op_id)
     if entry is None:
         return
     entry["status"]    = "dry_run" if dry_run else ("ok" if success else "fail")
@@ -90,7 +128,8 @@ def end_op(op_id: str, success: bool, stdout: str, stderr: str, exit_code: int,
 
     hint = _build_rollback_hint(entry)
     entry["rollback_hint"] = hint
-    _rewrite_entry(op_id, entry)
+    _PENDING[op_id] = entry
+    _append_jsonl(entry)
     _print_op_result(entry, hint)
     # dry-run changed nothing — skip the live post-op verification (it would
     # re-scan the real pool and could falsely warn / suggest a rollback).
@@ -136,45 +175,37 @@ def _capture_snapshot(op_id: str, pool: str, dev_path: str) -> str | None:
 
 
 def _append_jsonl(entry: dict) -> None:
+    # O_APPEND of one small line is atomic on POSIX, so concurrent b2ctl
+    # processes never interleave (F-093) — no locking or rewrite needed.
+    global _log_warned
     try:
         with open(LOG_FILE, "a") as f:
             f.write(json.dumps(entry) + "\n")
-    except OSError:
-        pass
+    except OSError as exc:
+        if not _log_warned:
+            _log_warned = True
+            print(f"{Y}⚠ audit log unwritable ({LOG_FILE}): {exc}{N}")
 
 
 def _load_entry(op_id: str) -> dict | None:
+    """Return the merged entry for op_id (last matching record wins), or None.
+
+    Append-only log: begin_op writes one record, end_op appends another with the
+    same op_id — the later record carries the final status/hint.
+    """
+    found = None
     try:
         with open(LOG_FILE) as f:
             for line in f:
                 try:
                     e = json.loads(line)
                     if e.get("op_id") == op_id:
-                        return e
+                        found = {**found, **e} if found else e
                 except json.JSONDecodeError:
                     pass
     except OSError:
         pass
-    return None
-
-
-def _rewrite_entry(op_id: str, updated: dict) -> None:
-    """Rewrite the matching line in ops.jsonl."""
-    try:
-        with open(LOG_FILE) as f:
-            lines = f.readlines()
-        with open(LOG_FILE, "w") as f:
-            for line in lines:
-                try:
-                    e = json.loads(line)
-                    if e.get("op_id") == op_id:
-                        f.write(json.dumps(updated) + "\n")
-                    else:
-                        f.write(line)
-                except json.JSONDecodeError:
-                    f.write(line)
-    except OSError:
-        pass
+    return found
 
 
 def _print_op_result(entry: dict, hint: str | None) -> None:
@@ -222,20 +253,27 @@ def _post_op_verify(entry: dict) -> None:
 
 
 def load_log(last: int = 20) -> list[dict]:
-    """Return last N entries from ops.jsonl."""
-    entries = []
+    """Return the last N ops from ops.jsonl, merging each op's begin+end records.
+
+    Append-only means one op spans two lines (F-093); merge them by op_id
+    (last record wins) so callers see one final entry per op.
+    """
+    merged: dict = {}
     try:
         with open(LOG_FILE) as f:
             for line in f:
                 try:
-                    entries.append(json.loads(line))
+                    e = json.loads(line)
+                    op_id = e.get("op_id")
+                    if op_id:
+                        merged[op_id] = {**merged.get(op_id, {}), **e}
                 except json.JSONDecodeError:
                     pass
     except PermissionError:
         print("  [!] cannot read log — run as root")
     except OSError:
         pass
-    return entries[-last:]
+    return list(merged.values())[-last:]
 
 
 def find_entry(op_id: str) -> dict | None:

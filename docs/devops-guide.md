@@ -657,17 +657,52 @@ no boot pool*. IT mode invalidates that:
 
 Update ADR-001 accordingly when this build supersedes the RAID-mode one.
 
+### 11a. v0.9.0 audit deltas (Fable5 review) — for maintainers
+
+Structural/behavioral changes from resolving `reviews/REVIEW_FABLE_001.md`
+(see `docs/adr/ADR-001` and `prompts/FIX_fable5_audit.md`):
+
+- **Version** lives in `b2ctl/_version.py` (not `cli.py`) — importing the version
+  no longer loads the whole app graph. Bump it there.
+- **Lifecycle CLI subcommands are now scriptable:** `offload/replace/create/
+  destroy/swap/demote` return a real exit code (`0` = op completed, `1` =
+  cancelled/failed) via the new public `zfs_actions` module — they no longer
+  always exit 0. cron/scripts can gate on `$?`.
+- **Audit log is append-only:** `/var/log/b2ctl/ops.jsonl` gets one *begin* line
+  and one *end* line per op; `b2ctl log`/`rollback` merge them by `op_id`
+  (last-record-wins). A crash mid-op can no longer truncate history, and a
+  full/read-only `/var` still yields a result + post-op check (in-memory
+  fallback). Rollback hints are built from recorded `old_dev`/`new_dev`, not
+  positional argv indices.
+- **PERC actions target the member's controller** (`Disk.ctrl` → `/c<ctrl>`),
+  and the audited command equals what runs (`hba_raid.build_cmd`).
+- **New shared modules:** `blockdev.py` (lsblk listing/`vd_usage`, moved out of
+  `hba`), `zfs_actions.py` (public ZFS-lifecycle contract), `_version.py`. Read
+  path stays side-effect-free via `core.scan_light`/targeted `scan_one`.
+- **locate syntax** is `b2ctl locate <bay|serial|dev> [secs]` — a timed blink,
+  always left off; there is no latched `on`/`off` verb (§9).
+
 ---
 
 ## 12. Simulation harness (`codes/sim/`)
 
 b2ctl talks to hardware **only** through `run()`/`run_check()` (subprocess). That
-seam lets you run the *real, unmodified* b2ctl against a simulated 6-disk server
-on a laptop — no hardware, SSH, or root. `sim/bin/` holds fake
-`zpool`/`lsblk`/`sas2ircu`/`storcli`/`perccli`/`smartctl`/… that read and mutate
+seam lets you run the *real, unmodified* b2ctl against a simulated 8-disk server
+(6 SATA/SAS + 2 NVMe) on a laptop — no hardware, SSH, or root. `sim/bin/` holds
+fake `zpool`/`lsblk`/`sas2ircu`/`perccli`/`smartctl`/… that read and mutate
 `sim/state.json`; `sim/run` is a launcher that sets `PATH`, points `B2CTL_STATE`
 at the state, fakes root (`os.geteuid → 0`), uses an identity bay map, selects
 the backend from `state.mode`, and redirects the audit trail to `sim/var/`.
+
+Since v0.9.0 the harness models **both backends and the full lifecycle**: RAID
+mode presents a synthetic PERC vd0 (perccli VD/PD/rebuild tables + `smartctl -d
+megaraid` passthrough, front drives hidden behind the VD); resilver progress is
+**time-based** (`zpool status` reads are side-effect-free — set
+`B2CTL_SIM_RESILVER_SECS` to slow it down for stepping through Task-B), a replace
+creates a real `replacing-N`/`spare-N` intermediate vdev until detach/completion,
+and `offline`/`online` change pool state. `sim/state.json` writes are atomic
+(tmp + `os.replace`); a corrupt state file fails loudly instead of silently
+resetting.
 
 ```bash
 cd codes

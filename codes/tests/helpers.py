@@ -89,6 +89,16 @@ _RESILVER_DONE_WITH_ERRORS = """\
   scan: resilvered 500M in 00:00:05 with 1 errors on Mon Jun 16 10:00:00 2025
 """
 
+# Early in a real OpenZFS resilver there is no ETA yet — the scan line contains
+# both 'resilvered' and 'no estimated completion time' but NOT 'to go'. The old
+# parser misread this as completed-with-errors (F-025).
+_RESILVER_NO_ETA = """\
+  pool: tank
+ state: DEGRADED
+  scan: resilver in progress since Mon Jun 16 10:00:00 2025
+    517M resilvered, 24.83% done, no estimated completion time
+"""
+
 # zpool status when a hot spare auto-activates (spare-N vdev, not replacing-N)
 _SPARE_N_STATUS = """\
   pool: tank
@@ -150,4 +160,81 @@ write:  Total                          Secs   GBytes    MBytes  IOs  MBytes/s
 Elements in grown defect list: 0
 
 SMART Health Status: OK
+"""
+
+# SAS drive with a nonzero 'total uncorrected errors' column in its error-counter
+# log (column 7 of the read/write/verify rows) but ZERO grown defects (F-095).
+# Column 6 (gigabytes processed) carries a decimal — the parser must skip it with
+# \S+, not \d+ — and the read: row's column 7 is 14 uncorrected errors.
+_SAS_UNCORR_OUTPUT = """\
+=== START OF INFORMATION SECTION ===
+Vendor:               SEAGATE
+Product:              ST1200MM0009
+Serial number:        S4F2NY0M888888
+Device type:          disk
+
+Percentage used endurance indicator: 1%
+Accumulated power on time, hours:minutes 33333:14
+
+Error counter log:
+           Errors Corrected by           Total   Correction     Gigabytes    Total
+               ECC          rereads/    errors   algorithm      processed    uncorrected
+           fast | delayed   rewrites  corrected  invocations   [10^9 bytes]  errors
+read:   1234567        0         0   1234567          0       6585.833          14
+write:        0        0         0         0          0       2345.123           0
+verify: 9876543        0         0   9876543          0        123.456           0
+
+Elements in grown defect list: 0
+
+SMART Health Status: OK
+"""
+
+# Realistic full `smartctl -a` dump for an NVMe SSD (Samsung 990 EVO Plus style).
+# Exercises the NVMe dispatch (requires both 'NVMe' and 'SMART/Health Information'
+# in the output) and every _parse_nvme field: comma-formatted 'Power On Hours',
+# 'Percentage Used', 'Data Units Written' (*1000 LBA conversion) and 'Media and
+# Data Integrity Errors' (F-096).
+_NVME_OUTPUT = """\
+smartctl 7.3 2022-02-28 r5338 [x86_64-linux-6.8.12-pve] (local build)
+Copyright (C) 2002-22, Bruce Allen, Christian Franke, www.smartmontools.org
+
+=== START OF INFORMATION SECTION ===
+Model Number:                       Samsung SSD 990 EVO Plus 2TB
+Serial Number:                      S7U9NX0Y123456
+Firmware Version:                   0B2QKXJ7
+PCI Vendor/Subsystem ID:            0x144d
+IEEE OUI Identifier:                0x002538
+Total NVM Capacity:                 2,000,398,934,016 [2.00 TB]
+Unallocated NVM Capacity:           0
+Controller ID:                      6
+NVMe Version:                       2.0
+Number of Namespaces:               1
+Namespace 1 Size/Capacity:          2,000,398,934,016 [2.00 TB]
+Namespace 1 Formatted LBA Size:     512
+Local Time is:                      Mon Jul  6 12:00:00 2026 UTC
+Firmware Updates (0x16):            3 Slots, no Reset required
+
+=== START OF SMART DATA SECTION ===
+SMART overall-health self-assessment test result: PASSED
+
+SMART/Health Information (NVMe Log 0x02)
+Critical Warning:                   0x00
+Temperature:                        35 Celsius
+Available Spare:                    100%
+Available Spare Threshold:          10%
+Percentage Used:                    5%
+Data Units Read:                    23,456,789 [12.0 TB]
+Data Units Written:                 12,345,678 [6.32 TB]
+Host Read Commands:                 234,567,890
+Host Write Commands:                123,456,789
+Controller Busy Time:               1,234
+Power Cycles:                       56
+Power On Hours:                     1,234
+Unsafe Shutdowns:                   12
+Media and Data Integrity Errors:    7
+Error Information Log Entries:       7
+Warning  Comp. Temperature Time:    0
+Critical Comp. Temperature Time:    0
+Temperature Sensor 1:               35 Celsius
+Temperature Sensor 2:               42 Celsius
 """

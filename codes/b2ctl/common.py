@@ -155,6 +155,11 @@ class Disk:
                                    # kept separate from the (possibly remapped) bay label
     ctrl: int | None = None        # perccli controller index this PD lives on;
                                    # None -> default (0). Actions target /c<ctrl> (F-085)
+    # Burn-in self-test progress (transient). Set by smart.read() from the SAME
+    # `smartctl -a` output it already fetches — no extra subprocess on the scan path.
+    selftest_running: bool = False
+    selftest_pct: int | None = None    # percent COMPLETE (0..100) of the running test
+    selftest_eta: str = ""             # formatted time remaining, e.g. "~1h10m" or ""
 
     @property
     def in_pool(self) -> bool:

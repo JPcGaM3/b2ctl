@@ -441,28 +441,46 @@ b2ctl> e
 
 ---
 
-### 6.8 `b` — Burn-in a disk (vet before pooling)
+### 6.8 `b` — Burn-in disk(s) (vet before pooling)
 
-**When to use:** before trusting a new or second-hand disk, run a SMART long
-self-test (optionally a full read-surface scan) and get a PASS/WARN/FAIL verdict.
+**When to use:** before trusting new or second-hand disks, run a SMART long
+self-test (optionally a full read-surface scan) on **several disks at once** and
+get a PASS/WARN/FAIL verdict per disk.
+
+**Multi-select + background (v0.10.0).** Pick disks the same way as `[n]ew-pool`
+(space-separated), confirm, then choose whether to also run a surface scan. The
+self-tests run on the drives' own firmware and the scans run as detached
+processes, so a **live view** shows a progress bar + estimated time remaining for
+each disk — and you can **leave it running** (Ctrl-C) and come back later.
 
 ```
 b2ctl> b
-    [1] /dev/sdg (bay 1:8) Samsung SSD 870 EVO 1TB
-  burn in which #> 1
-  also run a full read-surface scan (slow, read-only)? [y/N]> n
-  self-test /dev/sdg: [####################] 100%
-  ✔ self-test finished on /dev/sdg
-  [PASS] /dev/sdg
-  ✔ safe to add to a pool.
+    [1] /dev/sdb (bay 32:4) Samsung SSD 870 EVO 1TB
+    [2] /dev/sda (bay 32:5) Samsung SSD 870 EVO 1TB
+    [3] /dev/nvme0n1 (bay PCIe2:0) Samsung 990 EVO Plus
+  burn in which #> (space-separated) 1 2 3
+  burn-in 3 disk(s) (long self-test)? [y/N]> y
+  also run a full read-surface scan (badblocks, read-only, hours)? [y/N]> y
+  live burn-in — Ctrl-C to leave running in background
+
+ BAY     DISK      SELF-TEST                     SURFACE SCAN (badblocks)
+ 32:4    sdb       [########------]  62%  ~1h10m  [###-----------]  18%  ~4h30m
+ 32:5    sda       [##########----]  74%  ~40m    [####----------]  22%  ~4h05m
+ PCIe2:0 nvme0     [#############-]  90%  ~8m     n/a
 ```
 
-- **PASS** — clean. **WARN** — usable but aged (power-on hours > 40000, or grown
-  defects): use as lower-priority / not paired with another old disk. **FAIL** —
+- **Leaving & re-attaching:** press **Ctrl-C** to return to the prompt — the tests
+  and scans keep running. Press `[b]` again (or run `b2ctl burnin --status`) to
+  re-open the live view; when a disk finishes you'll see its verdict there.
+- While a self-test runs, `b2ctl status` shows `TEST xx%` in that disk's STATUS
+  column (and the details block adds a `self-test running: …%` line).
+- **PASS** — clean. **WARN** — usable but aged (power-on hours > 40000, grown
+  defects, or the surface scan found bad blocks): use as lower-priority. **FAIL** —
   uncorrected errors or a failed self-test: do not pool it.
 - Read-only: the only actions are the self-test trigger and (optionally) a
   read-only `badblocks` scan — your data/disk is never written.
-- CLI: `b2ctl burnin <bay|dev> [--scan] [--short]`.
+- CLI: `b2ctl burnin <bay|dev> [<bay|dev> …] [--scan] [--short]`;
+  re-attach with `b2ctl burnin --status`.
 
 ---
 

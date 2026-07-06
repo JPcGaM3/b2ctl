@@ -155,3 +155,63 @@ class TestArrayColumn:
 
     def test_render_storage_empty(self):
         assert ui.render_storage([]) == ""
+
+
+class TestBurninProgress:
+    def test_fmt_eta_minutes(self):
+        assert ui.fmt_eta(8) == "~8m"
+        assert ui.fmt_eta(90) == "~1h30m"
+        assert ui.fmt_eta(0) == "~0m"
+        assert ui.fmt_eta(None) == ""
+
+    def test_status_cell_shows_test_pct_for_free_disk(self):
+        d = _disk(pool=None, vdev=None, vdev_state=None)
+        d.selftest_running = True
+        d.selftest_pct = 62
+        assert "TEST 62%" in ui._status_cell(d)
+
+    def test_status_cell_blank_when_not_testing(self):
+        d = _disk(pool=None, vdev=None, vdev_state=None)
+        assert ui._status_cell(d).strip() == ""
+
+    def test_in_pool_disk_shows_state_not_test(self):
+        # a pool member must render ONLINE, never TEST% (burn-in refuses members)
+        d = _disk(pool="tank", vdev="raidz1-0", vdev_state="ONLINE")
+        d.selftest_running = True
+        d.selftest_pct = 50
+        assert "ONLINE" in ui._status_cell(d)
+        assert "TEST" not in ui._status_cell(d)
+
+    def test_render_details_adds_selftest_line(self):
+        d = _disk(pool=None, vdev=None, vdev_state=None)
+        assess(d)                                # -> CONFIG (unassigned)
+        d.selftest_running = True
+        d.selftest_pct = 45
+        d.selftest_eta = "~40m"
+        out = ui.render_details([d])
+        assert "self-test running: 45%" in out
+        assert "~40m remaining" in out
+
+    def test_render_burnin_view_two_bars(self):
+        row = {"bay": "1:4", "dev": "/dev/sdb", "serial": "S1",
+               "st_running": True, "st_pct": 60, "st_eta": 36, "do_scan": True,
+               "sc_running": True, "sc_pct": 18, "sc_eta": 270, "sc_bad": 0,
+               "done": False}
+        out = ui.render_burnin_view([row])
+        assert "SELF-TEST" in out and "SURFACE SCAN" in out
+        assert "60%" in out and "18%" in out
+        assert "~36m" in out and "~4h30m" in out
+
+    def test_render_burnin_row_scan_na_when_no_scan(self):
+        row = {"bay": "1:4", "dev": "/dev/sdb", "serial": "S1",
+               "st_running": True, "st_pct": 10, "st_eta": None, "do_scan": False,
+               "sc_running": False, "sc_pct": None, "sc_eta": None, "sc_bad": 0,
+               "done": False}
+        assert "n/a" in ui.render_burnin_row(row)
+
+    def test_render_burnin_row_done_with_bad(self):
+        row = {"bay": "1:4", "dev": "/dev/sdb", "serial": "S1",
+               "st_running": False, "st_pct": 100, "st_eta": None, "do_scan": True,
+               "sc_running": False, "sc_pct": 100, "sc_eta": None, "sc_bad": 3,
+               "done": True}
+        assert "done (3 bad)" in ui.render_burnin_row(row)

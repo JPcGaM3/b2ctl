@@ -1,11 +1,33 @@
 # TASKS.md — b2ctl work queue
 
+> **STATUS (v0.10.0-itmode):** Multi-disk **background burn-in** DONE (this
+> release) — see below. Prior: Fable5 audit (123 findings) DONE in v0.9.0.
+> Full unit suite green (495 passed); sim validated (self-test + badblocks).
+> Version lives in `codes/b2ctl/_version.py`. **Next:** verify on hardware.
+
+## FEATURE — multi-disk background burn-in + live progress [DONE, v0.10.0-itmode]
+
+Burn-in is now **multi-select and non-blocking**. `watch [b]` / `b2ctl burnin`
+take several disks (space-separated, like pool-create), start a `smartctl -t long`
+self-test on each (firmware) and, if confirmed, a **detached** `badblocks -sv`
+surface scan on each; a `live_view` shows per-disk self-test + scan progress bars
++ ETA. **Ctrl-C leaves everything running**; re-attach with `b2ctl burnin
+--status` (or `[b]`), state persisted in `burnin.json` under `safety.LOG_DIR`.
+`b2ctl status` shows `TEST xx%` for a self-testing free disk (from the same
+`smartctl -a`, zero extra subprocess). Retired the blocking `_wait_selftest` /
+`read_scan`. Architecture: **ADR-002**. Blueprint: `prompts/FEATURE_burnin_multi.md`.
+Touched: burnin.py (parse_selftest/start_scan/scan_progress/state/run_multi/
+live_view/_finish), common.py (Disk self-test fields), smart.py, ui.py (fmt_eta/
+render_burnin_view/TEST% cell), watch.py, cli.py (nargs + --status), sim (fake
+badblocks + smartctl self-test seed). Docs en/th + devops updated.
+
+---
+
 > **STATUS (v0.9.0-itmode):** Fable5 audit (`reviews/REVIEW_FABLE_001.md`, 123
 > findings) **DONE** — all P0–P4 resolved, the 4 Appendix-B refuted findings left
 > untouched. Blueprint: `prompts/FIX_fable5_audit.md`; architecture: `docs/adr/
 > ADR-001`. Full unit suite green; sim validated IT + RAID. Version now lives in
-> `codes/b2ctl/_version.py`. **Next:** verify on hardware (both nodes), then
-> resume the FEATURE queue below.
+> `codes/b2ctl/_version.py`.
 
 ## FABLE5 AUDIT — 123 code-review findings [DONE, v0.9.0-itmode]
 

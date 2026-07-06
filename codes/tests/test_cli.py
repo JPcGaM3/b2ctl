@@ -522,5 +522,33 @@ class TestCheckOutput(unittest.TestCase):
         self.assertNotIn("Controllers found", text)
 
 
+class TestBurninCli(unittest.TestCase):
+    """burnin: multiple targets (nargs) + --status re-attach."""
+
+    def test_accepts_multiple_targets(self):
+        from b2ctl import cli
+        ns = cli.build_parser().parse_args(["burnin", "1:4", "1:5", "--scan"])
+        self.assertEqual(ns.target, ["1:4", "1:5"])
+        self.assertTrue(ns.scan)
+
+    def test_status_flag_calls_status_view(self):
+        from b2ctl import cli
+        ns = cli.build_parser().parse_args(["burnin", "--status"])
+        with patch("b2ctl.burnin.status_view", return_value=0) as sv, \
+             patch("b2ctl.burnin.run_multi") as rm:
+            rc = cli._burnin(ns)
+        self.assertEqual(rc, 0)
+        sv.assert_called_once()
+        rm.assert_not_called()
+
+    def test_multi_target_dispatches_run_multi(self):
+        from b2ctl import cli
+        ns = cli.build_parser().parse_args(["burnin", "1:4", "1:5"])
+        with patch("b2ctl.burnin.run_multi", return_value=0) as rm, \
+             patch("b2ctl.spec.load", return_value={}):
+            cli._burnin(ns)
+        self.assertEqual(rm.call_args[0][0], ["1:4", "1:5"])
+
+
 if __name__ == "__main__":
     unittest.main()

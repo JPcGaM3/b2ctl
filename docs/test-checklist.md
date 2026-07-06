@@ -417,13 +417,14 @@ swap which #&gt; N
 cd codes && python3 -m pytest tests/ -q
 ```
 
-**ผลรอบนี้ (dev machine):** `454 passed, 0 failed` ✅ *(v0.9.0-itmode: Fable5 audit 123 findings — +87 tests: safety append-only/named-hint, RAID ctrl/build_cmd/abort, zfs_actions exit codes, blockdev, scan_light/scan_one, is_poolable, assign_bays, spec/smart/spares parsing, sim RAID+resilver+offline)*
+**ผลรอบนี้ (dev machine):** `495 passed, 0 failed` ✅ *(v0.10.0-itmode: multi-disk background burn-in — +34 tests: parse_selftest/ETA, start_scan Popen, scan_progress, state save/load, _pid_alive, burnin_snapshot, live_view, run_multi re-entrancy, smart self-test fields, ui fmt_eta/render_burnin, watch multi-select, cli nargs/--status)*
 
 | ID | Scenario | Expected | Status | Actual | Comment |
 |----|----------|----------|:------:|--------|---------|
 | E1 | Test suite รันได้ | suite รันจบ ไม่ error การ import | ✅ | tests collected, รันจบ | OK |
-| E2 | Pass rate | tests ผ่านทั้งหมด | ✅ | **454 passed / 0 failed** (+4 subtests) | …prior deltas… ; +87 (v0.9.0) Fable5 audit: safety cluster (F-091/092/093/094), raid_actions replace/offline/abort + hba_raid parse (F-082/085/088/089/090), core scan_light/scan_one/sort/workers (F-077/078/079/102), watch retry/assign menu (F-100/101), zfs read-side + dedup + shared topo (F-104/105/107), baymap assign_bays (F-084), blockdev (F-080), zfs_actions exit codes (F-070), common is_poolable/is_spare/dry-run (F-074/098/103), spec (F-097), smart SAS-uncorr/NVMe (F-095/096), cli/config/hba (F-069/071/072/073/075/081), burnin.run (F-067), sim (F-114/116/117/118/123), installer (F-122/087) |
+| E2 | Pass rate | tests ผ่านทั้งหมด | ✅ | **495 passed / 0 failed** (+4 subtests) | …prior deltas… ; +87 (v0.9.0) Fable5 audit ; +34 (v0.10.0) burn-in: parse_selftest+ETA, start_scan (Popen, no -w, start_new_session), scan_progress+_parse_badblocks_log, _pid_alive reap, state save/load under safety.LOG_DIR, burnin_snapshot, live_view finish/Ctrl-C, run_multi start/re-entrant/dry-run, _finish prune+scan-bad→WARN, status_view, smart selftest fields, ui fmt_eta/TEST%-cell/render_burnin_view, watch multi-select+re-attach, cli nargs+--status |
 | E3 | sim NVMe walk | `sim/run status` โชว์ nvme0n1/nvme1n1 = PCIe2:0/1, `burnin nvme0n1` = PASS | ✅ | NVMe enumerated + serial-relabelled + burn-in PASS ใน sim | NVMe by-id ต้องเครื่องจริง (sysfs/by-id แฟกไม่ได้) |
+| E4 | sim multi burn-in | `burnin <dev> --scan` โชว์ 2 bars + ETA, dirty→WARN, state ใน sim/var | ✅ | live self-test+scan bars, `[WARN] … 3 bad block(s)`, `sim/var/burnin.json` | Ctrl-C = ทิ้งไว้รันต่อ (re-attach `--status`) |
 
 <details>
 <summary>📋 ดูโครงสร้าง test ใหม่ + รายละเอียด 9 เทสที่แก้</summary>

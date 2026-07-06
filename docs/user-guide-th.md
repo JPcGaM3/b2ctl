@@ -825,13 +825,34 @@ default ที่เหมาะกับ SSD อยู่แล้ว — **ก
 ## Burn-in ดิสก์ก่อนเข้าใช้ (`[b]urnin`)
 
 ก่อนเชื่อดิสก์ใหม่/มือสอง รัน SMART long self-test (เลือกสแกนผิวอ่านทั้งลูกได้) แล้วได้ผล
-**PASS / WARN / FAIL**:
+**PASS / WARN / FAIL** — ทำ**หลายลูกพร้อมกัน**ได้ (v0.10.0)
 
-- **PASS** สะอาด · **WARN** ใช้ได้แต่เก่า (POH > 40000 ชม. หรือมี grown defect) → จัด
-  priority ต่ำ อย่าจับคู่ mirror กับดิสก์เก่าด้วยกัน · **FAIL** มี uncorrected error หรือ
-  self-test ไม่ผ่าน → อย่าเอาเข้า pool
+**เลือกหลายลูก + รันเบื้องหลัง:** เลือกดิสก์แบบเดียวกับ `[n]ew-pool` (คั่นด้วยเว้นวรรค)
+ยืนยัน แล้วเลือกว่าจะสแกนผิว (`badblocks`) ด้วยไหม self-test รันบนเฟิร์มแวร์ของดิสก์เอง
+ส่วน scan รันเป็น process เบื้องหลัง จึงมี**หน้าจอสด**โชว์แถบความคืบหน้า + เวลาที่เหลือของ
+แต่ละลูก และ**ออกทิ้งให้รันต่อได้** (กด Ctrl-C)
+
+```
+b2ctl> b
+    [1] /dev/sdb (bay 32:4) Samsung SSD 870 EVO 1TB
+    [2] /dev/sda (bay 32:5) Samsung SSD 870 EVO 1TB
+  burn in which #> (space-separated) 1 2
+  burn-in 2 disk(s) (long self-test)? [y/N]> y
+  also run a full read-surface scan (badblocks, read-only, hours)? [y/N]> y
+
+ BAY     DISK      SELF-TEST                     SURFACE SCAN (badblocks)
+ 32:4    sdb       [########------]  62%  ~1h10m  [###-----------]  18%  ~4h30m
+ 32:5    sda       [##########----]  74%  ~40m    [####----------]  22%  ~4h05m
+```
+
+- **ออก & กลับเข้ามาดูใหม่:** กด **Ctrl-C** กลับไปที่ prompt — test/scan ยังรันต่อ กด `[b]`
+  อีกครั้ง (หรือ `b2ctl burnin --status`) เพื่อกลับเข้าหน้าจอสด พอลูกไหนเสร็จจะเห็นผลตรงนั้น
+- ระหว่าง self-test `b2ctl status` จะโชว์ `TEST xx%` ในคอลัมน์ STATUS ของดิสก์ลูกนั้น
+- **PASS** สะอาด · **WARN** ใช้ได้แต่เก่า (POH > 40000 ชม., grown defect, หรือ scan เจอ bad
+  block) → จัด priority ต่ำ · **FAIL** มี uncorrected error หรือ self-test ไม่ผ่าน → อย่าเข้า pool
 - **อ่านอย่างเดียว**: ทำแค่สั่ง self-test และ (ถ้าเลือก) `badblocks` แบบ read-only — ไม่
-  เขียนทับดิสก์. CLI: `b2ctl burnin <bay|dev> [--scan] [--short]`
+  เขียนทับดิสก์. CLI: `b2ctl burnin <bay|dev> [<bay|dev> …] [--scan] [--short]`,
+  กลับเข้าดูด้วย `b2ctl burnin --status`
 
 ## ลบ ZFS pool (`[x]` หรือ `b2ctl destroy <pool>`)
 

@@ -31,8 +31,11 @@ def main():
             return 2  # no such device → b2ctl marks NOREAD
 
     # `smartctl -t long|short <dev>` — start a (fake) self-test, return immediately.
+    # Record a wall-clock seed so subsequent `-a` polls report live progress.
     if "-t" in argv:
         kind = argv[argv.index("-t") + 1] if argv.index("-t") + 1 < len(argv) else "long"
+        d["selftest"] = S.selftest_seed()
+        S.save(state)
         print(f"Sending command: \"Execute SMART {kind.capitalize()} self-test routine "
               "immediately in off-line mode\".")
         print("Drive command \"Execute SMART ... self-test\" successful.")
@@ -70,6 +73,24 @@ def main():
     print("=== START OF READ SMART DATA SECTION ===")
     print("SMART overall-health self-assessment test result: PASSED")
     print("")
+    # Self-test capability: the recommended polling time is b2ctl's ETA basis.
+    print("Extended self-test routine")
+    print("recommended polling time: \t(   2) minutes.")
+    print("")
+    # Live self-test status (seeded by `-t`, derived from wall-clock).
+    st = d.get("selftest")
+    st_done = True
+    if st:
+        pct = S.selftest_pct(st)
+        if pct < 100:
+            st_done = False
+            print("Self-test execution status:      ( 249)\tSelf-test routine in progress...")
+            print(f"\t\t\t\t\t{100 - pct}% of test remaining.")
+            print("")
+    if st and st_done:
+        # finished — clear the seed so status returns to normal and re-runs work.
+        d["selftest"] = None
+        S.save(state)
     print("Vendor Specific SMART Attributes with Thresholds:")
     print("ID# ATTRIBUTE_NAME          FLAG     VALUE WORST THRESH TYPE      UPDATED  WHEN_FAILED RAW_VALUE")
     print(f"  5 Reallocated_Sector_Ct   0x0033   100   100   010    Pre-fail  Always       -       {d['realloc']}")

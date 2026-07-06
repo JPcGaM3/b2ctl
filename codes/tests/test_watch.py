@@ -903,8 +903,9 @@ class TestExtendAndBurnin(unittest.TestCase):
         free = _disk(dev="/dev/sde", pool=None, vdev=None, smart_dtype="")
         mock_core.scan.return_value = [free]
         mock_ask.side_effect = ["1"]
-        with patch("b2ctl.burnin.run", return_value=0) as mock_run, \
-             patch("b2ctl.watch._confirm", return_value=False):
+        with patch("b2ctl.burnin.run_multi", return_value=0) as mock_run, \
+             patch("b2ctl.burnin.load_state", return_value=[]), \
+             patch("b2ctl.watch._confirm", side_effect=[True, False]):
             _cmd_burnin({})
         mock_run.assert_called_once()
 
@@ -1175,6 +1176,42 @@ class TestAssignFreeDisk:
                   pool=None, vdev=None, vdev_state=None, smart_dtype="")
         _assign_free_disk(d, {})
         mock_zfs.wipe.assert_not_called()
+
+
+class TestWatchBurnin(unittest.TestCase):
+    """[b]urnin multi-select (space list) -> burnin.run_multi."""
+
+    @patch("b2ctl.burnin.run_multi")
+    @patch("b2ctl.burnin.load_state", return_value=[])
+    @patch("b2ctl.watch._confirm")
+    @patch("b2ctl.watch._ask")
+    @patch("b2ctl.watch._avail_for_aux")
+    def test_multi_select_calls_run_multi(self, mock_avail, mock_ask,
+                                          mock_confirm, _load, mock_run_multi):
+        from b2ctl import watch
+        a = _disk(dev="/dev/sdb", serial="A", pool=None, vdev=None, vdev_state=None)
+        b = _disk(dev="/dev/sdc", serial="B", pool=None, vdev=None, vdev_state=None)
+        c = _disk(dev="/dev/sdd", serial="C", pool=None, vdev=None, vdev_state=None)
+        mock_avail.return_value = [a, b, c]
+        mock_ask.return_value = "1 3"               # pick 1st and 3rd
+        mock_confirm.side_effect = [True, False]    # burn-in yes, scan no
+        watch._cmd_burnin({})
+        mock_run_multi.assert_called_once()
+        picks = mock_run_multi.call_args[0][0]
+        self.assertEqual([d.serial for d in picks], ["A", "C"])
+        self.assertEqual(mock_run_multi.call_args.kwargs.get("do_scan"), False)
+
+    @patch("b2ctl.burnin.status_view")
+    @patch("b2ctl.burnin.run_multi")
+    @patch("b2ctl.burnin.load_state",
+           return_value=[{"serial": "X", "dev": "/dev/sdb"}])
+    @patch("b2ctl.watch._confirm", return_value=True)
+    def test_reattaches_when_burnin_in_flight(self, _confirm, _load,
+                                              mock_run_multi, mock_status):
+        from b2ctl import watch
+        watch._cmd_burnin({})
+        mock_status.assert_called_once()            # viewed the in-flight run
+        mock_run_multi.assert_not_called()          # did not start a new one
 
 
 if __name__ == "__main__":

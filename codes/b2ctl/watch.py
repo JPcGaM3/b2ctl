@@ -957,20 +957,37 @@ def _cmd_extend(tbw) -> None:
 
 
 def _cmd_burnin(tbw) -> None:
-    """Vet a free disk with a SMART long self-test before pooling it."""
+    """Vet free disk(s) with SMART long self-tests (+ optional surface scan).
+
+    Multi-select (space-separated, like [n]ew-pool); non-blocking — the live view
+    can be left (Ctrl-C) with everything still running. Re-attaches an in-flight
+    burn-in first if one exists."""
     from . import burnin
+    if burnin.load_state():
+        if _confirm(f"{len(burnin.load_state())} burn-in(s) in progress — view live status?"):
+            burnin.status_view()
+            return
     avail = _avail_for_aux(tbw)
     if not avail:
         print(f"{Y}  no free disks to burn in{N}"); return
     for i, d in enumerate(avail, 1):
         print(f"    [{i}] {d.dev} (bay {d.bay or '?'}) {d.model}")
-    sel = _ask("  burn in which #> ")
+    sel = _ask("  burn in which #> (space-separated) ")
     try:
-        d = avail[_one_based(sel)]
+        picks = []
+        for x in sel.split():
+            i = int(x) - 1
+            if i < 0:
+                raise IndexError(x)
+            picks.append(avail[i])
     except (ValueError, IndexError):
+        print(f"{Y}  cancelled or invalid selection{N}"); return
+    if not picks:
         print(f"{Y}  cancelled{N}"); return
-    do_scan = _confirm("also run a full read-surface scan (slow, read-only)?")
-    burnin.run(d, tbw, do_scan=do_scan, dry_run=_DRY_RUN)
+    if not _confirm(f"burn-in {len(picks)} disk(s) (long self-test)?"):
+        print(f"{Y}  cancelled{N}"); return
+    do_scan = _confirm("also run a full read-surface scan (badblocks, read-only, hours)?")
+    burnin.run_multi(picks, tbw, do_scan=do_scan, dry_run=_DRY_RUN)
 
 
 def _cmd_udev_rescue(tbw) -> None:

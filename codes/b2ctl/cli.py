@@ -200,9 +200,15 @@ def _log_rm(args) -> int:
 
 def _burnin(args) -> int:
     from . import burnin
-    return burnin.run(args.target, spec.load(), do_scan=args.scan,
-                      kind="short" if args.short else "long",
-                      dry_run=watch._DRY_RUN)
+    if args.status:
+        return burnin.status_view()
+    if not args.target:
+        print(f"{R}burnin: give one or more target disks, or --status{N}",
+              file=sys.stderr)
+        return 2
+    return burnin.run_multi(args.target, spec.load(), do_scan=args.scan,
+                            kind="short" if args.short else "long",
+                            dry_run=watch._DRY_RUN)
 
 
 def _raid_replace(args) -> int:
@@ -605,12 +611,16 @@ def build_parser() -> argparse.ArgumentParser:
     lrm.add_argument("dev", help="log leaf token / bay / serial / dev")
     lrm.set_defaults(func=_log_rm)
 
-    bi = sub.add_parser("burnin", help="vet a spare/new disk (SMART long self-test)")
-    bi.add_argument("target", help="bay / serial / dev of the disk to burn in")
+    bi = sub.add_parser("burnin",
+                        help="vet spare/new disk(s) — SMART long self-test (+ scan)")
+    bi.add_argument("target", nargs="*",
+                    help="bay / serial / dev of disk(s) to burn in (space-separated)")
     bi.add_argument("--scan", action="store_true",
                     help="also run a full read-surface scan (badblocks, read-only)")
     bi.add_argument("--short", action="store_true",
                     help="short self-test instead of long")
+    bi.add_argument("--status", action="store_true",
+                    help="show live status of in-flight burn-ins (re-attach)")
     bi.set_defaults(func=_burnin)
 
     v = sub.add_parser("version", help="print version")

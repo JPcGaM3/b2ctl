@@ -1,0 +1,908 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>b2ctl — คู่มือผู้ใช้ (เริ่มจากศูนย์)</title>
+<style>
+  :root{
+    --ink:#16191d; --muted:#5c6470; --faint:#8a909b;
+    --bg:#FAF9F6; --surface:#ffffff; --line:#e6e3db; --line2:#d7d3c8;
+    --accent:#0f766e; --accent-soft:#e2efed; --accent-line:#bcdcd6;
+    --warn:#b45309; --warn-soft:#fbf1de; --warn-line:#ecd8ad;
+    --crit:#b91c1c; --crit-soft:#fbe9e9; --crit-line:#eecaca;
+    --info:#1d4ed8; --info-soft:#e5edfb; --info-line:#c6d6f4;
+    --term-bg:#14181f; --term-text:#d6dbe2; --term-dim:#7c8593; --term-accent:#6fd3c0; --term-warn:#e3b341; --term-red:#f0857d;
+    --mono:"SF Mono","JetBrains Mono",Menlo,Consolas,"Liberation Mono",monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Noto Sans Thai","Sarabun",sans-serif;
+    --sidebar-w:280px;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+    font-size:15px;line-height:1.72;-webkit-font-smoothing:antialiased}
+
+  /* ---------- Layout ---------- */
+  .layout{display:flex;align-items:flex-start;max-width:1240px;margin:0 auto}
+  .sidebar{position:sticky;top:0;height:100vh;width:var(--sidebar-w);flex:0 0 var(--sidebar-w);
+    border-right:1px solid var(--line);padding:26px 18px 40px;overflow-y:auto;background:var(--bg)}
+  .content{flex:1 1 auto;min-width:0;padding:44px 40px 96px;max-width:860px}
+
+  /* ---------- Sidebar ---------- */
+  .brand{display:flex;align-items:baseline;gap:8px;margin-bottom:4px}
+  .brand .logo{font-family:var(--mono);font-weight:700;font-size:18px;color:var(--accent);letter-spacing:-.02em}
+  .brand .v{font-family:var(--mono);font-size:11px;color:var(--faint)}
+  .brand-sub{font-size:12px;color:var(--muted);margin:0 0 16px}
+  .search-wrap{position:relative;margin-bottom:14px}
+  #search{width:100%;font-family:var(--sans);font-size:13.5px;padding:9px 12px 9px 32px;
+    border:1px solid var(--line2);border-radius:9px;background:var(--surface);color:var(--ink);outline:none}
+  #search:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+  .search-wrap svg{position:absolute;left:10px;top:50%;transform:translateY(-50%);opacity:.5}
+  .search-hint{font-size:11px;color:var(--faint);font-family:var(--mono);margin:-6px 0 14px 2px}
+  nav.toc{font-size:13.5px}
+  nav.toc a{display:block;color:var(--muted);text-decoration:none;padding:5px 10px;border-radius:7px;
+    border-left:2px solid transparent;margin:1px 0;transition:background .12s,color .12s}
+  nav.toc a .n{font-family:var(--mono);font-size:11px;color:var(--faint);margin-right:7px}
+  nav.toc a:hover{background:var(--accent-soft);color:var(--ink)}
+  nav.toc a.active{background:var(--accent-soft);color:var(--accent);font-weight:600;border-left-color:var(--accent)}
+  nav.toc a.active .n{color:var(--accent)}
+  nav.toc a.hidden{display:none}
+  .toc-group{font-family:var(--mono);font-size:10.5px;letter-spacing:1px;text-transform:uppercase;
+    color:var(--faint);margin:16px 0 4px 10px}
+
+  /* ---------- Header ---------- */
+  header.doc{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:10px}
+  .kicker{font-family:var(--mono);font-size:12px;letter-spacing:1.5px;text-transform:uppercase;
+    color:var(--accent);margin:0 0 10px}
+  h1{font-size:32px;line-height:1.18;margin:0 0 10px;font-weight:650;letter-spacing:-0.015em}
+  .sub{color:var(--muted);font-size:15.5px;margin:0}
+  .meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:18px}
+  .tag{font-family:var(--mono);font-size:11.5px;background:var(--surface);border:1px solid var(--line2);
+    border-radius:999px;padding:3px 11px;color:var(--muted)}
+  .tag b{color:var(--accent);font-weight:600}
+
+  /* ---------- Sections ---------- */
+  section{margin-top:52px;scroll-margin-top:24px}
+  .eyebrow{display:flex;align-items:baseline;gap:12px;margin-bottom:16px}
+  .num{font-family:var(--mono);font-size:12px;color:var(--accent);border:1px solid var(--accent-line);
+    background:var(--accent-soft);border-radius:5px;padding:2px 9px;letter-spacing:.5px;white-space:nowrap}
+  h2{font-size:22px;margin:0;font-weight:650;letter-spacing:-0.01em}
+  h3{font-size:16px;margin:30px 0 8px;font-weight:650}
+  h4{font-size:14px;margin:22px 0 6px;font-weight:650;color:var(--accent)}
+  p{margin:0 0 13px}
+  .lead{color:var(--muted);font-size:15px;margin-bottom:16px}
+
+  ul.clean{margin:6px 0 14px;padding-left:0;list-style:none}
+  ul.clean li{position:relative;padding-left:22px;margin:8px 0}
+  ul.clean li::before{content:"";position:absolute;left:4px;top:11px;width:6px;height:6px;
+    background:var(--accent);border-radius:50%}
+  ol.steps{counter-reset:step;margin:8px 0 14px;padding-left:0;list-style:none}
+  ol.steps li{position:relative;padding-left:38px;margin:11px 0}
+  ol.steps li::before{counter-increment:step;content:counter(step);position:absolute;left:0;top:1px;
+    width:24px;height:24px;background:var(--accent);color:#fff;border-radius:50%;
+    font-family:var(--mono);font-size:12.5px;font-weight:600;display:flex;align-items:center;justify-content:center}
+
+  /* ---------- Cards ---------- */
+  .why{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:8px}
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+  .card .h{font-weight:600;font-size:14.5px;margin:0 0 4px}
+  .card .b{font-size:13.5px;color:var(--muted);margin:0;line-height:1.6}
+  .card .h .mk{font-family:var(--mono);color:var(--accent);font-size:12px;margin-right:6px}
+
+  /* ---------- Terminal / code ---------- */
+  pre{background:var(--term-bg);color:var(--term-text);border-radius:11px;padding:16px 18px;
+    overflow-x:auto;font-family:var(--mono);font-size:12.8px;line-height:1.68;margin:12px 0 14px;
+    border:1px solid #232a33}
+  pre .c{color:var(--term-dim)}
+  pre .p{color:var(--term-accent)}
+  pre .k{color:var(--term-warn)}
+  pre .g{color:var(--term-accent)}
+  pre .r{color:var(--term-red)}
+  pre .hl{color:#fff;font-weight:600}
+  code.inl{font-family:var(--mono);font-size:.86em;background:#eef0ec;border:1px solid var(--line2);
+    border-radius:4px;padding:1px 5px;color:#0c4f48;white-space:nowrap}
+  kbd{font-family:var(--mono);font-size:.82em;background:var(--surface);border:1px solid var(--line2);
+    border-bottom-width:2px;border-radius:5px;padding:1px 7px;color:var(--ink);white-space:nowrap}
+
+  /* ---------- Callouts ---------- */
+  .note,.ok,.crit,.info{border-left:3px solid;border-radius:0 8px 8px 0;padding:11px 15px;margin:14px 0;font-size:13.9px}
+  .note{border-color:var(--warn);background:var(--warn-soft)} .note b{color:var(--warn)}
+  .ok{border-color:var(--accent);background:var(--accent-soft)} .ok b{color:var(--accent)}
+  .crit{border-color:var(--crit);background:var(--crit-soft)} .crit b{color:var(--crit)}
+  .info{border-color:var(--info);background:var(--info-soft)} .info b{color:var(--info)}
+
+  /* ---------- Tables ---------- */
+  table{width:100%;border-collapse:collapse;margin:12px 0 16px;font-size:13.6px}
+  th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-size:12px;font-family:var(--mono);text-transform:uppercase;letter-spacing:.5px;
+    color:var(--muted);border-bottom:1.5px solid var(--line2)}
+  td.mono,td .mono{font-family:var(--mono);font-size:12.5px}
+  tr:hover td{background:#fcfbf9}
+
+  /* ---------- Badges ---------- */
+  .badge{display:inline-block;font-family:var(--mono);font-size:11px;font-weight:600;
+    padding:1px 8px;border-radius:999px;border:1px solid;white-space:nowrap}
+  .b-green{color:var(--accent);background:var(--accent-soft);border-color:var(--accent-line)}
+  .b-blue{color:var(--info);background:var(--info-soft);border-color:var(--info-line)}
+  .b-amber{color:var(--warn);background:var(--warn-soft);border-color:var(--warn-line)}
+  .b-red{color:var(--crit);background:var(--crit-soft);border-color:var(--crit-line)}
+
+  /* ---------- Key cards (hotkeys) ---------- */
+  .keyrow{display:flex;gap:14px;align-items:flex-start;background:var(--surface);border:1px solid var(--line);
+    border-radius:12px;padding:14px 16px;margin:10px 0}
+  .keyrow .kc{flex:0 0 44px;height:44px;display:flex;align-items:center;justify-content:center;
+    font-family:var(--mono);font-size:19px;font-weight:700;color:#fff;background:var(--accent);border-radius:10px}
+  .keyrow.ro .kc{background:var(--info)}
+  .keyrow .kb{flex:1 1 auto;min-width:0}
+  .keyrow .kb .kt{font-weight:650;font-size:15px;margin:0 0 2px}
+  .keyrow .kb .kt .en{font-family:var(--mono);font-size:12.5px;color:var(--muted);font-weight:500;margin-left:6px}
+  .keyrow .kb .kd{font-size:13.6px;color:var(--muted);margin:0}
+
+  hr{border:0;border-top:1px solid var(--line);margin:44px 0}
+  footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--line);
+    font-size:12.5px;color:var(--faint);font-family:var(--mono)}
+  .no-results{display:none;padding:40px 0;color:var(--muted);font-size:15px;text-align:center}
+
+  .steplabel{display:inline-block;font-family:var(--mono);font-size:11.5px;color:#fff;background:var(--muted);
+    border-radius:5px;padding:1px 8px;margin-right:8px;letter-spacing:.3px}
+  .see{font-family:var(--mono);font-size:11.5px;color:var(--accent);font-weight:600;
+    text-transform:uppercase;letter-spacing:.6px;display:block;margin:14px 0 4px}
+
+  /* ---------- Mobile ---------- */
+  .menu-btn{display:none;position:fixed;top:14px;left:14px;z-index:40;background:var(--accent);color:#fff;
+    border:none;border-radius:9px;width:44px;height:44px;font-size:20px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.15)}
+  .backdrop{display:none}
+  @media(max-width:940px){
+    .why{grid-template-columns:1fr}
+    .menu-btn{display:block}
+    .sidebar{position:fixed;left:0;top:0;z-index:50;transform:translateX(-100%);transition:transform .22s ease;
+      box-shadow:2px 0 16px rgba(0,0,0,.12);width:290px}
+    body.nav-open .sidebar{transform:translateX(0)}
+    body.nav-open .backdrop{display:block;position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:45}
+    .content{padding:64px 22px 80px}
+    h1{font-size:26px}
+  }
+</style>
+</head>
+<body>
+<button class="menu-btn" id="menuBtn" aria-label="เมนู">☰</button>
+<div class="backdrop" id="backdrop"></div>
+<div class="layout">
+
+  <!-- ===================== SIDEBAR ===================== -->
+  <aside class="sidebar" id="sidebar">
+    <div class="brand"><span class="logo">b2ctl</span><span class="v">v0.10 · IT-mode</span></div>
+    <p class="brand-sub">คู่มือผู้ใช้ — เริ่มจากศูนย์</p>
+
+    <div class="search-wrap">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#5c6470" stroke-width="2">
+        <circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input id="search" type="text" placeholder="ค้นหาในคู่มือ…" autocomplete="off">
+    </div>
+    <p class="search-hint">พิมพ์คำ เช่น "spare", "resilver", "wipe"</p>
+
+    <nav class="toc" id="toc">
+      <div class="toc-group">พื้นฐาน</div>
+      <a href="#s0"><span class="n">00</span>b2ctl คืออะไร</a>
+      <a href="#s1"><span class="n">01</span>ติดตั้ง</a>
+      <a href="#s2"><span class="n">02</span>ตรวจสภาพก่อนใช้</a>
+      <a href="#s3"><span class="n">03</span>ดูสุขภาพดิสก์ (status)</a>
+      <a href="#s4"><span class="n">04</span>อ่านตารางให้เป็น</a>
+      <div class="toc-group">ใช้งานจริง</div>
+      <a href="#s5"><span class="n">05</span>โหมด watch</a>
+      <a href="#s6"><span class="n">06</span>คำสั่งทีละปุ่ม</a>
+      <a href="#s7"><span class="n">07</span>Runbook หน้างาน</a>
+      <a href="#s8"><span class="n">08</span>Burn-in ดิสก์ใหม่</a>
+      <a href="#s9"><span class="n">09</span>Dry-run (ซ้อมก่อน)</a>
+      <div class="toc-group">ปลอดภัย & อ้างอิง</div>
+      <a href="#s10"><span class="n">10</span>ระบบความปลอดภัย</a>
+      <a href="#s11"><span class="n">11</span>หาตัวดิสก์ (locate)</a>
+      <a href="#s12"><span class="n">12</span>ข้อควรระวัง</a>
+      <a href="#s13"><span class="n">13</span>Cheat Sheet</a>
+    </nav>
+  </aside>
+
+  <!-- ===================== CONTENT ===================== -->
+  <main class="content">
+
+  <header class="doc">
+    <p class="kicker">b2ctl · disk lifecycle tool · คู่มือผู้ใช้</p>
+    <h1>ดูแลดิสก์ ZFS ด้วย b2ctl<br>ฉบับ "ไม่เคยใช้มาก่อนก็ทำตามได้"</h1>
+    <p class="sub">เครื่องมือ command-line ดูสุขภาพดิสก์และจัดการ ZFS pool บน Dell R620 (Proxmox VE 9.2) — คู่มือนี้พาใช้ทีละขั้น พร้อมตัวอย่างหน้าจอจริง</p>
+    <div class="meta">
+      <span class="tag">Server: <b>Dell R620</b></span>
+      <span class="tag">OS: <b>Proxmox VE 9.2</b></span>
+      <span class="tag">Mode: <b>IT / HBA</b></span>
+      <span class="tag">Storage: <b>ZFS</b></span>
+      <span class="tag">Pools: <b>rpool + tank</b></span>
+    </div>
+  </header>
+
+  <div class="info" style="margin-top:24px">
+    <b>อ่านคู่มือนี้ยังไงดี?</b> ถ้าเพิ่งเริ่ม — อ่านหัวข้อ 00 → 05 ตามลำดับก่อนหนึ่งรอบ จะเห็นภาพรวมทั้งหมด.
+    เวลาเจอปัญหาหน้างาน (ดิสก์เสีย, ต้องเปลี่ยนดิสก์) ให้กระโดดไปที่ <a href="#s7" style="color:var(--info)">หัวข้อ 07 — Runbook</a> ได้เลย.
+    ทุกคำสั่งที่ "แตะดิสก์จริง" b2ctl จะถามยืนยันก่อนเสมอ — กด Enter เปล่า ๆ = ยกเลิก ปลอดภัย.
+  </div>
+
+  <!-- ===== 00 WHAT ===== -->
+  <section id="s0">
+    <div class="eyebrow"><span class="num">00</span><h2>b2ctl คืออะไร?</h2></div>
+    <p class="lead">b2ctl คือเครื่องมือสำหรับ <b>ดูแลดิสก์</b> บนเซิร์ฟเวอร์ Dell R620 ที่ใช้การ์ด RAID (PERC H710)
+    ถูกแปลง (crossflash) เป็นโหมด <b>IT/HBA</b> — คือให้ระบบเห็นดิสก์ดิบ ๆ ตรง ๆ แล้วใช้ <b>ZFS</b> จัดการ pool แทนตัวการ์ด RAID</p>
+
+    <div class="ok"><b>เปรียบเทียบง่าย ๆ:</b> b2ctl เหมือน "หมอประจำตัว" ของดิสก์ในเครื่อง — ตรวจสุขภาพ, บอกว่าตัวไหนใกล้เสีย,
+    แนะนำการรักษา (เปลี่ยนดิสก์ / เพิ่มตัวสำรอง) แล้วช่วยทำให้เสร็จ โดยคุณไม่ต้องจำคำสั่ง ZFS ยาว ๆ เอง</div>
+
+    <h3>b2ctl ทำอะไรได้บ้าง</h3>
+    <div class="why">
+      <div class="card"><p class="h"><span class="mk">01</span>ดูสุขภาพดิสก์</p><p class="b">ตารางรวมทุกดิสก์ — รุ่น, ซีเรียล, ชั่วโมงใช้งาน, ความสึกหรอ, อายุที่เหลือ, bad sector และ "เกรดรวม" (LEVEL) สีเดียวรู้เรื่อง</p></div>
+      <div class="card"><p class="h"><span class="mk">02</span>จัดการ ZFS pool</p><p class="b">เพิ่มดิสก์สำรอง (spare), สลับดิสก์, เปลี่ยนดิสก์เสีย, สร้าง/ลบ pool — ผ่านเมนูกดตัวเลข ไม่ต้องพิมพ์ zpool เอง</p></div>
+      <div class="card"><p class="h"><span class="mk">03</span>หาตัวดิสก์จริง</p><p class="b">กะพริบไฟ LED ที่ช่องของดิสก์ตัวนั้น เพื่อให้แน่ใจว่าดึงถูกตัวก่อนถอด</p></div>
+      <div class="card"><p class="h"><span class="mk">04</span>เฝ้าดูอัตโนมัติ</p><p class="b">เปิดโหมด watch ทิ้งไว้ — เสียบหรือถอดดิสก์เมื่อไหร่ ระบบแจ้งเตือนทันทีใน 2–3 วินาที</p></div>
+    </div>
+
+    <h3>ศัพท์ที่ควรรู้ก่อน (แค่ 5 คำ)</h3>
+    <table>
+      <thead><tr><th>คำ</th><th>แปลว่า</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">ZFS</td><td>ระบบไฟล์ + ตัวจัดการ RAID แบบซอฟต์แวร์ ที่ b2ctl ควบคุมให้</td></tr>
+        <tr><td class="mono">pool</td><td>กลุ่มดิสก์ที่รวมกันเป็นที่เก็บข้อมูลก้อนเดียว — เครื่องนี้มี <code class="inl">rpool</code> (ดิสก์บูต) และ <code class="inl">tank</code> (ข้อมูล)</td></tr>
+        <tr><td class="mono">vdev</td><td>"กลุ่มย่อย" ภายใน pool เช่น mirror-0, raidz1-0 — คือรูปแบบการวางดิสก์ให้ทนเสีย</td></tr>
+        <tr><td class="mono">spare</td><td>ดิสก์สำรอง เสียบพร้อมใช้ ถ้ามีตัวไหนเสีย ZFS จะดึงมันเข้าไปแทนอัตโนมัติ</td></tr>
+        <tr><td class="mono">resilver</td><td>การ "สร้างข้อมูลใหม่" ลงดิสก์ที่เพิ่งเปลี่ยน — เหมือน rebuild ของ RAID เดิม</td></tr>
+      </tbody>
+    </table>
+
+    <div class="info"><b>เครื่องนี้มี 2 pool:</b> <code class="inl">rpool</code> = mirror (RAID1) ดิสก์บูต Proxmox ·
+    <code class="inl">tank</code> = raidz1 (RAID5) ดิสก์ข้อมูล 3 ลูก + สำรอง 1 ลูก. raidz1 ทนดิสก์เสียได้ <b>1 ลูก</b> — เสียลูกที่สองก่อน resilver เสร็จ = ข้อมูลหาย จึงต้องรีบเปลี่ยน</div>
+  </section>
+
+  <!-- ===== 01 INSTALL ===== -->
+  <section id="s1">
+    <div class="eyebrow"><span class="num">01</span><h2>การติดตั้ง</h2></div>
+    <p class="lead">ทำครั้งเดียวตอนตั้งเครื่อง บน Proxmox ให้รันในฐานะ root (ไม่ต้องมี <code class="inl">sudo</code>)</p>
+
+<pre><span class="p">root@pve:~#</span> git clone https://github.com/JPcGaM3/b2ctl-itmode.git b2ctl
+<span class="p">root@pve:~#</span> <span class="k">cd</span> b2ctl/codes
+<span class="p">root@pve:~#</span> ./install.sh</pre>
+
+    <p><code class="inl">./install.sh</code> เปล่า ๆ = ลง <b>เฉพาะตัว b2ctl</b> (โปรแกรม + launcher) ไม่โหลด tool เสริม ไม่แตะ <code class="inl">apt</code> ไม่ต้องต่อเน็ต. เลือกรูปแบบเพิ่มเติมได้ตามฮาร์ดแวร์:</p>
+
+    <table>
+      <thead><tr><th>คำสั่ง</th><th>ลงอะไร</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">./install.sh</td><td><b>เฉพาะ b2ctl</b> — ไม่มี tool เสริม (ใช้ได้เลยถ้าเครื่องมี smartctl + zpool อยู่แล้ว)</td></tr>
+        <tr><td class="mono">./install.sh --with-tools</td><td>b2ctl + tool ทั้งคู่ (<code class="inl">sas2ircu</code> + <code class="inl">perccli</code>) โหลดจาก Google Drive</td></tr>
+        <tr><td class="mono">./install.sh --flash</td><td>เครื่อง IT/HBA (crossflashed): ลง <code class="inl">sas2ircu</code> + ตั้งโหมดเป็น <code class="inl">it</code> ← <b>เครื่องนี้</b></td></tr>
+        <tr><td class="mono">./install.sh --perc</td><td>เครื่อง Dell PERC RAID จริง: ลง <code class="inl">perccli</code> + ตั้งโหมดเป็น <code class="inl">raid</code></td></tr>
+      </tbody>
+    </table>
+
+    <h3>เครื่องต้องมีอะไรก่อน</h3>
+    <table>
+      <thead><tr><th>โปรแกรม</th><th>ทำหน้าที่</th><th>จำเป็น?</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">smartctl</td><td>อ่านข้อมูลสุขภาพดิสก์ (SMART)</td><td><span class="badge b-green">จำเป็น</span></td></tr>
+        <tr><td class="mono">zpool</td><td>จัดการ ZFS pool</td><td><span class="badge b-green">จำเป็น</span></td></tr>
+        <tr><td class="mono">sas2ircu</td><td>บอกหมายเลขช่อง (bay) ของดิสก์</td><td><span class="badge b-blue">มีก็ดี</span></td></tr>
+      </tbody>
+    </table>
+    <div class="note"><b>ไม่มี sas2ircu ก็ใช้ได้</b> — แค่คอลัมน์ BAY จะเป็น <code class="inl">-</code> (ไม่รู้เลขช่อง). ทุกอย่างอื่นทำงานปกติ เพราะ b2ctl ยึด <b>ซีเรียล</b> ของดิสก์เป็นหลัก ไม่ใช่เลขช่อง</div>
+  </section>
+
+  <!-- ===== 02 CHECK ===== -->
+  <section id="s2">
+    <div class="eyebrow"><span class="num">02</span><h2>ตรวจสภาพระบบก่อนใช้</h2></div>
+    <p class="lead">ใช้ครั้งแรกหลังติดตั้ง หรือเวลาสงสัยว่า tool ครบไหม / backend ถูกไหม — คำสั่ง <code class="inl">b2ctl check</code></p>
+
+<pre><span class="p">root@pve:~#</span> b2ctl check
+
+<span class="c">[b2ctl environment check]</span>
+  [<span class="g">✔</span>] Running as root
+  [<span class="g">✔</span>] smartctl     /usr/sbin/smartctl       (smartctl 7.5 ...)
+  [<span class="g">✔</span>] sas2ircu     /usr/sbin/sas2ircu       (LSI SAS2 IR Config Utility)
+  [<span class="g">✔</span>] zpool        /usr/sbin/zpool          (zfs-2.4.2-pve1)
+  [<span class="g">✔</span>] wipefs       /usr/sbin/wipefs         (util-linux 2.41)
+  [<span class="g">✔</span>] sgdisk       /usr/sbin/sgdisk         (sgdisk 1.0.10)
+
+  [<span class="g">✔</span>] Detected backend: IT-mode
+  [<span class="g">✔</span>] Controllers found: 6 (6 disks in bay map)
+  [<span class="k">!</span>] Config: /etc/b2ctl/config.json (missing — using defaults)</pre>
+
+    <span class="see">อ่านผลยังไง</span>
+    <ul class="clean">
+      <li><b><code class="inl">sas2ircu [✔]</code> สำคัญสุด</b> — ถ้าขึ้น <code class="inl">[✗]</code> หรือ "won't execute" คอลัมน์ BAY จะเป็น <code class="inl">-</code> ทั้งหมด. แก้ด้วย <code class="inl">apt-get install -y libc6-i386</code> (sas2ircu เป็นไฟล์ 32-bit)</li>
+      <li><b>backend = IT-mode</b> = ถูกต้องสำหรับเครื่อง crossflash นี้</li>
+      <li><b>Controllers found: 6</b> — เลขดิสก์ &gt; 0 แปลว่าอ่านเจอดิสก์และ bay map ทำงาน</li>
+      <li><b>Config ... missing</b> <span class="badge b-blue">ไม่ใช่ error</span> — b2ctl ใช้ค่า default ได้ทันที ไม่ต้องสร้าง config เอง</li>
+    </ul>
+  </section>
+
+  <!-- ===== 03 STATUS ===== -->
+  <section id="s3">
+    <div class="eyebrow"><span class="num">03</span><h2>ดูสุขภาพดิสก์แบบเร็ว (status)</h2></div>
+    <p class="lead">คำสั่งที่ใช้บ่อยที่สุด — แสดงตารางดิสก์ทั้งหมดครั้งเดียวแล้วจบ เหมาะกับแวะเช็ก "ทุกอย่างโอเคไหม?"</p>
+
+<pre><span class="p">root@pve:~#</span> b2ctl status
+
+BAY   DEV  IF   MODEL                   SERIAL           POWER_ON      WEAR  END    BAD  HEALTH  POOL           STATUS  LEVEL
+1:0   sdf  SAS  Samsung SSD 860 PRO 1TB S5G8NE0MA10474H  51055h(~5.8y) 1%    99.2%  0    <span class="g">PASSED</span>  rpool/mirror-0 <span class="g">ONLINE</span>  <span class="g">NORMAL</span>
+1:1   sda  SAS  Samsung SSD 860 PRO 1TB S5G8NE0MA10478T  51056h(~5.8y) 1%    99.1%  0    <span class="g">PASSED</span>  rpool/mirror-0 <span class="g">ONLINE</span>  <span class="g">NORMAL</span>
+1:4   sdb  SAS  Samsung SSD 870 EVO 1TB S74ZNS0W537278Y  22926h(~2.6y) 1%    98.4%  0    <span class="g">PASSED</span>  tank/raidz1-0  <span class="g">ONLINE</span>  <span class="g">NORMAL</span>
+1:5   sdc  SAS  Samsung SSD 870 EVO 1TB S74ZNS0W533737E  18277h(~2.1y) 1%    98.4%  0    <span class="g">PASSED</span>  tank/raidz1-0  <span class="g">ONLINE</span>  <span class="g">NORMAL</span>
+1:6   sdd  SAS  Samsung SSD 870 EVO 1TB S74ZNS0W582278Y  18281h(~2.1y) 1%    98.3%  0    <span class="g">PASSED</span>  tank/raidz1-0  <span class="g">ONLINE</span>  <span class="g">NORMAL</span>
+1:7   sde  SAS  Samsung SSD 870 EVO 1TB S74ZNS0W582280E  18281h(~2.1y) 1%    99.8%  0    <span class="g">PASSED</span>  tank/spares    <span class="g">AVAIL</span>   <span class="g">NORMAL</span>
+Pools:
+  rpool  952G   5.96G  free=946G   <span class="g">ONLINE</span>  cap=0%
+  tank   2.72T  1.71G  free=2.72T  <span class="g">ONLINE</span>  cap=0%
+<span class="g">[OK] all disks healthy and assigned</span></pre>
+
+    <p>บรรทัดสุดท้าย <code class="inl">[OK] all disks healthy and assigned</code> = สบายใจได้ ทุก pool ONLINE. ถ้ามี pool ไหนไม่ปกติจะเปลี่ยนเป็น <code class="inl">[!] ... a pool is not ONLINE</code> พร้อมบอกว่า pool ไหนต้องดูแล</p>
+
+    <h3>ตัวเลือกเสริม</h3>
+    <table>
+      <thead><tr><th>คำสั่ง</th><th>ทำอะไร</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">b2ctl status --locate</td><td>แสดงตาราง + กะพริบไฟ LED บนดิสก์ที่มีปัญหา (~5 วินาที)</td></tr>
+        <tr><td class="mono">b2ctl status --json</td><td>แสดงผลเป็น JSON (สำหรับ script หรือเก็บ log)</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ===== 04 READ TABLE ===== -->
+  <section id="s4">
+    <div class="eyebrow"><span class="num">04</span><h2>อ่านตารางให้เป็น</h2></div>
+    <p class="lead">ถ้าอ่านตารางนี้ออก คุณใช้ b2ctl ได้ 80% แล้ว — แต่ละคอลัมน์แปลว่า:</p>
+
+    <table>
+      <thead><tr><th>คอลัมน์</th><th>ความหมาย</th><th>ตัวอย่าง</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">BAY</td><td>หมายเลขช่อง (ตู้:ช่อง)</td><td class="mono">1:4 = ตู้ 1 ช่อง 4</td></tr>
+        <tr><td class="mono">DEV</td><td>ชื่อ device ใน Linux</td><td class="mono">sda, sdb</td></tr>
+        <tr><td class="mono">IF</td><td>ชนิดการเชื่อมต่อ</td><td class="mono">SAS, SATA, NVMe</td></tr>
+        <tr><td class="mono">MODEL</td><td>รุ่นดิสก์</td><td class="mono">Samsung SSD 870</td></tr>
+        <tr><td class="mono">SERIAL</td><td>ซีเรียล (ตัวจริงที่ b2ctl ใช้อ้างอิง)</td><td class="mono">S74ZNS0W…</td></tr>
+        <tr><td class="mono">POWER_ON</td><td>ชั่วโมงเปิดใช้งานสะสม</td><td class="mono">18281h(~2.1y)</td></tr>
+        <tr><td class="mono">WEAR</td><td>สึกหรอไปกี่ % <b>(ยิ่งน้อยยิ่งดี)</b></td><td class="mono">1%</td></tr>
+        <tr><td class="mono">END</td><td>อายุที่เหลือ (คำนวณจาก TBW)</td><td class="mono">98.4%</td></tr>
+        <tr><td class="mono">WRITTEN</td><td>เขียนไปแล้ว / TBW ที่รับรอง</td><td class="mono">9.7TB/600TBW</td></tr>
+        <tr><td class="mono">BAD</td><td>จำนวน bad sector</td><td class="mono">0 = ปกติ, &gt;0 = อันตราย</td></tr>
+        <tr><td class="mono">HEALTH</td><td>ผลตรวจ SMART</td><td class="mono">PASSED / FAILED</td></tr>
+        <tr><td class="mono">POOL</td><td>อยู่ pool/vdev ไหน</td><td class="mono">tank/raidz1-0</td></tr>
+        <tr><td class="mono">STATUS</td><td>สถานะ vdev ของ ZFS</td><td class="mono">ONLINE, AVAIL</td></tr>
+        <tr><td class="mono">LEVEL</td><td>เกรดรวม (ดูด้านล่าง)</td><td>—</td></tr>
+      </tbody>
+    </table>
+
+    <h3>LEVEL — เกรดรวม ดูสีเดียวรู้เรื่อง</h3>
+    <table>
+      <thead><tr><th>เกรด</th><th>แปลว่า</th><th>ต้องทำอะไร</th></tr></thead>
+      <tbody>
+        <tr><td><span class="badge b-green">NORMAL</span></td><td>ดิสก์แข็งแรง อยู่ใน pool เรียบร้อย</td><td>ไม่ต้องทำอะไร</td></tr>
+        <tr><td><span class="badge b-blue">CONFIG</span></td><td>ดิสก์ดี แต่ <b>ยังไม่ได้อยู่ pool ไหน</b></td><td>ตั้งค่า — เพิ่มเป็น spare หรือสร้าง pool</td></tr>
+        <tr><td><span class="badge b-amber">WARNING</span></td><td>เริ่มมีปัญหา — อายุเหลือน้อย หรือ vdev DEGRADED</td><td>เตรียมเปลี่ยน / สลับไป spare</td></tr>
+        <tr><td><span class="badge b-red">CRITICAL</span></td><td>อันตราย — SMART ไม่ผ่าน, มี bad sector, อายุเหลือน้อยมาก</td><td>ดำเนินการทันที</td></tr>
+      </tbody>
+    </table>
+
+    <div class="info"><b>คอลัมน์ STATUS อ่านสี:</b> เขียว = <code class="inl">ONLINE</code>/<code class="inl">AVAIL</code> (ปกติ) ·
+    เหลือง = <code class="inl">DEGRADED</code>/<code class="inl">INUSE→bay</code> (สำรองกำลังทำงานแทน) ·
+    แดง = <code class="inl">FAULTED</code>/<code class="inl">REMOVED</code> (เสีย/ถูกถอด)</div>
+  </section>
+
+  <!-- ===== 05 WATCH ===== -->
+  <section id="s5">
+    <div class="eyebrow"><span class="num">05</span><h2>โหมด watch — หน้าจอหลักที่ใช้ทำงาน</h2></div>
+    <p class="lead">นี่คือโหมดหลัก เปิดทิ้งไว้แล้วมันจะ (1) แสดงตารางสุขภาพ (2) เฝ้าดูการเสียบ/ถอดดิสก์ตลอดเวลา (3) ให้คุณพิมพ์คำสั่งจัดการได้</p>
+
+<pre><span class="p">root@pve:~#</span> b2ctl watch
+
+========================================================================================
+BAY   DEV   IF   MODEL                   SERIAL           POWER_ON      WEAR  END    ...
+----------------------------------------------------------------------------------------
+1:0   sdf   SAS  Samsung SSD 860 PRO 1TB S5G8NE0MA10474H  51057h(~5.8y) 1%    99.2%  ...
+1:4   sdb   SAS  Samsung SSD 870 EVO 1TB S74ZNS0W537278Y  22928h(~2.6y) 1%    98.4%  ...
+1:7   sde   SAS  Samsung SSD 870 EVO 1TB S74ZNS0W582280E  18283h(~2.1y) 1%    99.8%  ...
+========================================================================================
+Storage summary:
+  TYPE NAME    LEVEL    STATE     SIZE   USED    FREE
+  SW   rpool   mirror   <span class="g">ONLINE</span>    952G   4.83G   947G
+  SW   tank    raidz1   <span class="g">ONLINE</span>    2.72T  1.72G   2.72T
+<span class="g">[OK] all disks healthy and assigned</span>
+
+[r]efresh [a]ssign [o]ffload [s]wap [d]emote [t]oggle-dryrun [n]ew-pool [e]xtend [b]urnin [u]dev-rescue [x]destroy-pool [l]ocate [q]uit   (or hot-plug)
+<span class="p">b2ctl&gt;</span></pre>
+
+    <div class="ok"><b>วิธีสั่งงาน:</b> ที่ prompt <code class="inl">b2ctl&gt;</code> ให้ <b>พิมพ์ตัวอักษรตัวเดียว</b> (เช่น <kbd>s</kbd>) <b>แล้วกด Enter</b>.
+    ระหว่างที่คุณยังไม่พิมพ์อะไร watch จะคอยตรวจจับการเสียบ/ถอดดิสก์เองเงียบ ๆ (ดูหัวข้อ 07)</div>
+
+    <h3>ออกจากโหมด watch</h3>
+    <p>กด <kbd>q</kbd> แล้ว Enter — ระบบพิมพ์ <code class="inl">bye</code> แล้วกลับสู่ shell ตามปกติ</p>
+  </section>
+
+  <!-- ===== 06 HOTKEYS ===== -->
+  <section id="s6">
+    <div class="eyebrow"><span class="num">06</span><h2>คำสั่งทีละปุ่ม — กดแล้วเจออะไร</h2></div>
+    <p class="lead">แต่ละปุ่มในโหมด watch อธิบายแบบ "กดอะไร → เห็นอะไร → แปลว่าอะไร" ปุ่มสีน้ำเงินคือปุ่ม <b>อ่านอย่างเดียว</b> (ปลอดภัย ไม่แตะดิสก์) ปุ่มสีเขียวคือปุ่มที่ <b>เปลี่ยนแปลงดิสก์</b> (จะถามยืนยันก่อนเสมอ)</p>
+
+    <div class="keyrow ro"><div class="kc">r</div><div class="kb"><p class="kt">Refresh <span class="en">รีเฟรชตาราง</span></p><p class="kd">สแกนดิสก์ใหม่แล้วแสดงตารางอีกครั้ง — ใช้ตอนเพิ่งเสียบดิสก์หรือ pool health ยังไม่อัปเดต กดได้เรื่อย ๆ</p></div></div>
+<pre><span class="p">b2ctl&gt;</span> r
+<span class="c"># สแกนใหม่ แล้วพิมพ์ตาราง + Pools + summary อีกครั้ง (เหมือน b2ctl status)</span></pre>
+
+    <div class="keyrow"><div class="kc">a</div><div class="kb"><p class="kt">Assign <span class="en">จัดสรรดิสก์ว่างเข้า pool</span></p><p class="kd">ใช้กับดิสก์ที่ขึ้น <span class="badge b-blue">CONFIG</span> (อยู่ในเครื่องแต่ยังไม่ได้อยู่ pool ไหน) → เลือกดิสก์ → เด้งเมนูให้ทำอะไรกับมัน</p></div></div>
+
+    <p><b>ขั้นที่ 1</b> — <kbd>a</kbd> จะลิสต์เฉพาะดิสก์ที่ยังไม่ได้ assign ให้เลือก:</p>
+<pre><span class="p">b2ctl&gt;</span> a
+    [1] bay 1:7 /dev/sde (Samsung SSD 870, SN S74ZNS0WXXXXXXX)
+  assign which #&gt; <span class="hl">1</span></pre>
+    <p>รายการนี้รวมดิสก์ว่าง <b>3 แบบ</b>: <b>ดิสก์ว่างปกติ</b> (เปิดเมนู action ด้านล่าง); ดิสก์ <b class="mono">[GHOST]</b> (OS ปฏิเสธ ไม่มี <code class="inl">/dev</code>, ขึ้นว่า <code class="inl">— needs wipe</code>) → ไปทาง wipe/rescue (ดูปุ่ม <kbd>u</kbd>); และดิสก์ <b>PERC Unconfigured-Good</b> (เฉพาะเครื่อง RAID mode) → ไปเมนู hardware RAID (set JBOD / สร้าง volume / เพิ่มเป็น spare)</p>
+    <p><b>ขั้นที่ 2</b> — เลือกดิสก์ว่างปกติ แล้วเด้งเมนูเดียวกับตอนเสียบดิสก์ใหม่ (NEW DISK DETECTED):</p>
+<pre>  Disk /dev/disk/by-id/wwn-0x5002538... is free.
+  What do you want to do with it?
+    [1] Prepare for physical removal (Blink LED)
+    [2] Add to a pool as hot SPARE
+    [3] REPLACE a degraded/faulted disk in a pool
+    [4] ATTACH to an existing disk (convert to/expand mirror)
+    [5] ADD single disk to a pool (expand capacity - <span class="r">WARNING: no redundancy</span>)
+    [6] WIPE it blank (for a new pool)
+    [s] skip / decide later
+  action&gt;</pre>
+    <table>
+      <thead><tr><th>เลือก</th><th>ทำอะไร</th><th>ใช้เมื่อ</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">[1]</td><td>กะพริบ LED</td><td>อยากรู้ว่าดิสก์อยู่ช่องไหนก่อนดึงออก</td></tr>
+        <tr><td class="mono">[2]</td><td>เพิ่มเป็น SPARE</td><td>เพิ่มดิสก์สำรองไว้ใน pool</td></tr>
+        <tr><td class="mono">[3]</td><td>REPLACE ดิสก์เสีย</td><td>มีดิสก์ FAULTED/DEGRADED และจะแทนที่</td></tr>
+        <tr><td class="mono">[4]</td><td>ATTACH เป็น mirror</td><td>อยากเพิ่มความปลอดภัย (ทำ mirror)</td></tr>
+        <tr><td class="mono">[5]</td><td>ADD เดี่ยว</td><td><span class="badge b-red">อันตราย</span> เสีย 1 = ข้อมูลหายหมด</td></tr>
+        <tr><td class="mono">[6]</td><td>WIPE ล้าง</td><td>ลบทุกอย่าง เตรียมสร้าง pool ใหม่</td></tr>
+        <tr><td class="mono">[s]</td><td>ข้าม</td><td>ยังไม่ตัดสินใจ (ปลอดภัยสุด)</td></tr>
+      </tbody>
+    </table>
+    <p><b>ตัวอย่าง</b> — เลือก <code class="inl">[2]</code> เพิ่มเป็น spare:</p>
+<pre>  action&gt; 2
+    [1] rpool (ONLINE)
+    [2] tank (ONLINE)
+  pool #&gt; 2
+  add (1:7) Samsung SSD 870 (S74ZNS0WXXXXXXX) to 'tank' as spare? [y/N]&gt; <span class="hl">y</span>
+  <span class="g">✔</span> added as spare</pre>
+
+    <div class="keyrow"><div class="kc">o</div><div class="kb"><p class="kt">Offload <span class="en">ถอดดิสก์ออกจาก pool</span></p><p class="kd">เอาดิสก์ออกจาก pool เพื่อถอดออกทางกายภาพ — ระบบทำต่างกันตามชนิดดิสก์</p></div></div>
+    <table>
+      <thead><tr><th>ดิสก์เป็นอะไร</th><th>ระบบทำอะไร</th></tr></thead>
+      <tbody>
+        <tr><td>Spare (สำรอง)</td><td>ถอดออกทันที ไม่ต้อง resilver</td></tr>
+        <tr><td>Mirror member</td><td>ถอดออกทันที (ถ้ายังมี leg อื่น ONLINE)</td></tr>
+        <tr><td>RAIDZ member</td><td><span class="badge b-amber">ต้อง resilver</span> ไปยัง spare ก่อน — ใช้เวลา</td></tr>
+      </tbody>
+    </table>
+    <p><b>ขั้นที่ 1</b> — <kbd>o</kbd> ลิสต์ดิสก์ทุกตัวใน pool ให้เลือก:</p>
+<pre><span class="p">b2ctl&gt;</span> o
+    [1] bay 1:0 /dev/sdf in rpool (vdev mirror-0)
+    [3] bay 1:4 /dev/sdb in tank (vdev raidz1-0)
+    [6] bay 1:7 /dev/sde in tank (vdev spares)
+  offload which #&gt;</pre>
+    <p><b>ตัวอย่าง ก</b> — ถอด spare ออก (ทันที ไม่ต้อง resilver):</p>
+<pre>  offload which #&gt; 6
+  This disk is a hot spare. Remove (1:7) Samsung SSD 870 (…) from 'tank'? [y/N]&gt; <span class="hl">y</span>
+  <span class="g">✔</span> removed from pool</pre>
+    <p><b>ตัวอย่าง ข</b> — ถอดสมาชิก RAIDZ (ต้อง resilver ไป spare ก่อน):</p>
+<pre>  offload which #&gt; 3
+  Replace (1:4) Samsung SSD 870 (…) onto spare (1:7) Samsung SSD 870 (…)? [y/N]&gt; <span class="hl">y</span>
+  <span class="g">✔</span> replace started — resilvering onto spare
+  resilvering... 45.2% done, ETA 00:03:21
+  <span class="g">✔</span> resilver completed 100%
+  <span class="g">✔</span> detached old disk /dev/sdb
+  please pull bay 1:4 ... blinking LED</pre>
+
+    <div class="keyrow"><div class="kc">s</div><div class="kb"><p class="kt">Swap <span class="en">สลับดิสก์สึกหรอไปยัง spare</span></p><p class="kd">ดิสก์ยังไม่เสียแต่เริ่มเก่า (WEAR สูง, END น้อย) — สลับไป spare ก่อนพัง. <b>ต่างจาก offload:</b> swap = สลับที่กัน ดิสก์เก่ากลายเป็น spare อัตโนมัติ ทั้งสองตัวยังอยู่ในเครื่อง</p></div></div>
+<pre><span class="p">b2ctl&gt;</span> s
+  swap which #&gt; 6
+  swap (1:7) Samsung SSD 870 (…) onto spare (1:4) …? [y/N]&gt; <span class="hl">y</span>
+  <span class="g">✔</span> swap started — resilvering onto spare
+  <span class="g">✔</span> resilver completed 100%
+  <span class="g">✔</span> detached old disk /dev/sde
+  <span class="g">✔</span> (1:7) Samsung SSD 870 is now a hot spare in 'tank'</pre>
+
+    <div class="keyrow"><div class="kc">d</div><div class="kb"><p class="kt">Demote <span class="en">ลด mirror leg ลงเป็น spare</span></p><p class="kd">ใช้กับ mirror ที่มีมากกว่า 2 ขา (เช่น 3-way) ถอด 1 ขาลงไปเป็น spare. <b>มีตัวกันพลาด</b> — ถ้าถอดแล้ว mirror เหลือขาเดียว (ไม่มี redundancy) ระบบจะปฏิเสธ</p></div></div>
+<pre><span class="p">b2ctl&gt;</span> d
+    [1] (1:0) SAMSUNG MZ7LH1T9 (S4F2NY0XXXXXXX) in rpool
+    [2] (1:1) SAMSUNG MZ7LH1T9 (S4F2NY0XXXXXXX) in rpool
+  demote which #&gt; <span class="hl">2</span>
+  demote (1:1) SAMSUNG MZ7LH1T9 (…) in 'rpool' to a hot spare? [y/N]&gt; <span class="hl">y</span>
+  <span class="g">✔</span> demoted to spare</pre>
+
+    <div class="keyrow"><div class="kc">n</div><div class="kb"><p class="kt">New-pool <span class="en">สร้าง pool ใหม่</span></p><p class="kd">มีดิสก์ว่างหลายตัว อยากรวมเป็น pool ใหม่ — เลือกดิสก์ (คั่นเว้นวรรค เช่น <code class="inl">1 2 3</code>) → ตั้งชื่อ → เลือกชนิด RAID</p></div></div>
+<pre><span class="p">b2ctl&gt;</span> n
+    [1] /dev/sdb (bay 1:4)
+    [2] /dev/sdc (bay 1:5)
+    [3] /dev/sdd (bay 1:6)
+  pick disks (space-separated #)&gt; <span class="hl">1 2 3</span>
+  pool name&gt; <span class="hl">backup</span>
+  raid type (stripe, mirror, raid10, raidz1, raidz2) [mirror]&gt; <span class="hl">raidz1</span>
+  create pool 'backup' (raidz1) with 3 disks? [y/N]&gt; <span class="hl">y</span>
+  <span class="g">✔</span> pool created</pre>
+    <table>
+      <thead><tr><th>ชนิด</th><th>ดิสก์ขั้นต่ำ</th><th>ทนเสีย</th><th>เนื้อที่ได้</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">stripe</td><td>1</td><td><span class="badge b-red">ไม่มี</span></td><td>100%</td></tr>
+        <tr><td class="mono">mirror</td><td>2</td><td>1 ตัว</td><td>50%</td></tr>
+        <tr><td class="mono">raidz1</td><td>3+</td><td>1 ตัว</td><td>(N-1)/N</td></tr>
+        <tr><td class="mono">raidz2</td><td>4</td><td>2 ตัว</td><td>(N-2)/N</td></tr>
+        <tr><td class="mono">raid10</td><td>4 (คู่)</td><td>1 ต่อคู่</td><td>50%</td></tr>
+      </tbody>
+    </table>
+    <div class="note"><b>ถ้าดิสก์มีข้อมูลเก่า</b> ระบบจะเตือนและถามว่าจะ wipe ก่อนไหม. หลังเลือกชนิด RAID b2ctl จะถามค่า property ทีละตัว (ashift, compression ฯลฯ) — <b>กด Enter เพื่อใช้ค่า default ที่เหมาะกับ SSD อยู่แล้ว</b></div>
+
+    <div class="keyrow"><div class="kc">e</div><div class="kb"><p class="kt">Extend <span class="en">เพิ่ม cache / log ให้ pool</span></p><p class="kd">เร่งความเร็ว pool เดิม: <b>L2ARC cache</b> = เร่งการอ่าน (เสียแล้วแค่ cache miss ไม่กระทบข้อมูล) · <b>SLOG log</b> = เร่งการเขียนแบบ sync (ควรใช้ 2 ลูกทำ mirror + ต้องเป็น SSD ที่มี PLP)</p></div></div>
+<pre><span class="p">b2ctl&gt;</span> e
+  [1] add L2ARC cache (read cache; loss = harmless)
+  [2] add SLOG log   (sync-write accel; mirror + PLP recommended)
+  [3] remove a cache/log device
+  action&gt; <span class="hl">2</span>
+    [1] /dev/sdg (bay 1:8)
+    [2] /dev/sdh (bay 1:9)
+  pick disk(s) (space-separated #)&gt; <span class="hl">1 2</span>
+  <span class="k">[!] ensure the SSD(s) have Power-Loss Protection (PLP).</span>
+  add SLOG (mirror) to 'tank'? [y/N]&gt; <span class="hl">y</span>
+  <span class="g">✔</span> SLOG added</pre>
+
+    <div class="keyrow"><div class="kc">b</div><div class="kb"><p class="kt">Burn-in <span class="en">ทดสอบดิสก์ก่อนใช้</span></p><p class="kd">วนทดสอบดิสก์ใหม่/มือสองก่อนเชื่อใจ — เลือกหลายลูกพร้อมกันได้ รันเบื้องหลัง (รายละเอียดเต็มดูหัวข้อ 08)</p></div></div>
+<pre><span class="p">b2ctl&gt;</span> b
+    [1] /dev/sdb (bay 32:4) Samsung SSD 870 EVO 1TB
+    [2] /dev/sda (bay 32:5) Samsung SSD 870 EVO 1TB
+  burn in which #&gt; (space-separated) <span class="hl">1 2</span>
+  burn-in 2 disk(s) (long self-test)? [y/N]&gt; <span class="hl">y</span>
+  also run a full read-surface scan (badblocks, read-only, hours)? [y/N]&gt; <span class="hl">y</span>
+<span class="c"># เปิดหน้าจอสดแสดงแถบความคืบหน้าของแต่ละลูก — Ctrl-C ออกได้ งานยังรันต่อ</span></pre>
+
+    <div class="keyrow ro"><div class="kc">t</div><div class="kb"><p class="kt">Toggle dry-run <span class="en">สลับโหมดซ้อม</span></p><p class="kd">เปิด/ปิดโหมด "ลองโดยไม่ทำจริง" — คำสั่งเขียนจะแค่แสดงไม่รันจริง (รายละเอียดดูหัวข้อ 09)</p></div></div>
+<pre><span class="p">b2ctl&gt;</span> t
+<span class="k">[DRY-RUN] enabled — write commands will be printed, not executed</span>
+<span class="p">b2ctl&gt;</span> t
+<span class="k">[DRY-RUN] disabled — back to live mode</span></pre>
+
+    <div class="keyrow ro"><div class="kc">l</div><div class="kb"><p class="kt">Locate <span class="en">หาตัวดิสก์</span></p><p class="kd">กะพริบไฟ LED ของดิสก์ตัวที่ระบุ ~5 วินาที (รายละเอียดดูหัวข้อ 11)</p></div></div>
+<pre><span class="p">b2ctl&gt;</span> l
+  locate which (bay/serial/sdX)&gt; <span class="hl">sdc</span>
+  blinking /dev/sdc for 5s ...
+  <span class="g">✔</span> done (via dd)</pre>
+
+    <div class="keyrow ro"><div class="kc">u</div><div class="kb"><p class="kt">Udev-rescue <span class="en">กู้ดิสก์ที่ OS ปฏิเสธ</span></p><p class="kd">ดิสก์เสียบอยู่จริงแต่ OS ไม่รับ (ขึ้นเป็น GHOST ไม่มี <code class="inl">/dev</code>) — สั่ง <code class="inl">udevadm trigger/settle</code> ให้ kernel มองเห็น เป็นงานอ่านอย่างเดียว/diagnostic ไม่แตะข้อมูลในดิสก์</p></div></div>
+<pre><span class="p">b2ctl&gt;</span> u
+    ghost bay 1:4 serial S74ZNS0WXXXXXXX
+  run udevadm trigger/settle to rescue 1 ghost disk(s)? [y/N]&gt; <span class="hl">y</span>
+  <span class="g">✔</span> rescued 1 disk(s)</pre>
+
+    <div class="keyrow"><div class="kc">x</div><div class="kb"><p class="kt">Destroy <span class="en">ลบ pool</span></p><p class="kd"><span class="badge b-red">อันตรายสุด</span> ลบ pool ทั้งก้อนด้วย <code class="inl">zpool destroy</code> — ข้อมูลหายหมด ต้องยืนยัน <b>และพิมพ์ชื่อ pool</b> จึงจะทำ (b2ctl ลบ cron ของ pool นั้นให้ด้วย)</p></div></div>
+<pre><span class="p">b2ctl&gt;</span> x
+    [1] rpool (952G, ONLINE)
+    [2] tank (2.72T, ONLINE)
+  destroy which #&gt; <span class="hl">2</span>
+  members:
+    - (1:4) Samsung SSD 870 EVO 1TB (S74ZNS0WXXXXXXX)
+    ...
+  <span class="r">[!] destroying 'tank' ERASES ALL DATA on it. This cannot be undone.</span>
+  destroy pool 'tank'? [y/N]&gt; <span class="hl">y</span>
+  type the pool name 'tank' to confirm&gt; <span class="hl">tank</span>
+  <span class="g">✔</span> pool 'tank' destroyed; cron removed</pre>
+
+    <div class="keyrow ro"><div class="kc">q</div><div class="kb"><p class="kt">Quit <span class="en">ออก</span></p><p class="kd">ออกจากโหมด watch กลับสู่ shell</p></div></div>
+<pre><span class="p">b2ctl&gt;</span> q
+bye</pre>
+  </section>
+
+  <!-- ===== 07 RUNBOOKS ===== -->
+  <section id="s7">
+    <div class="eyebrow"><span class="num">07</span><h2>Runbook — วิธีแก้ปัญหาหน้างานจริง</h2></div>
+    <p class="lead">เจอสถานการณ์จริงแล้วทำตามได้เลย ทีละขั้น</p>
+
+    <h3>📌 สถานการณ์ 1 — ดิสก์เสีย ต้องเปลี่ยนใหม่</h3>
+    <p><b>อาการ:</b> ตารางขึ้น LEVEL = <span class="badge b-red">CRITICAL</span>, HEALTH = <code class="inl">FAILED</code>, หรือ BAD &gt; 0</p>
+    <ol class="steps">
+      <li><b>หาดิสก์ที่เสีย</b> — กด <kbd>l</kbd> แล้วพิมพ์ซีเรียลของดิสก์เสีย → ไฟกะพริบที่ช่องนั้น</li>
+      <li><b>ดึงดิสก์เสียออก</b> — ถอดจากช่อง (ระบบแจ้ง <code class="inl">■ disk removed</code>)</li>
+      <li><b>เสียบดิสก์ใหม่</b> — ระบบแจ้ง <code class="inl">NEW DISK DETECTED</code> พร้อมเมนู</li>
+      <li><b>เลือก <code class="inl">[3] REPLACE</code></b> เพื่อแทนที่ดิสก์เสีย แล้วยืนยัน <kbd>y</kbd></li>
+      <li><b>รอ resilver เสร็จ</b> — ZFS สร้างข้อมูลใหม่อัตโนมัติ ห้ามปิดเครื่อง/ถอดดิสก์ระหว่างนี้</li>
+    </ol>
+<pre>  action&gt; 3
+    [1] tank: /dev/disk/by-id/wwn-0x500... (<span class="r">FAULTED</span>)
+  replace #&gt; 1
+  replace … in 'tank' with (1:5) Samsung SSD 870 (S74ZNS0W...)? [y/N]&gt; <span class="hl">y</span>
+  <span class="g">✔</span> replace started — resilvering</pre>
+
+    <h3>📌 สถานการณ์ 2 — ดิสก์เริ่มเก่า สลับไป spare ก่อนพัง</h3>
+    <p><b>อาการ:</b> LEVEL = <span class="badge b-amber">WARNING</span>, END(left) ต่ำลง, WEAR สูงขึ้น</p>
+    <ol class="steps">
+      <li>ดูว่ามี spare ใน pool ไหม (คอลัมน์ POOL มีดิสก์ที่ขึ้น <code class="inl">tank/spares</code>)</li>
+      <li>กด <kbd>s</kbd> (swap) → เลือกดิสก์ที่เริ่มเก่า</li>
+      <li>ยืนยัน <kbd>y</kbd> → ระบบ resilver ไป spare แล้วสลับที่กัน</li>
+      <li>เสร็จ — ดิสก์เก่ากลายเป็น spare, ดิสก์ใหม่ทำงานแทน (ไม่ต้องถอดออก)</li>
+    </ol>
+
+    <h3>📌 สถานการณ์ 3 — เพิ่ม spare ใหม่เข้า pool</h3>
+    <ol class="steps">
+      <li>เสียบดิสก์ใหม่ → ระบบแจ้ง <code class="inl">NEW DISK DETECTED</code></li>
+      <li>เลือก <code class="inl">[2] Add to a pool as hot SPARE</code></li>
+      <li>เลือก pool ที่จะเพิ่ม แล้วยืนยัน <kbd>y</kbd></li>
+    </ol>
+<pre>  action&gt; 2
+    [1] rpool (ONLINE)
+    [2] tank (ONLINE)
+  pool #&gt; 2
+  add (1:7) Samsung SSD 870 (…) to 'tank' as spare? [y/N]&gt; <span class="hl">y</span>
+  <span class="g">✔</span> added as spare</pre>
+
+    <h3>📌 สถานการณ์ 4 — ถอดดิสก์ออกจาก pool อย่างปลอดภัย</h3>
+    <ol class="steps">
+      <li>กด <kbd>o</kbd> (offload) → เลือกดิสก์ที่จะถอด</li>
+      <li>ยืนยัน <kbd>y</kbd> — b2ctl offline ดิสก์และให้ spare รับหน้าที่</li>
+      <li>ระบบกะพริบ LED ช่องนั้น บอกว่าต้องดึงช่องไหน</li>
+      <li>ดึงดิสก์ออก — ตอนนี้ปลอดภัยแล้ว</li>
+    </ol>
+
+    <h3>📌 สถานการณ์ 5 — ดิสก์กำลังจะเสีย แต่ไม่มี spare และช่องเต็มหมด</h3>
+    <p>ใช้ <kbd>o</kbd> (offload) กับดิสก์ตัวนั้น — b2ctl จะ:</p>
+    <ol class="steps">
+      <li>เช็กก่อนว่า pool <b>redundant เต็ม</b> ตอนนี้ (ลูกอื่นปกติหมด) ถ้าไม่ครบ → ปฏิเสธ (กันไม่ให้ pool ล่ม)</li>
+      <li>รัน <code class="inl">zpool offline</code> — pool เป็น DEGRADED แต่ยังออนไลน์ + เปิดไฟ LED ช่องนั้น</li>
+      <li>ถอดดิสก์ช่องนั้น <b>ใส่ดิสก์ใหม่ในช่องเดิม</b> แล้วกด Enter</li>
+      <li>b2ctl <code class="inl">zpool replace</code> ดิสก์ใหม่ + โชว์ความคืบหน้า resilver → เสร็จ pool กลับมา ONLINE</li>
+    </ol>
+    <div class="crit"><b>ระวัง:</b> ระหว่าง DEGRADED / resilver <b>ไม่มี redundancy</b> — ถ้าดิสก์ลูกที่สองเสียในช่วงนี้ ข้อมูลหาย. b2ctl จะไม่ยอมให้ offline ลูกที่สองระหว่างนี้</div>
+  </section>
+
+  <!-- ===== 08 BURN-IN ===== -->
+  <section id="s8">
+    <div class="eyebrow"><span class="num">08</span><h2>Burn-in — ทดสอบดิสก์ใหม่/มือสองก่อนใช้</h2></div>
+    <p class="lead">ก่อนเชื่อใจดิสก์ใหม่ (โดยเฉพาะมือสอง) รันทดสอบเพื่อคัดตัวใกล้ตายออกก่อนเข้า pool — ได้ผลเป็น <b>PASS / WARN / FAIL</b>. เลือกหลายลูกพร้อมกันได้ และรันเบื้องหลัง</p>
+
+<pre><span class="p">b2ctl&gt;</span> b
+    [1] /dev/sdb (bay 32:4) Samsung SSD 870 EVO 1TB
+    [2] /dev/sda (bay 32:5) Samsung SSD 870 EVO 1TB
+  burn in which #&gt; (space-separated) <span class="hl">1 2</span>
+  burn-in 2 disk(s) (long self-test)? [y/N]&gt; <span class="hl">y</span>
+  also run a full read-surface scan (badblocks, read-only, hours)? [y/N]&gt; <span class="hl">y</span>
+
+ BAY    DISK   SELF-TEST                    SURFACE SCAN (badblocks)
+ 32:4   sdb    [########------] 62%  ~1h10m  [###-----------] 18%  ~4h30m
+ 32:5   sda    [##########----] 74%  ~40m    [####----------] 22%  ~4h05m</pre>
+
+    <span class="see">แปลผล</span>
+    <ul class="clean">
+      <li><span class="badge b-green">PASS</span> สะอาด ใช้ได้เลย</li>
+      <li><span class="badge b-amber">WARN</span> ใช้ได้แต่เก่า (POH &gt; 40,000 ชม., มี grown defect, หรือ scan เจอ bad block) → จัด priority ต่ำ</li>
+      <li><span class="badge b-red">FAIL</span> มี uncorrected error หรือ self-test ไม่ผ่าน → <b>อย่าเอาเข้า pool</b></li>
+    </ul>
+
+    <div class="ok"><b>ปลอดภัย = อ่านอย่างเดียว:</b> burn-in สั่งแค่ self-test และ (ถ้าเลือก) <code class="inl">badblocks</code> แบบ read-only — <b>ไม่เขียนทับดิสก์</b>.
+    กด <kbd>Ctrl-C</kbd> เพื่อออกได้ โดยงานยังรันต่อเบื้องหลัง — กลับเข้ามาดูใหม่ด้วย <code class="inl">b2ctl burnin --status</code> หรือกด <kbd>b</kbd> อีกครั้ง</div>
+  </section>
+
+  <!-- ===== 09 DRY-RUN ===== -->
+  <section id="s9">
+    <div class="eyebrow"><span class="num">09</span><h2>Dry-run — ซ้อมก่อนทำจริง</h2></div>
+    <p class="lead">อยากดูว่า b2ctl จะรันคำสั่งอะไร <b>โดยไม่แตะดิสก์จริง</b> — เหมาะสำหรับฝึก, ตรวจสอบ, หรือเรียนรู้. เปิดได้ 2 วิธี</p>
+
+    <h4>วิธีที่ 1 — กด <kbd>t</kbd> ในโหมด watch</h4>
+<pre><span class="p">b2ctl&gt;</span> t
+<span class="k">[DRY-RUN] enabled — write commands will be printed, not executed</span>
+<span class="p">b2ctl&gt;</span> s
+  swap (1:4) Samsung SSD 870 (…) onto spare (1:7)? [y/N]&gt; <span class="hl">y</span>
+  <span class="k">[DRY-RUN] would run:</span> zpool replace tank \
+    /dev/disk/by-id/ata-Samsung_SSD_870_EVO_1TB_S74ZNS0W... \
+    /dev/disk/by-id/ata-Samsung_SSD_870_EVO_1TB_S74ZNS0W582283V</pre>
+
+    <h4>วิธีที่ 2 — ใส่ <code class="inl">--dry-run</code> ตั้งแต่เปิด</h4>
+<pre><span class="p">root@pve:~#</span> b2ctl --dry-run watch     <span class="c"># หรือ b2ctl --dry-run swap</span></pre>
+
+    <span class="see">ขณะ dry-run ทำงาน</span>
+    <ul class="clean">
+      <li>คำสั่ง <b>เขียน</b> (<code class="inl">zpool</code>, <code class="inl">wipefs</code>, <code class="inl">sgdisk</code>, <code class="inl">dd</code>) → แสดงเฉย ๆ ไม่รันจริง</li>
+      <li>คำสั่ง <b>อ่าน</b> (<code class="inl">smartctl</code>, <code class="inl">zpool status</code>) → ยังรันปกติ แสดงข้อมูลจริง</li>
+    </ul>
+    <div class="ok"><b>เคล็ดลับ:</b> ใช้ dry-run ก่อนทุกครั้งที่ทำงานกับดิสก์ที่ไม่คุ้นเคย — เอาไว้ตรวจว่า path ถูกตัวก่อนกดยืนยันจริง</div>
+  </section>
+
+  <!-- ===== 10 SAFETY ===== -->
+  <section id="s10">
+    <div class="eyebrow"><span class="num">10</span><h2>ระบบความปลอดภัย</h2></div>
+    <p class="lead">b2ctl ออกแบบให้ "กดผิดก็ไม่พัง" — บันทึกทุก operation, snapshot ก่อนลงมือ, และย้อนกลับได้</p>
+
+    <h3>กล่องยืนยันรายละเอียดครบ</h3>
+    <p>ก่อนทุกคำสั่งที่เปลี่ยนแปลงดิสก์ ระบบแสดงกล่องยืนยันพร้อม <b>path เต็มของดิสก์</b> และคำสั่งที่จะรัน:</p>
+<pre>┌─ CONFIRM OPERATION ────────────────────────────────┐
+│ Op:    replace                                     │
+│ From:  bay 1:4  S74ZNS0W...  ONLINE  (tank/raidz1) │
+│ To:    bay 1:7  S8ABC...     AVAILABLE             │
+│ Will run:                                          │
+│   zpool replace tank /dev/disk/by-id/ata-...       │
+│ Snapshot → /var/log/b2ctl/snapshots/2026...txt    │
+└────────────────────────────────────────────────────┘
+Proceed? [y/N]:</pre>
+    <div class="ok"><b>ค่าเริ่มต้นคือ N</b> — กด Enter เปล่า ๆ = ยกเลิกทันที ไม่มีอะไรเกิดขึ้น</div>
+
+    <h3>4 ชั้นความปลอดภัย</h3>
+    <div class="why">
+      <div class="card"><p class="h"><span class="mk">01</span>Audit trail</p><p class="b">ทุก operation บันทึกลง <code class="inl">/var/log/b2ctl/ops.jsonl</code> อัตโนมัติ — ดูย้อนหลังด้วย <code class="inl">b2ctl log</code></p></div>
+      <div class="card"><p class="h"><span class="mk">02</span>Snapshot ก่อนทำ</p><p class="b">เก็บสถานะ pool + SMART ของดิสก์ก่อนลงมือ ไว้ที่ <code class="inl">/var/log/b2ctl/snapshots/</code></p></div>
+      <div class="card"><p class="h"><span class="mk">03</span>Rollback</p><p class="b">ย้อน operation ที่ผ่านมาด้วย <code class="inl">b2ctl rollback &lt;op_id&gt;</code> (แสดง confirm ก่อน)</p></div>
+      <div class="card"><p class="h"><span class="mk">04</span>Post-op verify</p><p class="b">หลังทำเสร็จ scan pool ซ้ำ ถ้าผลไม่ตรงคาด จะเตือนพร้อมชี้ snapshot + คำสั่ง rollback</p></div>
+    </div>
+
+    <h3>operation ไหนย้อนได้บ้าง</h3>
+    <table>
+      <thead><tr><th>operation</th><th>ย้อนได้?</th></tr></thead>
+      <tbody>
+        <tr><td>offline (ปิด disk)</td><td><span class="badge b-green">ได้</span></td></tr>
+        <tr><td>add spare</td><td><span class="badge b-green">ได้</span></td></tr>
+        <tr><td>replace</td><td><span class="badge b-green">ได้</span> ถ้า resilver ยังไม่เสร็จ</td></tr>
+        <tr><td>demote</td><td><span class="badge b-green">ได้</span></td></tr>
+        <tr><td>create pool</td><td><span class="badge b-amber">ได้</span> แต่ต้อง destroy (ลบข้อมูล)</td></tr>
+        <tr><td>wipe</td><td><span class="badge b-red">ไม่ได้</span> — ถาวร</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ===== 11 LOCATE ===== -->
+  <section id="s11">
+    <div class="eyebrow"><span class="num">11</span><h2>หาตัวดิสก์จริงในแร็ค (locate)</h2></div>
+    <p class="lead">ก่อนดึงดิสก์ออกทุกครั้ง ให้กะพริบไฟยืนยันตำแหน่งก่อน จะได้ไม่ดึงผิดตัว</p>
+
+<pre><span class="p">b2ctl&gt;</span> l
+  locate which (bay/serial/sdX)&gt; <span class="hl">1:4</span>
+  blinking /dev/sdb for 5s ...
+  <span class="g">✔</span> done (via dd)</pre>
+
+    <p>ระบุดิสก์ได้ 3 แบบ: <b>เลข bay</b> (<code class="inl">1:4</code>), <b>ซีเรียล</b> (<code class="inl">S74ZNS0W…</code>), หรือ <b>ชื่อ device</b> (<code class="inl">sdc</code>). จากนอกโหมด watch ก็สั่งได้ พร้อมกำหนดวินาที:</p>
+<pre><span class="p">root@pve:~#</span> b2ctl locate 1:4 30      <span class="c"># กะพริบ 30 วินาที เดินไปหาในแร็คได้สบาย</span></pre>
+
+    <div class="ok"><b>เคล็ดลับ:</b> ใช้ locate ก่อนดึงดิสก์ออกทุกครั้ง — เพราะเลข bay เป็นแค่ป้ายแสดงผล ถ้าตั้งค่าสลับ อาจชี้ผิดช่องได้ แต่ไฟกะพริบไม่โกหก</div>
+    <div class="crit"><b>ห้าม!</b> อย่ากะพริบไฟ (locate) บนดิสก์ที่กำลัง <b>resilver</b> อยู่ — รอให้ resilver เสร็จก่อน (เห็น <code class="inl">resilvered ... with 0 errors</code>) แล้วค่อย locate</div>
+  </section>
+
+  <!-- ===== 12 CAUTIONS ===== -->
+  <section id="s12">
+    <div class="eyebrow"><span class="num">12</span><h2>ข้อควรระวัง</h2></div>
+
+    <h3>อย่าผสม SAS กับ SATA โดยไม่ทดสอบก่อน</h3>
+    <p>เอาดิสก์ SAS มาเป็น spare ในพูลที่เป็น SATA ล้วน อาจมีปัญหา ถ้าไม่แน่ใจ ให้ใช้ดิสก์ชนิดเดียวกับที่มีอยู่ใน pool</p>
+
+    <h3>หมายเลข Bay เป็นแค่ตัวแสดง</h3>
+    <p>บน Dell R620 ที่แฟลชเป็น IT mode หมายเลข slot อาจสลับกัน. ทุกการทำงานของ b2ctl ใช้ <b>ซีเรียล</b> ของดิสก์ ไม่ใช่เลข bay ดังนั้นถ้า bay ดูผิด ให้ใช้ <kbd>l</kbd> (locate) กะพริบไฟยืนยันก่อนเสมอ</p>
+
+    <h3>ทุกคำสั่งที่เปลี่ยนข้อมูลจะถามยืนยัน</h3>
+    <p>ไม่ต้องกลัวกดผิดแล้วข้อมูลหาย — ระบบแสดงกล่อง Confirm พร้อม path เต็มก่อนทุกครั้ง ค่าเริ่มต้นคือ <b>N (No)</b> กด Enter เปล่า ๆ จะไม่มีอะไรเกิดขึ้น</p>
+
+    <h3>ZFS resilver ใช้เวลา — ห้ามขัดจังหวะ</h3>
+    <p>การ resilver (สร้างข้อมูลใหม่) ใช้เวลาตามปริมาณข้อมูล <b>ห้ามปิดเครื่องหรือถอดดิสก์ระหว่าง resilver</b> เพราะช่วงนั้น pool ยังไม่มี redundancy เต็ม</p>
+
+    <div class="note"><b>เมื่อไม่แน่ใจ:</b> กด <kbd>s</kbd> (skip) ไว้ก่อนเสมอ — ดิสก์จะไม่ถูกเปลี่ยนแปลง แล้วค่อยกลับมาจัดการทีหลังด้วย <kbd>a</kbd> (assign) หรือเปิด dry-run (<kbd>t</kbd>) ซ้อมดูก่อน</div>
+  </section>
+
+  <!-- ===== 13 CHEAT SHEET ===== -->
+  <section id="s13">
+    <div class="eyebrow"><span class="num">13</span><h2>Cheat Sheet — สรุปคำสั่งลัด</h2></div>
+
+    <h3>คำสั่ง CLI (พิมพ์จาก terminal)</h3>
+    <table>
+      <thead><tr><th>คำสั่ง</th><th>ทำอะไร</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">b2ctl status</td><td>ดูตารางสุขภาพดิสก์ครั้งเดียว</td></tr>
+        <tr><td class="mono">b2ctl status --locate</td><td>ดูตาราง + กะพริบไฟดิสก์ที่มีปัญหา</td></tr>
+        <tr><td class="mono">b2ctl status --json</td><td>แสดงผลเป็น JSON</td></tr>
+        <tr><td class="mono">b2ctl watch</td><td>⭐ เข้าโหมดเฝ้าดู (แนะนำ)</td></tr>
+        <tr><td class="mono">b2ctl --dry-run watch</td><td>เข้าโหมดเฝ้าดูแบบ dry-run</td></tr>
+        <tr><td class="mono">b2ctl locate &lt;bay/serial/sdX&gt; [วินาที]</td><td>กะพริบไฟหาดิสก์</td></tr>
+        <tr><td class="mono">b2ctl burnin &lt;dev …&gt; [--scan]</td><td>ทดสอบดิสก์ก่อนใช้ (หลายลูกได้)</td></tr>
+        <tr><td class="mono">b2ctl burnin --status</td><td>กลับเข้าดู burn-in ที่รันอยู่</td></tr>
+        <tr><td class="mono">b2ctl check</td><td>ตรวจสภาพระบบ / tool ครบไหม</td></tr>
+        <tr><td class="mono">b2ctl log [--last N]</td><td>ดู operation ล่าสุดจาก audit trail</td></tr>
+        <tr><td class="mono">b2ctl rollback &lt;op_id&gt;</td><td>ย้อน operation ก่อนหน้า (มี confirm)</td></tr>
+        <tr><td class="mono">b2ctl version</td><td>แสดงเวอร์ชัน</td></tr>
+      </tbody>
+    </table>
+
+    <h3>ปุ่มในโหมด watch (พิมพ์ที่ <code class="inl">b2ctl&gt;</code>)</h3>
+    <table>
+      <thead><tr><th>ปุ่ม</th><th>คำสั่ง</th><th>ทำอะไร</th></tr></thead>
+      <tbody>
+        <tr><td><kbd>r</kbd></td><td>refresh</td><td>รีเฟรชตาราง</td></tr>
+        <tr><td><kbd>a</kbd></td><td>assign</td><td>จัดสรรดิสก์ว่างเข้า pool (รวม GHOST + PERC-UG)</td></tr>
+        <tr><td><kbd>o</kbd></td><td>offload</td><td>ถอดดิสก์ออกจาก pool</td></tr>
+        <tr><td><kbd>s</kbd></td><td>swap</td><td>สลับดิสก์เก่าไป spare (ตัวเดิมกลายเป็น spare)</td></tr>
+        <tr><td><kbd>d</kbd></td><td>demote</td><td>ลด mirror leg ลงเป็น spare</td></tr>
+        <tr><td><kbd>n</kbd></td><td>new-pool</td><td>สร้าง pool ใหม่</td></tr>
+        <tr><td><kbd>e</kbd></td><td>extend</td><td>เพิ่ม cache / log ให้ pool</td></tr>
+        <tr><td><kbd>b</kbd></td><td>burnin</td><td>ทดสอบดิสก์ก่อนใช้</td></tr>
+        <tr><td><kbd>t</kbd></td><td>toggle dry-run</td><td>สลับโหมดซ้อม</td></tr>
+        <tr><td><kbd>l</kbd></td><td>locate</td><td>กะพริบไฟหาดิสก์</td></tr>
+        <tr><td><kbd>u</kbd></td><td>udev-rescue</td><td>กู้ดิสก์ที่ OS ปฏิเสธ (GHOST)</td></tr>
+        <tr><td><kbd>x</kbd></td><td>destroy</td><td>ลบ pool (อันตราย · ยืนยันสองชั้น)</td></tr>
+        <tr><td><kbd>q</kbd></td><td>quit</td><td>ออก</td></tr>
+      </tbody>
+    </table>
+
+    <h3>ตัวเลือกเมื่อมีดิสก์ว่าง (assign / new disk)</h3>
+    <table>
+      <thead><tr><th>ปุ่ม</th><th>ทำอะไร</th></tr></thead>
+      <tbody>
+        <tr><td><kbd>1</kbd></td><td>กะพริบ LED (เตรียมดึงออก)</td></tr>
+        <tr><td><kbd>2</kbd></td><td>เพิ่มเป็น spare</td></tr>
+        <tr><td><kbd>3</kbd></td><td>REPLACE ดิสก์เสีย</td></tr>
+        <tr><td><kbd>4</kbd></td><td>ATTACH เป็น mirror</td></tr>
+        <tr><td><kbd>5</kbd></td><td>ADD เดี่ยว (ไม่มี redundancy)</td></tr>
+        <tr><td><kbd>6</kbd></td><td>WIPE ล้างข้อมูล</td></tr>
+        <tr><td><kbd>s</kbd></td><td>ข้ามไว้ก่อน</td></tr>
+      </tbody>
+    </table>
+
+    <div class="info"><b>มีเครื่อง Dell PERC RAID จริง (ไม่ได้ crossflash)?</b> b2ctl รองรับด้วย — ติดตั้งแบบ <code class="inl">b2ctl install --perc</code> แล้วมันจะสลับเป็นโหมด RAID เอง, ใช้ <code class="inl">b2ctl raid-replace</code> เปลี่ยนดิสก์ผ่าน controller. รายละเอียดโหมด RAID + การตั้งชื่อ bay (<code class="inl">bay_map.json</code>) อยู่ในคู่มือฉบับเต็ม <code class="inl">docs/user-guide-th.md</code> และ <code class="inl">docs/devops-guide.md</code></div>
+
+  </section>
+
+  <div class="no-results" id="noResults">ไม่พบหัวข้อที่ตรงกับคำค้น — ลองคำอื่น หรือลบข้อความในช่องค้นหา</div>
+
+  <footer>
+    b2ctl user manual · IT-mode / LSI SAS2308 (PERC H710 crossflashed) · Proxmox VE 9.2 · ZFS<br>
+    อ้างอิงจาก docs/user-guide-th.md + docs/walkthrough.md — คู่มือฉบับเต็มดูในโฟลเดอร์ docs/
+  </footer>
+
+  </main>
+</div>
+
+<script>
+(function(){
+  var sections = Array.prototype.slice.call(document.querySelectorAll('main section'));
+  var links = Array.prototype.slice.call(document.querySelectorAll('nav.toc a'));
+  var linkById = {};
+  links.forEach(function(a){ linkById[a.getAttribute('href').slice(1)] = a; });
+
+  /* ---------- Scrollspy ---------- */
+  function onScroll(){
+    var pos = window.scrollY + 120;
+    var current = sections[0];
+    for(var i=0;i<sections.length;i++){
+      if(sections[i].offsetTop <= pos) current = sections[i];
+    }
+    links.forEach(function(a){ a.classList.remove('active'); });
+    if(current && linkById[current.id]) linkById[current.id].classList.add('active');
+  }
+  window.addEventListener('scroll', onScroll, {passive:true});
+  onScroll();
+
+  /* ---------- Search / filter ---------- */
+  var search = document.getElementById('search');
+  var noResults = document.getElementById('noResults');
+  function normalize(s){ return (s||'').toLowerCase(); }
+  search.addEventListener('input', function(){
+    var q = normalize(search.value.trim());
+    var anyVisible = false;
+    sections.forEach(function(sec){
+      if(sec.id === 's13'){ return; } // keep cheat sheet container logic simple
+      var match = q === '' || normalize(sec.textContent).indexOf(q) !== -1;
+      sec.style.display = match ? '' : 'none';
+      var link = linkById[sec.id];
+      if(link) link.classList.toggle('hidden', !match);
+      if(match) anyVisible = true;
+    });
+    // cheat sheet (s13) handled explicitly so footer stays reachable
+    var s13 = document.getElementById('s13');
+    var m13 = q === '' || normalize(s13.textContent).indexOf(q) !== -1;
+    s13.style.display = m13 ? '' : 'none';
+    if(linkById['s13']) linkById['s13'].classList.toggle('hidden', !m13);
+    if(m13) anyVisible = true;
+    noResults.style.display = anyVisible ? 'none' : 'block';
+  });
+
+  /* ---------- Mobile nav ---------- */
+  var body = document.body, menuBtn = document.getElementById('menuBtn'), backdrop = document.getElementById('backdrop');
+  function closeNav(){ body.classList.remove('nav-open'); }
+  menuBtn.addEventListener('click', function(){ body.classList.toggle('nav-open'); });
+  backdrop.addEventListener('click', closeNav);
+  links.forEach(function(a){ a.addEventListener('click', closeNav); });
+})();
+</script>
+</body>
+</html>

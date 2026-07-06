@@ -149,7 +149,7 @@ Storage summary:
   SW   tank            raidz1   ONLINE    2.72T     1.72G     2.72T
 [OK] all disks healthy and assigned
 
-[r]efresh  [a]ssign  [o]ffload  [s]wap  [d]emote  [n]ew-pool  [e]xtend  [b]urnin  [t]oggle-dryrun  [l]ocate  [q]uit
+[r]efresh  [a]ssign  [o]ffload  [s]wap  [d]emote  [t]oggle-dryrun  [n]ew-pool  [e]xtend  [b]urnin  [u]dev-rescue  [x]destroy-pool  [l]ocate  [q]uit   (or hot-plug)
 b2ctl&gt;
 </pre>
 </details>
@@ -263,7 +263,17 @@ b2ctl> a
   assign which #>
 ```
 
-Pick the disk, then choose an action:
+The list gathers **three** kinds of unassigned disk:
+
+- a normal free disk → `[1] bay 1:7 /dev/sde (Samsung SSD 870, SN …)` — opens the
+  action menu below.
+- a **`[GHOST]`** disk (OS-rejected, no `/dev` node) → `[1] [GHOST] bay 1:4 (SN …)
+  — needs wipe` — routes to a wipe/rescue flow (also see `[u]dev-rescue`).
+- a **PERC Unconfigured-Good** disk (RAID-mode boxes only) → `[1] bay 32:4
+  (Samsung …, SN …) (PERC Unconfigured-Good)` — routes to the hardware-RAID menu
+  (set JBOD for ZFS, create a volume, or add as a hot spare).
+
+Pick a normal free disk, then choose an action:
 
 | choice | action | when to use |
 |--------|--------|-------------|
@@ -484,7 +494,52 @@ b2ctl> b
 
 ---
 
-### 6.9 `t` — Toggle dry-run mode
+### 6.9 `u` — Udev-rescue (recover an OS-rejected disk)
+
+**When to use:** a disk is physically present but the OS rejected it — it shows as
+a **GHOST** (no `/dev` node). `u` fires `udevadm trigger`/`settle` to try to make
+the kernel enumerate it. Read-only/diagnostic — it does not touch disk contents.
+
+```
+b2ctl> u
+    ghost bay 1:4 serial S74ZNS0WXXXXXXX
+  run udevadm trigger/settle to rescue 1 ghost disk(s)? [y/N]> y
+  ✔ rescued 1 disk(s)
+```
+
+If nothing recovers: `no disks recovered — reseat physically or wipe via
+[a]ssign`. When there are no ghosts: `no ghost (OS-rejected) disks to rescue`.
+(Aliases: `u` or `rescue`.)
+
+---
+
+### 6.10 `x` — Destroy a pool
+
+**When to use:** permanently delete a ZFS pool. **All data is lost** — guarded by a
+double confirm plus typing the pool name. (Deep-dive: the **Destroying a ZFS pool**
+section near the end of this guide.)
+
+```
+b2ctl> x
+    [1] rpool (952G, ONLINE)
+    [2] tank (2.72T, ONLINE)
+  destroy which #> 2
+  members:
+    - (1:4) Samsung SSD 870 EVO 1TB (S74ZNS0WXXXXXXX)
+    - (1:5) Samsung SSD 870 EVO 1TB (S74ZNS0WXXXXXXX)
+    ...
+  [!] destroying 'tank' ERASES ALL DATA on it. This cannot be undone.
+  destroy pool 'tank'? [y/N]> y
+  type the pool name 'tank' to confirm> tank
+  ✔ pool 'tank' destroyed; cron removed
+```
+
+> ⚠️ Two gates: the `[y/N]` **and** re-typing the exact pool name. b2ctl also
+> removes that pool's maintenance cron. (Bare key `x` only — no word alias.)
+
+---
+
+### 6.11 `t` — Toggle dry-run mode
 
 **When to use:** want to see exactly what commands would run without making any changes — for learning, rehearsing, or verifying before a real operation.
 
@@ -508,7 +563,7 @@ Also available as a startup flag: `sudo b2ctl --dry-run watch`
 
 ---
 
-### 6.10 `l` — Locate (blink LED)
+### 6.12 `l` — Locate (blink LED)
 
 **When to use:** need to confirm which physical bay a disk occupies before pulling it.
 
@@ -530,7 +585,7 @@ The bay's activity LED blinks for ~5 seconds then stops automatically.
 
 ---
 
-### 6.11 `q` — Quit
+### 6.13 `q` — Quit
 
 ```
 b2ctl> q
@@ -539,7 +594,7 @@ bye
 
 ---
 
-### 6.12 Hot-plug (automatic detection)
+### 6.14 Hot-plug (automatic detection)
 
 **Inserting a disk:**
 
@@ -777,12 +832,16 @@ or fully dark.
 | key | action |
 |-----|--------|
 | `r` | refresh the health table |
-| `a` | assign a free disk to a pool |
+| `a` | assign a free disk to a pool (also lists GHOST + PERC-UG disks) |
 | `o` | offload (remove) a disk from a pool |
 | `s` | swap a worn in-pool disk onto a spare |
 | `d` | demote a mirror member to a spare |
-| `n` | create a new pool |
 | `t` | toggle dry-run mode on/off |
+| `n` | create a new pool |
+| `e` | extend a pool — add/remove L2ARC cache or SLOG log |
+| `b` | burn-in disk(s) — multi-select self-test (+ optional badblocks) |
+| `u` | udev-rescue an OS-rejected (GHOST) disk |
+| `x` | destroy a pool (double-confirm + type the pool name) |
 | `l` | blink one disk's LED (~5s) by bay/serial/device |
 | `q` | quit |
 

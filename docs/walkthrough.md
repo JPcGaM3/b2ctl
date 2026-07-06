@@ -275,9 +275,9 @@ b2ctl watch
 <summary>📋 ดูตัวอย่าง Output จริง</summary>
 
 <pre>
-[r]efresh [a]ssign [o]ffload [s]wap [d]emote [t]oggle-dryrun [n]ew-pool [l]ocate [q]uit
+[r]efresh [a]ssign [o]ffload [s]wap [d]emote [t]oggle-dryrun [n]ew-pool [e]xtend [b]urnin [u]dev-rescue [x]destroy-pool [l]ocate [q]uit
 b2ctl&gt; [DRY-RUN MODE: ON]
-[r]efresh [a]ssign [o]ffload [s]wap [d]emote [t]oggle-dryrun [n]ew-pool [l]ocate [q]uit
+[r]efresh [a]ssign [o]ffload [s]wap [d]emote [t]oggle-dryrun [n]ew-pool [e]xtend [b]urnin [u]dev-rescue [x]destroy-pool [l]ocate [q]uit
 b2ctl&gt;
 </pre>
 </details>
@@ -317,7 +317,7 @@ Pools:
   rpool     952G    5.96G   free=946G    ONLINE    cap=0%
   tank      2.72T   1.71G   free=2.72T   ONLINE    cap=0%
 [OK] all disks healthy and assigned
-[r]efresh  [a]ssign  [o]ffload  [s]wap  [d]emote  [t]oggle-dryrun  [n]ew-pool  [l]ocate  [q]uit   (or hot-plug)
+[r]efresh  [a]ssign  [o]ffload  [s]wap  [d]emote  [t]oggle-dryrun  [n]ew-pool  [e]xtend  [b]urnin  [u]dev-rescue  [x]destroy-pool  [l]ocate  [q]uit   (or hot-plug)
 b2ctl&gt;
 
 </pre>
@@ -524,7 +524,7 @@ Execute rollback? [y/N]: Cancelled.
 **Step 1:** เปิด watch — เห็นเมนูล่างตาราง
 
 ```
-[r]efresh  [a]ssign  [o]ffload  [s]wap  [d]emote  [t]oggle-dryrun  [n]ew-pool  [l]ocate  [q]uit   (or hot-plug)
+[r]efresh  [a]ssign  [o]ffload  [s]wap  [d]emote  [t]oggle-dryrun  [n]ew-pool  [e]xtend  [b]urnin  [u]dev-rescue  [x]destroy-pool  [l]ocate  [q]uit   (or hot-plug)
 b2ctl>
 ```
 
@@ -533,12 +533,16 @@ b2ctl>
 | Hotkey | ทำอะไร | mutating? |
 | ------ | ------ | :--: |
 | `r` | refresh — scan ใหม่ + reprint ตาราง/pool/summary | no |
-| `a` | assign — เปิดเมนูจัดการ disk ที่ยัง unassigned (`[CONFIG]`) | yes |
+| `a` | assign — เปิดเมนูจัดการ disk ที่ยัง unassigned (รวม `[GHOST]` + PERC-UG) | yes |
 | `o` | offload — ถอด disk/spare ออกจาก pool | yes |
 | `s` | swap — ย้าย member ที่ใช้อยู่ไปลง spare (resilver) แล้ว **ตัวเดิมกลายเป็น spare** | yes |
 | `d` | demote — ถอด mirror leg ของ rpool มาเป็น spare (guard กัน break redundancy) | yes |
 | `t` | toggle-dryrun — เปิด/ปิด preview mode (ดู Section 3) | no |
 | `n` | new-pool — สร้าง pool ใหม่จาก disk ว่าง | yes |
+| `e` | extend — เพิ่ม/ถอด L2ARC cache หรือ SLOG log | yes |
+| `b` | burnin — ตรวจ disk หลายลูก (self-test + badblocks) แบบเบื้องหลัง | no (read-only) |
+| `u` | udev-rescue — กู้ disk ที่ OS ปฏิเสธ (GHOST) ด้วย `udevadm` | no |
+| `x` | destroy-pool — ลบ pool (ยืนยันสองชั้น + พิมพ์ชื่อ pool) | yes |
 | `l` | locate — กระพริบ LED หา disk (ดู Section 5) | no |
 | `q` | quit — ออก, print `bye` | no |
 
@@ -635,7 +639,7 @@ b2ctl> n
     [1] /dev/sde (bay 1:7)
   pick disks (space-separated #)> 1
   pool name> tutorial
-  raid type (stripe, mirror, raidz1, raidz2) [mirror]> stripe
+  raid type (stripe, mirror, raid10, raidz1, raidz2) [mirror]> stripe
   WARNING: The following disks already contain data/labels:
     - (1:7) Samsung SSD 870 EVO 1TB (S74ZNS0W582280E)
   these disks already contain data/labels — wipe and continue? [y/N]> y
@@ -648,6 +652,68 @@ b2ctl> n
   - raid type ต้องมี disk พอ: `mirror`≥2, `raidz1`≥3, `raidz2`≥4 (ไม่พอ → `error: need at least N disks`); พิมพ์ผิด → `invalid raid type`
   - `stripe` = ไม่มี redundancy (disk เดียวก็ได้ แต่เสีย = ข้อมูลหายหมด)
   - ⚠️ ตัวอย่างนี้สร้าง pool ชื่อ `tutorial` บน disk ว่าง (1:7) — ถ้าทดสอบเสร็จลบด้วย `zpool destroy tutorial`
+
+### `e` extend — เพิ่ม/ถอด cache · log
+
+```
+b2ctl> e
+  pool #> 2
+  [1] add L2ARC cache (read cache; loss = harmless)
+  [2] add SLOG log   (sync-write accel; mirror + PLP recommended)
+  [3] remove a cache/log device
+  action> 1
+    [1] /dev/sde (bay 1:7)
+  pick disk(s) (space-separated #)> 1
+  add 1 L2ARC cache device(s) to 'tank'? [y/N]> y
+  ✔ cache added
+```
+
+- **แปลว่า:** เลือก pool → `[1]` cache (L2ARC) / `[2]` log (SLOG — เลือก ≥2 ลูก = mirror, ต้องมี PLP) / `[3]` ถอด cache/log ออก → เลือก disk ว่าง → confirm.
+
+### `b` burnin — ตรวจ disk ก่อนใช้ (หลายลูก + เบื้องหลัง)
+
+```
+b2ctl> b
+    [1] /dev/sdb (bay 32:4) Samsung SSD 870 EVO 1TB
+    [2] /dev/sda (bay 32:5) Samsung SSD 870 EVO 1TB
+  burn in which #> (space-separated) 1 2
+  burn-in 2 disk(s) (long self-test)? [y/N]> y
+  also run a full read-surface scan (badblocks, read-only, hours)? [y/N]> y
+
+ BAY     DISK      SELF-TEST                     SURFACE SCAN (badblocks)
+ 32:4    sdb       [########------]  62%  ~1h10m  [###-----------]  18%  ~4h30m
+```
+
+- **แปลว่า:** เลือกได้หลายลูก → long self-test (รันบน firmware) + badblocks (process เบื้องหลัง) → หน้าจอสดโชว์แถบ + เวลาที่เหลือ. Ctrl-C ออกได้ งานยังรันต่อ กลับเข้าดูด้วย `b2ctl burnin --status`.
+
+### `u` udev-rescue — กู้ disk ที่ OS ปฏิเสธ (GHOST)
+
+```
+b2ctl> u
+    ghost bay 1:4 serial S74ZNS0W537278Y
+  run udevadm trigger/settle to rescue 1 ghost disk(s)? [y/N]> y
+  ✔ rescued 1 disk(s)
+```
+
+- **แปลว่า:** disk เสียบอยู่จริงแต่ OS ไม่รับ (ขึ้นเป็น GHOST ไม่มี `/dev`) → สั่ง `udevadm trigger/settle` ให้ kernel เห็น (อ่านอย่างเดียว). กู้ไม่ได้ → `no disks recovered — reseat physically or wipe via [a]ssign`.
+
+### `x` destroy-pool — ลบ pool (อันตราย)
+
+```
+b2ctl> x
+    [1] rpool (952G, ONLINE)
+    [2] tank (2.72T, ONLINE)
+  destroy which #> 2
+  members:
+    - (1:4) Samsung SSD 870 EVO 1TB (S74ZNS0W537278Y)
+    ...
+  [!] destroying 'tank' ERASES ALL DATA on it. This cannot be undone.
+  destroy pool 'tank'? [y/N]> y
+  type the pool name 'tank' to confirm> tank
+  ✔ pool 'tank' destroyed; cron removed
+```
+
+- **แปลว่า:** ลบ pool ถาวร — 2 ด่าน (`[y/N]` + พิมพ์ชื่อ pool ให้ตรง). b2ctl ลบ cron ของ pool นั้นให้ด้วย.
 
 ---
 

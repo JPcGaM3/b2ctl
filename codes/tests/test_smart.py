@@ -227,7 +227,9 @@ class TestMegaraidDtype(unittest.TestCase):
 
 
 class TestSmartTimeout(unittest.TestCase):
-    """F-049: a hung disk must not be retried through the whole attempt ladder."""
+    """F-049: an IT-mode hung disk must not be retried through the attempt ladder.
+    A megaraid probe, however, retries ONCE (a timeout there is often just queueing
+    behind sibling probes on the shared controller)."""
 
     def test_ladder_breaks_on_first_timeout(self):
         seen = []
@@ -240,7 +242,54 @@ class TestSmartTimeout(unittest.TestCase):
              patch("b2ctl.config.tool", return_value="smartctl"):
             out = smart._smartctl("/dev/sdx", "")
         assert out == ""
-        assert len(seen) == 1   # broke after the first timeout, no retry
+        assert len(seen) == 1   # IT-mode: broke after the first timeout, no retry
+
+    def test_megaraid_retries_once_then_succeeds(self):
+        calls = {"n": 0}
+
+        def _run(cmd, timeout=None, none_on_timeout=False):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return None   # first passthrough probe times out (controller busy)
+            return "ATTRIBUTE_NAME\nSMART overall-health ... PASSED"
+
+        with patch("b2ctl.smart.run", side_effect=_run), \
+             patch("b2ctl.config.tool", return_value="smartctl"), \
+             patch("b2ctl.config.smart_config",
+                   return_value={"timeout": 10, "megaraid_workers": 4}):
+            out = smart._smartctl("/dev/sda", "megaraid,7")
+        assert "ATTRIBUTE_NAME" in out
+        assert calls["n"] == 2                 # timed out once -> retried -> read
+
+    def test_megaraid_gives_up_after_retry_still_timing_out(self):
+        seen = []
+
+        def _run(cmd, timeout=None, none_on_timeout=False):
+            seen.append(cmd)
+            return None   # every probe times out
+
+        with patch("b2ctl.smart.run", side_effect=_run), \
+             patch("b2ctl.config.tool", return_value="smartctl"), \
+             patch("b2ctl.config.smart_config",
+                   return_value={"timeout": 10, "megaraid_workers": 4}):
+            out = smart._smartctl("/dev/sda", "megaraid,7")
+        assert out == ""
+        # first form retried once (2 calls), then break — never reached sat+megaraid
+        assert len(seen) == 2
+
+    def test_megaraid_timeout_honors_config_value(self):
+        seen = []
+
+        def _run(cmd, timeout=None, none_on_timeout=False):
+            seen.append(timeout)
+            return "ATTRIBUTE_NAME\nSMART overall-health ... PASSED"
+
+        with patch("b2ctl.smart.run", side_effect=_run), \
+             patch("b2ctl.config.tool", return_value="smartctl"), \
+             patch("b2ctl.config.smart_config",
+                   return_value={"timeout": 25, "megaraid_workers": 2}):
+            smart._smartctl("/dev/sda", "megaraid,7")
+        assert seen[0] == 25                   # config timeout threaded into run()
 
     def test_read_marks_noread_on_timeout(self):
         def _run(cmd, timeout=None, none_on_timeout=False):

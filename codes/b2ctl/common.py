@@ -24,10 +24,8 @@ C = "\033[1;36m"; B = "\033[1;34m"; N = "\033[0m"
 # ---- health levels -------------------------------------------------------- #
 RANK = {"NORMAL": 0, "CONFIG": 1, "WARNING": 2, "CRITICAL": 3}
 LEVEL_COLOR = {"CRITICAL": R, "WARNING": Y, "CONFIG": C, "NORMAL": G}
-
-# endurance / wear thresholds (percent remaining)
-END_WARN = 30
-END_CRIT = 10
+# Health thresholds now live in config (health.ssd / health.hdd), type-aware and
+# operator-tunable; a None threshold disables that check. See config._DEFAULTS.
 
 # ---- dry-run flag (single owner at the bottom layer) ---------------------- #
 # The mode used to live in watch.py, forcing action modules (raid_actions,
@@ -193,6 +191,26 @@ class Disk:
 _BAD_VDEV = {"FAULTED", "UNAVAIL", "REMOVED", "OFFLINE", "DEGRADED"}
 
 
+def _grade_high(value, warn, crit):
+    """Grade a signal where a HIGHER value is worse (defect counts). A None
+    threshold disables that band. Returns 'CRITICAL' / 'WARNING' / None."""
+    if crit is not None and value > crit:
+        return "CRITICAL"
+    if warn is not None and value > warn:
+        return "WARNING"
+    return None
+
+
+def _grade_low(value, warn, crit):
+    """Grade a signal where a LOWER value is worse (endurance/wear % remaining).
+    A None threshold disables that band. Returns 'CRITICAL' / 'WARNING' / None."""
+    if crit is not None and value < crit:
+        return "CRITICAL"
+    if warn is not None and value < warn:
+        return "WARNING"
+    return None
+
+
 def assess(d: Disk) -> None:
     """Set d.level and d.reasons from its SMART + ZFS state."""
     level = "NORMAL"
@@ -240,24 +258,25 @@ def assess(d: Disk) -> None:
         # 'FAILURE PREDICTION THRESHOLD EXCEEDED' and future parse variants.
         if d.health not in ("PASSED", "UNKNOWN"):
             bump("CRITICAL", f"SMART health={d.health}")
-        if d.realloc > 0:
-            bump("CRITICAL", f"reallocated/defects={d.realloc}")
-        if d.pending > 0:
-            bump("CRITICAL", f"pending sectors={d.pending}")
-        if d.uncorr > 0:
-            bump("CRITICAL", f"uncorrectable errors={d.uncorr}")
-        # endurance via TBW
+        # Type-aware, config-tunable thresholds (health.ssd / health.hdd). SSD/NVMe
+        # (is_ssd) stay strict (any bad sector CRITICAL); HDDs get tolerance bands.
+        # A None threshold disables that check.
+        from . import config as _cfg
+        h = _cfg.health_config()["ssd" if d.is_ssd else "hdd"]
+        for sig, val, label in (("realloc", d.realloc, "reallocated/defects"),
+                                ("pending", d.pending, "pending sectors"),
+                                ("uncorr", d.uncorr, "uncorrectable errors")):
+            lvl = _grade_high(val, h.get(f"{sig}_warn"), h.get(f"{sig}_crit"))
+            if lvl:
+                bump(lvl, f"{label}={val}")
         if d.end_left is not None:
-            if d.end_left < END_CRIT:
-                bump("CRITICAL", f"endurance left {d.end_left:.1f}%")
-            elif d.end_left < END_WARN:
-                bump("WARNING", f"endurance left {d.end_left:.1f}%")
-        # wear via SMART normalized value
+            lvl = _grade_low(d.end_left, h.get("endurance_warn"), h.get("endurance_crit"))
+            if lvl:
+                bump(lvl, f"endurance left {d.end_left:.1f}%")
         if d.wear_val is not None:
-            if d.wear_val < END_CRIT:
-                bump("CRITICAL", f"wear left {d.wear_val}%")
-            elif d.wear_val < END_WARN:
-                bump("WARNING", f"wear left {d.wear_val}%")
+            lvl = _grade_low(d.wear_val, h.get("wear_warn"), h.get("wear_crit"))
+            if lvl:
+                bump(lvl, f"wear left {d.wear_val}%")
 
     d.level = level
     d.reasons = reasons

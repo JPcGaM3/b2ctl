@@ -231,6 +231,25 @@ class TestAuxAndBurninCommands(unittest.TestCase):
         mock_rm.assert_not_called()
         assert rc == 1
 
+    def test_burnin_cancel_dispatches_targets(self):
+        import b2ctl.cli as cli
+        with patch("b2ctl.burnin.cancel", return_value=0) as mock_cancel:
+            args = cli.build_parser().parse_args(["burnin", "--cancel", "1:0", "1:1"])
+            rc = args.func(args)
+        mock_cancel.assert_called_once()
+        self.assertEqual(mock_cancel.call_args[0][0], ["1:0", "1:1"])
+        self.assertEqual(rc, 0)
+
+    def test_burnin_cancel_all_dispatches(self):
+        import b2ctl.cli as cli
+        with patch("b2ctl.burnin.cancel_all", return_value=0) as mock_ca, \
+             patch("b2ctl.burnin.cancel") as mock_c:
+            args = cli.build_parser().parse_args(["burnin", "--cancel-all"])
+            rc = args.func(args)
+        mock_ca.assert_called_once()
+        mock_c.assert_not_called()
+        self.assertEqual(rc, 0)
+
 
 class TestResolveDevsStrict(unittest.TestCase):
     """F-032: add paths must not pass unresolved / by-id-less tokens to zpool."""

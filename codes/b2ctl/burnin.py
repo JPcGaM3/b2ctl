@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -222,6 +223,83 @@ def _pid_alive(pid: int) -> bool:
 
 
 # --------------------------------------------------------------------------- #
+# Cancel: abort self-test + kill badblocks + drop from state
+# --------------------------------------------------------------------------- #
+def _is_our_badblocks(pid: int, dev: str) -> bool:
+    """Guard against PID reuse: only SIGTERM a pid whose /proc cmdline is really
+    our `badblocks <dev>` scan. Returns False when /proc is unavailable — never
+    kill a pid we cannot verify."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            argv = f.read().split(b"\0")
+    except OSError:
+        return False
+    return (any(b"badblocks" in a for a in argv)
+            and any(dev.encode() in a for a in argv))
+
+
+def _cancel_records(recs: list, *, dry_run: bool = False) -> int:
+    """Abort the self-test (`smartctl -X`) and kill the badblocks scan for each
+    record, then drop them from state. Returns 0 if any were cancelled, else 1."""
+    if not recs:
+        return 1
+    sc = _cfg.tool("smartctl")
+    for rec in recs:
+        dev = rec["dev"]
+        dtype = rec.get("dtype", "")
+        cmd = [sc, "-X"] + (["-d", dtype] if dtype else []) + [dev]
+        if dry_run:
+            print(f"[DRY-RUN] would run: {' '.join(cmd)}")
+        else:
+            run_check(cmd)                # abort self-test; harmless if already done
+        pid = rec.get("scan_pid")
+        if pid and _pid_alive(pid) and _is_our_badblocks(pid, dev):
+            if dry_run:
+                print(f"[DRY-RUN] would SIGTERM badblocks pid {pid} ({dev})")
+            else:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    pass
+        print(f"{Y}  [cancelled] bay {rec.get('bay') or '?'} {dev} "
+              f"({rec.get('serial') or '?'}){N}")
+    if not dry_run:
+        keys = {(r.get("serial"), r["dev"]) for r in recs}
+        save_state([r for r in load_state()
+                    if (r.get("serial"), r.get("dev")) not in keys])
+    return 0
+
+
+def cancel(targets: list, *, dry_run: bool = False) -> int:
+    """Cancel in-flight burn-in(s) matching bay / serial / dev string(s)."""
+    records = load_state()
+    if not records:
+        print(f"{Y}  no burn-in in progress{N}")
+        return 1
+    matched: list = []
+    for t in targets:
+        m = next((r for r in records if t in (
+                    r.get("bay"), r.get("serial"), r.get("dev"),
+                    (r.get("dev") or "").replace("/dev/", ""))), None)
+        if m is None:
+            print(f"{R}[-] no in-flight burn-in matches '{t}'{N}")
+        elif m not in matched:
+            matched.append(m)
+    if not matched:
+        return 1
+    return _cancel_records(matched, dry_run=dry_run)
+
+
+def cancel_all(*, dry_run: bool = False) -> int:
+    """Cancel every in-flight burn-in."""
+    records = load_state()
+    if not records:
+        print(f"{Y}  no burn-in in progress{N}")
+        return 1
+    return _cancel_records(records, dry_run=dry_run)
+
+
+# --------------------------------------------------------------------------- #
 # Verdict
 # --------------------------------------------------------------------------- #
 def assess(d) -> tuple[str, list[str]]:
@@ -239,8 +317,10 @@ def assess(d) -> tuple[str, list[str]]:
     if verdict != "FAIL":
         if d.realloc and d.realloc > 0:
             verdict = "WARN"; reasons.append(f"grown defects/reallocated = {d.realloc}")
-        if d.poh and d.poh > POH_WARN:
-            verdict = "WARN"; reasons.append(f"power-on hours = {d.poh} (> {POH_WARN})")
+        # POH warning is opt-in via config (health.<type>.poh_warn); None = off.
+        poh_warn = _cfg.health_config()["ssd" if d.is_ssd else "hdd"].get("poh_warn")
+        if poh_warn is not None and d.poh and d.poh > poh_warn:
+            verdict = "WARN"; reasons.append(f"power-on hours = {d.poh} (> {poh_warn})")
     return verdict, reasons
 
 

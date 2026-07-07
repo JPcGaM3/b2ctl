@@ -140,6 +140,16 @@ smartctl -a -d scsi /dev/sdX  # fallback
   `end_left = clamp((rating - written)/rating * 100, 0, 100)`. HDDs force
   `wear_val=None`.
 
+**Scan concurrency (v0.11.1).** `core.scan` reads SMART on **two** thread pools:
+direct/IT-mode targets (`smart_dtype` empty) one-thread-per-disk up to 16 (F-077);
+and **megaraid passthrough** targets (`smartctl -a -d megaraid,<DID> /dev/sda`,
+RAID mode) at a small cap (`smart.megaraid_workers`, default 4). Megaraid probes
+all funnel through ONE PERC that serializes IOCTLs, so 16-way saturates it and
+slow disks exceed `smart.timeout` (default 10 s) → the probe times out → `NOREAD`.
+A megaraid timeout is **retried once** (usually just queueing behind siblings); an
+IT-mode timeout is not (F-049). Both knobs live in `config['smart']` — raise the
+timeout / lower the workers on a box with slow or dying SAS disks.
+
 ### 3.5 ZFS topology — `zfs.topology()`
 ```
 zpool list -H -o name,size,alloc,free,health,frag,cap
@@ -199,7 +209,8 @@ re-attachable. See **ADR-002** for the background-process/state-file architectur
 | self-test progress | `smartctl -a <dev>` → `parse_selftest()` reads `% of test remaining` (ATA) / `% complete` (SAS); ETA = `Extended self-test routine recommended polling time: (N) minutes` × remaining% (`_selftest_eta_min`, ATA only) |
 | scan progress | tail the badblocks logfile for the last `NN% done` (`_parse_badblocks_log`); liveness via `os.kill(pid,0)` + `waitpid(WNOHANG)` reaping (`_pid_alive`); ETA computed from our own elapsed time (`scan_progress`) |
 | live view | `live_view()` redraws `ui.render_burnin_view()` every ~2.5 s (ANSI cursor-up + clear). **Ctrl-C detaches** (saves state, keeps running); it does NOT abort |
-| verdict | on completion `_finish()` re-reads SMART (`core.scan_one`) + `assess(disk)` → FAIL (uncorrected>0 / self-test error), WARN (POH>40000 / grown defects / surface-scan bad blocks), else PASS |
+| verdict | on completion `_finish()` re-reads SMART (`core.scan_one`) + `assess(disk)` → FAIL (uncorrected>0 / self-test error), WARN (grown defects / surface-scan bad blocks / power-on hours **if** `health.<type>.poh_warn` is set — off by default, v0.13.0), else PASS |
+| cancel (v0.12.0) | `cancel(targets)` / `cancel_all()` — per record: **abort self-test** `smartctl -X [-d <dtype>] <dev>` (`_cancel_records`) + **stop scan** `os.kill(scan_pid, SIGTERM)`, but only after `_is_our_badblocks(pid,dev)` confirms `/proc/<pid>/cmdline` is our `badblocks <dev>` (PID-reuse guard) — then drop the record from state. Honors `--dry-run`. Both are read-only/abort ops; nothing is written |
 
 - **State file:** `os.path.join(safety.LOG_DIR, "burnin.json")` (records keyed by
   serial: dev/bay/dtype/kind/do_scan/scan_pid/scan_log/started), plus per-disk
@@ -212,10 +223,12 @@ re-attachable. See **ADR-002** for the background-process/state-file architectur
   the live view / `--status`, not encoded in the exit code (the old single-disk
   synchronous FAIL→exit-1 is gone).
 
-CLI `b2ctl burnin <bay\|dev> [<bay\|dev> …] [--scan] [--short]` and
-`b2ctl burnin --status` (re-attach); watch `[b]urnin` (space-separated
-multi-select). Only spare/new disks (`in_pool` is refused). The only writes are
-the self-test trigger and a read-only `badblocks`; nothing on the disk is modified.
+CLI `b2ctl burnin <bay\|dev> [<bay\|dev> …] [--scan] [--short]`,
+`b2ctl burnin --status` (re-attach), and `b2ctl burnin --cancel <bay\|dev …>` /
+`--cancel-all` (v0.12.0); watch `[b]urnin` opens a menu when a burn-in is in flight
+(`[v]`iew / `[c]`ancel-one / cancel-`[a]`ll / `[n]`ew). Only spare/new disks
+(`in_pool` is refused). The only writes are the self-test trigger and a read-only
+`badblocks`; nothing on the disk is modified.
 
 ### 3.7 LED locate — `locate.py`
 `sas2ircu ... LOCATE <slot>` is **not used** — on this backplane it lights a
@@ -662,6 +675,44 @@ Priority:
 The `_cache` module-level dict is populated once by `load()` on first call and
 reused. Tests that need a clean state must set `cfg_mod._cache = None` in
 `setup_method`.
+
+### SMART scan tuning — `config.smart_config()` (v0.11.1)
+
+`config['smart']` = `{"timeout": <sec>, "megaraid_workers": <n>}` (defaults
+`10` / `4`). `timeout` is the per-probe `smartctl` timeout; `megaraid_workers`
+caps concurrent megaraid passthrough probes (one PERC serializes them — see §3.4).
+Int-guarded per key: a non-int / non-positive / bool hand-edit is ignored and the
+default kept. Tune on a box whose SAS disks read slowly or intermittently `NOREAD`:
+
+```json
+{ "smart": { "timeout": 25, "megaraid_workers": 2 } }
+```
+
+### Health thresholds — `config.health_config()` (v0.13.0)
+
+`config['health']` is split by disk type — `ssd` (SSD **and** NVMe, `Disk.is_ssd`)
+vs `hdd` — and read by `common.assess()` (table LEVEL) and `burnin.assess()` (POH).
+**A threshold of `null` / `"N/A"` / any non-integer DISABLES that check**
+(`_norm_threshold`); omitting a key keeps its default. Defect signals
+(`realloc`/`pending`/`uncorr`) grade with `>` (`_grade_high`); endurance/wear grade
+with `<` (`_grade_low`, % remaining). Defaults:
+
+| signal | SSD / NVMe | HDD |
+|--------|-----------|-----|
+| `realloc_warn` / `realloc_crit` | `null` / `0` (any → CRITICAL) | `50` / `200` |
+| `pending_warn` / `pending_crit` | `null` / `0` (any → CRITICAL) | `0` / `null` (→ WARNING) |
+| `uncorr_warn` / `uncorr_crit` | `null` / `0` (any → CRITICAL) | `null` / `0` (any → CRITICAL) |
+| `endurance_warn` / `endurance_crit` | `30` / `20` | `null` / `null` |
+| `wear_warn` / `wear_crit` | `30` / `20` | `null` / `null` |
+| `poh_warn` (burn-in) | `null` (off) | `null` (off) |
+
+Example — loosen HDD grading, tighten SSD endurance, enable the burn-in POH warn:
+
+```json
+{ "health": {
+    "hdd": { "realloc_warn": 100, "realloc_crit": 500 },
+    "ssd": { "endurance_crit": 25, "poh_warn": 40000 } } }
+```
 
 ### Subprocesses added for RAID-mode (new in v0.5.0)
 

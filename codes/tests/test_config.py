@@ -144,6 +144,93 @@ class TestConfig:
         assert cfg["controller"]["index"] == "all"
         assert cfg["tool_paths"]["sas2ircu"] == ""
         assert cfg["bay_map_path"] == ""
+        assert cfg["smart"] == {"timeout": 10, "megaraid_workers": 4}
+
+    def test_load_honors_smart_overrides(self):
+        import json, os, tempfile
+        import b2ctl.config as cfg_mod
+        path = os.path.join(tempfile.mkdtemp(), "config.json")
+        with open(path, "w") as f:
+            json.dump({"smart": {"timeout": 25, "megaraid_workers": 2}}, f)
+        old = cfg_mod.CONFIG_PATH
+        cfg_mod.CONFIG_PATH = path
+        try:
+            cfg_mod._cache = None
+            cfg = cfg_mod.load()
+            assert cfg["smart"] == {"timeout": 25, "megaraid_workers": 2}
+        finally:
+            cfg_mod.CONFIG_PATH = old
+            cfg_mod._cache = None
+
+    def test_smart_ignores_bad_values(self):
+        import json, os, tempfile
+        import b2ctl.config as cfg_mod
+        path = os.path.join(tempfile.mkdtemp(), "config.json")
+        with open(path, "w") as f:
+            # bool / non-int / non-positive must be rejected per key -> defaults kept
+            json.dump({"smart": {"timeout": True, "megaraid_workers": "4"}}, f)
+        old = cfg_mod.CONFIG_PATH
+        cfg_mod.CONFIG_PATH = path
+        try:
+            cfg_mod._cache = None
+            cfg = cfg_mod.load()
+            assert cfg["smart"] == {"timeout": 10, "megaraid_workers": 4}
+        finally:
+            cfg_mod.CONFIG_PATH = old
+            cfg_mod._cache = None
+
+    def test_smart_config_getter_survives_partial_cache(self):
+        # a manually-set cache missing 'smart' must not KeyError smart_config()
+        import b2ctl.config as cfg_mod
+        cfg_mod._cache = {"tool_paths": {}, "controller": {"mode": "auto", "index": "all"}}
+        try:
+            assert cfg_mod.smart_config() == {"timeout": 10, "megaraid_workers": 4}
+        finally:
+            cfg_mod._cache = None
+
+    def test_health_defaults(self):
+        import b2ctl.config as cfg_mod
+        with patch("b2ctl.config.os.path.exists", return_value=False):
+            h = cfg_mod.load()["health"]
+        assert h["ssd"]["realloc_crit"] == 0          # SSD: any realloc -> CRIT
+        assert h["ssd"]["realloc_warn"] is None
+        assert h["ssd"]["endurance_crit"] == 20
+        assert h["hdd"]["realloc_warn"] == 50
+        assert h["hdd"]["realloc_crit"] == 200
+        assert h["hdd"]["pending_warn"] == 0
+        assert h["ssd"]["poh_warn"] is None and h["hdd"]["poh_warn"] is None
+
+    def test_health_overrides_and_na_disables(self):
+        import json, os, tempfile
+        import b2ctl.config as cfg_mod
+        path = os.path.join(tempfile.mkdtemp(), "config.json")
+        with open(path, "w") as f:
+            json.dump({"health": {
+                "hdd": {"realloc_warn": 80, "realloc_crit": "N/A"},   # crit disabled
+                "ssd": {"poh_warn": 40000},                            # enable POH
+            }}, f)
+        old = cfg_mod.CONFIG_PATH
+        cfg_mod.CONFIG_PATH = path
+        try:
+            cfg_mod._cache = None
+            h = cfg_mod.load()["health"]
+            assert h["hdd"]["realloc_warn"] == 80          # overridden
+            assert h["hdd"]["realloc_crit"] is None        # "N/A" -> disabled
+            assert h["hdd"]["pending_warn"] == 0           # untouched key keeps default
+            assert h["ssd"]["poh_warn"] == 40000           # enabled
+        finally:
+            cfg_mod.CONFIG_PATH = old
+            cfg_mod._cache = None
+
+    def test_health_config_getter_survives_partial_cache(self):
+        import b2ctl.config as cfg_mod
+        cfg_mod._cache = {"tool_paths": {}, "controller": {"mode": "auto", "index": "all"}}
+        try:
+            hc = cfg_mod.health_config()
+            assert hc["ssd"]["realloc_crit"] == 0
+            assert hc["hdd"]["realloc_warn"] == 50
+        finally:
+            cfg_mod._cache = None
 
     def test_load_survives_wrong_shape_config(self):
         # F-014: valid JSON of the wrong shape must fall back to defaults, not

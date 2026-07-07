@@ -62,10 +62,23 @@ def scan(tbw_table=None, *, rescue: bool = False) -> list[Disk]:
 
     tbw_table = tbw_table if tbw_table is not None else spec.load()
     smart_targets = [d for d in disks if d.health != "GHOST"]
-    # smartctl calls are subprocess-wait bound, so one thread per disk is safe;
-    # the old fixed 4 serialised an 8-bay box into two waves (F-077).
-    with ThreadPoolExecutor(max_workers=min(16, max(1, len(smart_targets)))) as executor:
-        list(executor.map(lambda d: smart.read(d, tbw_table), smart_targets))
+    # Direct smartctl on independent /dev/sdX is subprocess-wait bound, so one
+    # thread per disk is safe (F-077). But megaraid passthrough (d.smart_dtype set)
+    # all funnels through ONE PERC that serializes IOCTLs — 16-way there saturates
+    # the controller and slow disks blow the per-probe timeout -> NOREAD. Read the
+    # direct group wide, the megaraid group at a small configurable cap.
+    from . import config as _cfg
+    mega = [d for d in smart_targets if d.smart_dtype]
+    direct = [d for d in smart_targets if not d.smart_dtype]
+
+    def _read_pool(targets, workers):
+        if not targets:
+            return
+        with ThreadPoolExecutor(max_workers=min(workers, max(1, len(targets)))) as executor:
+            list(executor.map(lambda d: smart.read(d, tbw_table), targets))
+
+    _read_pool(direct, 16)
+    _read_pool(mega, _cfg.smart_config().get("megaraid_workers", 4))
 
     # Enterprise SAS drives often have no SERIAL in lsblk (udev doesn't query it).
     # SMART now has the real serial. Re-run bay assignment so those disks get a bay,

@@ -203,6 +203,21 @@ Type a single letter to act.
 2. Run any operation — commands print without executing
 3. `b2ctl> t` → dry-run disabled, back to live
 
+### SAS disks show `NOREAD` (or `status` is slow) on a RAID box
+
+On a PERC box, SMART for every disk is read through the controller
+(`smartctl -d megaraid`). If many disks are read at once the controller can
+saturate and slow/old disks miss the read timeout → they show **`NOREAD` /
+"SMART unreadable"**, and the scan gets slow. Tune it in `/etc/b2ctl/config.json`:
+
+```json
+{ "smart": { "timeout": 25, "megaraid_workers": 2 } }
+```
+
+`timeout` = seconds per disk (raise it for slow disks); `megaraid_workers` =
+how many disks are read at once through the controller (lower it if it saturates).
+A disk that stays `NOREAD` after this is likely genuinely failing — check its bay.
+
 ---
 
 ## 5. Reading the table
@@ -218,7 +233,7 @@ Type a single letter to act.
 | **WEAR(used)** | SSD life consumed — from SMART counter (lower = better) | `1%` |
 | **END(left)** | endurance remaining vs. rated TBW | `98.4%` |
 | **WRITTEN** | total written / rated TBW | `9.87TB/600TBW` |
-| **BAD** | reallocated sectors (SATA) or grown defects (SAS) | `0` = normal; `>0` = danger |
+| **BAD** | reallocated sectors / grown defects | `0` = normal; on an **SSD/NVMe** any `>0` is CRITICAL; on an **HDD** a few are tolerated (see LEVEL below) |
 | **HEALTH** | SMART self-test result | `PASSED`, `FAILED` |
 | **POOL** | pool/vdev membership | `tank/raidz1-0`, `rpool/mirror-0` |
 | **STATUS** | ZFS vdev state — green ONLINE/AVAIL, yellow DEGRADED/INUSE→bay, red FAULTED/REMOVED | `ONLINE`, `AVAIL`, `INUSE→1:4` |
@@ -230,8 +245,14 @@ Type a single letter to act.
 |-------|---------|
 | **NORMAL** | healthy, assigned to a pool — no action needed |
 | **CONFIG** | healthy but not in any pool — needs assignment (add as spare, or build a pool) |
-| **WARNING** | endurance/wear getting low, or vdev DEGRADED — prepare to act soon |
-| **CRITICAL** | SMART failed, bad sectors, near-zero endurance, FAULTED/UNAVAIL vdev, or GHOST (OS rejected drive — no `/dev/sdX` node) — act immediately |
+| **WARNING** | endurance/wear getting low, vdev DEGRADED, or an **HDD** with a moderate defect count (`>50` grown defects, or any pending sector) — prepare to act soon |
+| **CRITICAL** | SMART failed, near-zero endurance, FAULTED/UNAVAIL vdev, GHOST (OS rejected drive), **any** bad sector on an SSD/NVMe, or an **HDD** with heavy defects (`>200`) or uncorrectable errors — act immediately |
+
+**Bad-sector grading is type-aware and tunable (v0.13.0).** SSD/NVMe are strict
+(any reallocated/pending/uncorrectable sector → CRITICAL); HDDs tolerate stable,
+already-remapped grown defects (`>50 → WARNING`, `>200 → CRITICAL`). Adjust the
+bands per type in `/etc/b2ctl/config.json` under `health` — see the DevOps guide.
+A threshold set to `"N/A"` turns that check off.
 
 ---
 
@@ -499,8 +520,13 @@ b2ctl> b
 ```
 
 - **Leaving & re-attaching:** press **Ctrl-C** to return to the prompt — the tests
-  and scans keep running. Press `[b]` again (or run `b2ctl burnin --status`) to
-  re-open the live view; when a disk finishes you'll see its verdict there.
+  and scans keep running. Press `[b]` again for a menu — **[v]** view the live view,
+  **[c]** cancel one disk, **[a]** cancel all, **[n]** start a new burn-in — or run
+  `b2ctl burnin --status`; when a disk finishes you'll see its verdict there.
+- **Cancelling:** to stop a disk mid-burn-in (e.g. a dying disk holding up the
+  batch), use `[b]` → `[c]`/`[a]`, or `b2ctl burnin --cancel <bay|dev …>` /
+  `b2ctl burnin --cancel-all`. It aborts the self-test and stops the read-only
+  scan — nothing is written, and the disk can be re-burned later.
 - While a self-test runs, `b2ctl status` shows `TEST xx%` in that disk's STATUS
   column (and the details block adds a `self-test running: …%` line).
 - **PASS** — clean. **WARN** — usable but aged (power-on hours > 40000, grown

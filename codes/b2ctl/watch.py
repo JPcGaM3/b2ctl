@@ -1070,10 +1070,30 @@ def _cmd_burnin(tbw) -> None:
     can be left (Ctrl-C) with everything still running. Re-attaches an in-flight
     burn-in first if one exists."""
     from . import burnin
-    if burnin.load_state():
-        if _confirm(f"{len(burnin.load_state())} burn-in(s) in progress — view live status?"):
-            burnin.status_view()
+    state = burnin.load_state()
+    if state:
+        print(f"  {len(state)} burn-in(s) in progress.")
+        print("    [v] view live status   [c] cancel one   [a] cancel all   [n] start new")
+        ch = _ask("  action> ").lower()
+        if ch == "v":
+            burnin.status_view(); return
+        if ch == "a":
+            if _confirm(f"cancel ALL {len(state)} burn-in(s)?"):
+                burnin.cancel_all(dry_run=_DRY_RUN)
             return
+        if ch == "c":
+            for i, r in enumerate(state, 1):
+                print(f"    [{i}] bay {r.get('bay') or '?'} {r['dev']} ({r.get('serial') or '?'})")
+            try:
+                r = state[_one_based(_ask("  cancel which #> "))]
+            except (ValueError, IndexError):
+                print(f"{Y}  cancelled{N}"); return
+            if _confirm(f"cancel burn-in on bay {r.get('bay') or '?'} {r['dev']}?"):
+                burnin.cancel([r.get("serial") or r["dev"]], dry_run=_DRY_RUN)
+            return
+        if ch != "n":
+            return                          # unknown key = do nothing (safe)
+        # [n] falls through to start a new burn-in
     avail = _avail_for_aux(tbw)
     if not avail:
         print(f"{Y}  no free disks to burn in{N}"); return

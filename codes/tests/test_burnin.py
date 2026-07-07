@@ -151,9 +151,19 @@ class TestAssess(unittest.TestCase):
             verdict, _ = burnin.assess(d)
         self.assertEqual(verdict, "FAIL")
 
-    def test_warn_on_high_poh(self):
+    def test_poh_no_warn_by_default(self):
+        # POH warning is opt-in now (health.<type>.poh_warn defaults to None)
         d = _disk(health="PASSED", uncorr=0, realloc=0, poh=45000)
         with self._patch_status():
+            verdict, reasons = burnin.assess(d)
+        self.assertEqual(verdict, "PASS")
+        self.assertFalse(any("power-on" in r.lower() for r in reasons))
+
+    def test_poh_warns_when_configured(self):
+        d = _disk(health="PASSED", uncorr=0, realloc=0, poh=45000)   # is_ssd=True
+        cfg = {"ssd": {"poh_warn": 40000}, "hdd": {"poh_warn": None}}
+        with self._patch_status(), \
+             patch("b2ctl.config.health_config", return_value=cfg):
             verdict, reasons = burnin.assess(d)
         self.assertEqual(verdict, "WARN")
         self.assertTrue(any("power-on" in r.lower() for r in reasons))
@@ -435,6 +445,103 @@ class TestStatusView(unittest.TestCase):
             rc = burnin.status_view()
         self.assertEqual(rc, 0)
         view.assert_called_once_with(recs)
+
+
+class TestCancel(unittest.TestCase):
+    """cancel: abort self-test (smartctl -X) + kill badblocks + drop from state."""
+
+    def _rec(self, **kw):
+        r = {"serial": "SER1", "dev": "/dev/sdb", "bay": "1:0", "dtype": "",
+             "kind": "long", "do_scan": True, "scan_pid": 4321,
+             "scan_log": "x.log", "started": 1.0}
+        r.update(kw)
+        return r
+
+    def test_cancel_aborts_selftest_kills_scan_and_drops_state(self):
+        seen = {}
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch("b2ctl.safety.LOG_DIR", tmp), \
+             patch("b2ctl.config.tool", side_effect=lambda n: n), \
+             patch.object(burnin, "run_check",
+                          side_effect=lambda c, **k: (seen.setdefault("cmd", c), (True, ""))[1]), \
+             patch.object(burnin, "_pid_alive", return_value=True), \
+             patch.object(burnin, "_is_our_badblocks", return_value=True), \
+             patch.object(burnin.os, "kill") as mock_kill:
+            burnin.save_state([self._rec()])
+            rc = burnin.cancel(["1:0"])
+            remaining = burnin.load_state()
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen["cmd"], ["smartctl", "-X", "/dev/sdb"])
+        mock_kill.assert_called_once_with(4321, burnin.signal.SIGTERM)
+        self.assertEqual(remaining, [])
+
+    def test_cancel_abort_argv_includes_megaraid_dtype(self):
+        seen = {}
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch("b2ctl.safety.LOG_DIR", tmp), \
+             patch("b2ctl.config.tool", side_effect=lambda n: n), \
+             patch.object(burnin, "run_check",
+                          side_effect=lambda c, **k: (seen.setdefault("cmd", c), (True, ""))[1]), \
+             patch.object(burnin, "_pid_alive", return_value=False):
+            burnin.save_state([self._rec(dtype="megaraid,7", scan_pid=None, do_scan=False)])
+            burnin.cancel(["SER1"])
+        self.assertEqual(seen["cmd"],
+                         ["smartctl", "-X", "-d", "megaraid,7", "/dev/sdb"])
+
+    def test_cancel_dry_run_no_side_effects(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch("b2ctl.safety.LOG_DIR", tmp), \
+             patch("b2ctl.config.tool", side_effect=lambda n: n), \
+             patch.object(burnin, "run_check") as mock_rc, \
+             patch.object(burnin, "_pid_alive", return_value=True), \
+             patch.object(burnin, "_is_our_badblocks", return_value=True), \
+             patch.object(burnin.os, "kill") as mock_kill:
+            burnin.save_state([self._rec()])
+            rc = burnin.cancel(["1:0"], dry_run=True)
+            remaining = burnin.load_state()
+        self.assertEqual(rc, 0)
+        mock_rc.assert_not_called()            # no smartctl -X in dry-run
+        mock_kill.assert_not_called()          # no SIGTERM
+        self.assertEqual(len(remaining), 1)    # state untouched
+
+    def test_cancel_no_match_returns_1_state_intact(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch("b2ctl.safety.LOG_DIR", tmp), \
+             patch.object(burnin, "run_check") as mock_rc:
+            burnin.save_state([self._rec()])
+            rc = burnin.cancel(["9:9"])
+            remaining = burnin.load_state()
+        self.assertEqual(rc, 1)
+        mock_rc.assert_not_called()
+        self.assertEqual(len(remaining), 1)
+
+    def test_cancel_all_clears_state(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch("b2ctl.safety.LOG_DIR", tmp), \
+             patch("b2ctl.config.tool", side_effect=lambda n: n), \
+             patch.object(burnin, "run_check", return_value=(True, "")), \
+             patch.object(burnin, "_pid_alive", return_value=False):
+            burnin.save_state([self._rec(serial="A", dev="/dev/sda", scan_pid=None),
+                               self._rec(serial="B", dev="/dev/sdb", scan_pid=None)])
+            rc = burnin.cancel_all()
+            remaining = burnin.load_state()
+        self.assertEqual(rc, 0)
+        self.assertEqual(remaining, [])
+
+    def test_cancel_all_no_state_returns_1(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch("b2ctl.safety.LOG_DIR", tmp):
+            self.assertEqual(burnin.cancel_all(), 1)
+
+    def test_is_our_badblocks_guards_pid_reuse(self):
+        from unittest.mock import mock_open
+        ours = b"badblocks\x00-sv\x00-b\x004096\x00/dev/sdb\x00"
+        with patch("builtins.open", mock_open(read_data=ours)):
+            self.assertTrue(burnin._is_our_badblocks(4321, "/dev/sdb"))
+        with patch("builtins.open", mock_open(read_data=b"sleep\x00100\x00")):
+            self.assertFalse(burnin._is_our_badblocks(4321, "/dev/sdb"))
+        with patch("builtins.open", side_effect=OSError):
+            self.assertFalse(burnin._is_our_badblocks(4321, "/dev/sdb"))
 
 
 if __name__ == "__main__":

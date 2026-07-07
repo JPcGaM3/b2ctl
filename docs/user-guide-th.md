@@ -226,6 +226,19 @@ b2ctl&gt;
 4. **กะพริบ LED** — ระบบจะบอกว่า "blinking LED" เพื่อให้คุณรู้ว่าต้องดึงช่องไหน
 5. **ดึงดิสก์ออก** — ตอนนี้ปลอดภัยแล้ว
 
+### 📌 สถานการณ์ 6: ดิสก์ SAS ขึ้น `NOREAD` / `status` ช้า (เครื่อง RAID)
+
+บนเครื่อง PERC การอ่าน SMART ของทุกดิสก์วิ่งผ่าน controller (`smartctl -d megaraid`).
+ถ้าอ่านหลายลูกพร้อมกัน controller ตันได้ ดิสก์เก่า/ช้าเลยอ่านไม่ทัน timeout → ขึ้น
+**`NOREAD` / "SMART unreadable"** และ scan ช้า. ปรับได้ที่ `/etc/b2ctl/config.json`:
+
+```json
+{ "smart": { "timeout": 25, "megaraid_workers": 2 } }
+```
+
+`timeout` = วินาทีต่อดิสก์ (เพิ่มถ้าดิสก์ช้า); `megaraid_workers` = อ่านพร้อมกันกี่ลูกผ่าน
+controller (ลดถ้าตัน). ถ้าปรับแล้วยัง `NOREAD` อยู่ = ดิสก์นั้นน่าจะกำลังจะพังจริง — เช็คช่องนั้น
+
 ---
 
 ## 5. การอ่านตาราง
@@ -243,7 +256,7 @@ b2ctl&gt;
 | **WEAR(used)** | ดิสก์สึกหรอไปกี่ % (ยิ่งน้อยยิ่งดี) | `1%`|
 | **END(left)** | อายุการใช้งานที่เหลือ (คำนวณจาก TBW) | `98.4%` |
 | **WRITTEN** | เขียนข้อมูลไปแล้วเท่าไร / ต่อ TBW ที่รับรอง | `9.87TB/600TBW` |
-| **BAD** | จำนวน bad sectors | `0` = ปกติ, `มากกว่า 0` = อันตราย! |
+| **BAD** | จำนวน bad sectors / grown defects | `0` = ปกติ; **SSD/NVMe** มากกว่า 0 = CRITICAL; **HDD** มีนิดหน่อยยังใช้ได้ (ดู LEVEL) |
 | **HEALTH** | ผลตรวจ SMART | `PASSED`, `FAILED` |
 | **POOL** | อยู่ใน pool / vdev ไหน | `tank/raidz1-0`, `rpool/mirror-0` |
 | **STATUS** | สถานะ vdev ของ ZFS — สีเขียว ONLINE/AVAIL, สีเหลือง DEGRADED/INUSE→bay, สีแดง FAULTED/REMOVED | `ONLINE`, `AVAIL`, `INUSE→1:4` |
@@ -255,8 +268,13 @@ b2ctl&gt;
 |----|------|----------|
 | 🟢 | **NORMAL** | ดิสก์แข็งแรง อยู่ในพูลเรียบร้อย — ไม่ต้องทำอะไร |
 | 🔵 | **CONFIG** | ดิสก์แข็งแรงแต่ **ยังไม่ได้อยู่ในพูลไหนเลย** — ต้องตั้งค่า (เพิ่มเป็น spare หรือสร้าง pool) |
-| 🟡 | **WARNING** | เริ่มมีปัญหา — อายุเหลือน้อย หรือ vdev สถานะ DEGRADED — ควรเตรียมเปลี่ยน |
-| 🔴 | **CRITICAL** | อันตราย! — SMART ไม่ผ่าน, มี bad sectors, หรืออายุเหลือน้อยมาก — ต้องดำเนินการทันที |
+| 🟡 | **WARNING** | เริ่มมีปัญหา — อายุ/wear เหลือน้อย, vdev DEGRADED, หรือ **HDD** มี defect ปานกลาง (`>50` grown defects หรือมี pending sector) — เตรียมเปลี่ยน |
+| 🔴 | **CRITICAL** | อันตราย! — SMART ไม่ผ่าน, อายุเหลือน้อยมาก, vdev FAULTED, GHOST, **SSD/NVMe** มี bad sector แม้แต่ตัวเดียว, หรือ **HDD** defect หนัก (`>200`) / uncorrectable — ทำทันที |
+
+**เกณฑ์ bad-sector แยกตามชนิดดิสก์ + ปรับได้ (v0.13.0):** SSD/NVMe เข้ม (bad sector >0 =
+CRITICAL); HDD ทน grown defect ที่ remap นิ่งแล้วได้ (`>50 → WARNING`, `>200 → CRITICAL`).
+ปรับ band ต่อชนิดใน `/etc/b2ctl/config.json` ใต้ `health` (ดู DevOps guide) — ตั้งเป็น
+`"N/A"` = ปิดการเช็คนั้น
 
 ---
 
@@ -960,7 +978,11 @@ b2ctl> b
 ```
 
 - **ออก & กลับเข้ามาดูใหม่:** กด **Ctrl-C** กลับไปที่ prompt — test/scan ยังรันต่อ กด `[b]`
-  อีกครั้ง (หรือ `b2ctl burnin --status`) เพื่อกลับเข้าหน้าจอสด พอลูกไหนเสร็จจะเห็นผลตรงนั้น
+  อีกครั้งจะมีเมนู — **[v]** ดูหน้าจอสด · **[c]** ยกเลิกทีละลูก · **[a]** ยกเลิกทั้งหมด · **[n]** เริ่ม
+  burn-in ใหม่ (หรือ `b2ctl burnin --status`) พอลูกไหนเสร็จจะเห็นผลตรงนั้น
+- **ยกเลิก:** หยุด burn-in กลางคัน (เช่นดิสก์กำลังตายค้างทั้ง batch) — กด `[b]` → `[c]`/`[a]`
+  หรือ `b2ctl burnin --cancel <bay|dev …>` / `b2ctl burnin --cancel-all`. มัน abort self-test
+  + หยุด scan (read-only ไม่เขียนอะไร) — burn ใหม่ทีหลังได้
 - ระหว่าง self-test `b2ctl status` จะโชว์ `TEST xx%` ในคอลัมน์ STATUS ของดิสก์ลูกนั้น
 - **PASS** สะอาด · **WARN** ใช้ได้แต่เก่า (POH > 40000 ชม., grown defect, หรือ scan เจอ bad
   block) → จัด priority ต่ำ · **FAIL** มี uncorrected error หรือ self-test ไม่ผ่าน → อย่าเข้า pool

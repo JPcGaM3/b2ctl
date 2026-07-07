@@ -200,6 +200,10 @@ def _log_rm(args) -> int:
 
 def _burnin(args) -> int:
     from . import burnin
+    if args.cancel_all:
+        return burnin.cancel_all(dry_run=watch._DRY_RUN)
+    if args.cancel:
+        return burnin.cancel(args.cancel, dry_run=watch._DRY_RUN)
     if args.status:
         return burnin.status_view()
     if not args.target:
@@ -621,6 +625,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="short self-test instead of long")
     bi.add_argument("--status", action="store_true",
                     help="show live status of in-flight burn-ins (re-attach)")
+    bi.add_argument("--cancel", nargs="+", metavar="TARGET",
+                    help="cancel in-flight burn-in on the given bay/serial/dev")
+    bi.add_argument("--cancel-all", action="store_true",
+                    help="cancel ALL in-flight burn-ins")
     bi.set_defaults(func=_burnin)
 
     v = sub.add_parser("version", help="print version")

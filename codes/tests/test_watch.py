@@ -1204,14 +1204,41 @@ class TestWatchBurnin(unittest.TestCase):
     @patch("b2ctl.burnin.status_view")
     @patch("b2ctl.burnin.run_multi")
     @patch("b2ctl.burnin.load_state",
-           return_value=[{"serial": "X", "dev": "/dev/sdb"}])
-    @patch("b2ctl.watch._confirm", return_value=True)
-    def test_reattaches_when_burnin_in_flight(self, _confirm, _load,
-                                              mock_run_multi, mock_status):
+           return_value=[{"serial": "X", "dev": "/dev/sdb", "bay": "1:0"}])
+    @patch("b2ctl.watch._ask", return_value="v")
+    def test_reattach_view_when_burnin_in_flight(self, _ask, _load,
+                                                 mock_run_multi, mock_status):
         from b2ctl import watch
         watch._cmd_burnin({})
-        mock_status.assert_called_once()            # viewed the in-flight run
+        mock_status.assert_called_once()            # [v] viewed the in-flight run
         mock_run_multi.assert_not_called()          # did not start a new one
+
+    @patch("b2ctl.burnin.cancel", return_value=0)
+    @patch("b2ctl.burnin.run_multi")
+    @patch("b2ctl.burnin.load_state",
+           return_value=[{"serial": "X", "dev": "/dev/sdb", "bay": "1:0"}])
+    @patch("b2ctl.watch._confirm", return_value=True)
+    @patch("b2ctl.watch._ask", side_effect=["c", "1"])
+    def test_reattach_cancel_one(self, _ask, _confirm, _load,
+                                 mock_run_multi, mock_cancel):
+        from b2ctl import watch
+        watch._cmd_burnin({})
+        mock_cancel.assert_called_once()
+        self.assertEqual(mock_cancel.call_args[0][0], ["X"])   # cancel by serial
+        mock_run_multi.assert_not_called()
+
+    @patch("b2ctl.burnin.cancel_all", return_value=0)
+    @patch("b2ctl.burnin.run_multi")
+    @patch("b2ctl.burnin.load_state",
+           return_value=[{"serial": "X", "dev": "/dev/sdb", "bay": "1:0"}])
+    @patch("b2ctl.watch._confirm", return_value=True)
+    @patch("b2ctl.watch._ask", return_value="a")
+    def test_reattach_cancel_all(self, _ask, _confirm, _load,
+                                 mock_run_multi, mock_cancel_all):
+        from b2ctl import watch
+        watch._cmd_burnin({})
+        mock_cancel_all.assert_called_once()
+        mock_run_multi.assert_not_called()
 
 
 class TestPickIndices(unittest.TestCase):

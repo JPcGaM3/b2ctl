@@ -38,6 +38,34 @@ _DEFAULTS: dict = {
         "mode": "auto",    # "auto" | "it" | "raid"
         "index": "all",    # "all" or integer string e.g. "0"
     },
+    "smart": {
+        "timeout": 10,          # per-probe smartctl timeout (seconds)
+        "megaraid_workers": 4,  # concurrent megaraid SMART probes; one PERC
+                                # serializes passthrough, so 16-way saturates it
+                                # and slow disks time out (NOREAD). Raise timeout /
+                                # lower this on a box with slow or dying disks.
+    },
+    # Health-grading thresholds, split by disk type. A threshold of null (or "N/A"
+    # / any non-integer) DISABLES that check. Defect signals (realloc/pending/
+    # uncorr) grade with `>`; endurance/wear grade with `<` (lower % = worse).
+    "health": {
+        "ssd": {                       # SSD + NVMe: any bad sector is a failure
+            "realloc_warn": None, "realloc_crit": 0,
+            "pending_warn": None, "pending_crit": 0,
+            "uncorr_warn": None,  "uncorr_crit": 0,
+            "endurance_warn": 30, "endurance_crit": 20,
+            "wear_warn": 30,      "wear_crit": 20,
+            "poh_warn": None,              # burn-in POH warning (off by default)
+        },
+        "hdd": {                       # HDD: tolerate stable, remapped defects
+            "realloc_warn": 50,   "realloc_crit": 200,
+            "pending_warn": 0,    "pending_crit": None,
+            "uncorr_warn": None,  "uncorr_crit": 0,
+            "endurance_warn": None, "endurance_crit": None,
+            "wear_warn": None,    "wear_crit": None,
+            "poh_warn": None,
+        },
+    },
     "bay_map_path": "",
     "ssd_spec_path": "",
 }
@@ -72,6 +100,24 @@ def load() -> dict:
                 cfg["controller"]["mode"] = ctrl["mode"]
             if ctrl.get("index") is not None:
                 cfg["controller"]["index"] = str(ctrl["index"])
+        sm = user.get("smart")
+        if isinstance(sm, dict):
+            for k in ("timeout", "megaraid_workers"):
+                v = sm.get(k)
+                # int-guarded: ignore a non-numeric / non-positive hand-edit and
+                # keep the default for THAT key (module's malformed->defaults rule).
+                if isinstance(v, int) and not isinstance(v, bool) and v > 0:
+                    cfg["smart"][k] = v
+        hh = user.get("health")
+        if isinstance(hh, dict):
+            for typ in ("ssd", "hdd"):
+                sub = hh.get(typ)
+                if isinstance(sub, dict):
+                    for k, v in sub.items():
+                        if k in cfg["health"][typ]:
+                            # null / "N/A" / any non-int -> None (check disabled);
+                            # a real int overrides. Omitted keys keep the default.
+                            cfg["health"][typ][k] = _norm_threshold(v)
         if isinstance(user.get("bay_map_path"), str) and user["bay_map_path"]:
             cfg["bay_map_path"] = user["bay_map_path"]
         if isinstance(user.get("ssd_spec_path"), str) and user["ssd_spec_path"]:
@@ -84,6 +130,46 @@ def _get() -> dict:
     if _cache is None:
         _cache = load()
     return _cache
+
+
+def smart_config() -> dict:
+    """SMART scan tuning: {'timeout': int seconds, 'megaraid_workers': int}.
+
+    Operator-tunable via /etc/b2ctl/config.json to fit a controller's passthrough
+    throughput (see _DEFAULTS['smart']). Falls back to the defaults if the section
+    is absent, so a partial cache never KeyErrors the scan."""
+    sm = dict(_DEFAULTS["smart"])
+    sm.update(_get().get("smart") or {})
+    return sm
+
+
+def _norm_threshold(v):
+    """A health threshold is a positive/zero int, or None = 'check disabled'.
+    null / "N/A" / bool / any non-int all normalise to None so a hand-edit never
+    grades wrong — it just turns that one check off."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v
+    return None
+
+
+def health_config() -> dict:
+    """Type-aware health thresholds: {'ssd': {...}, 'hdd': {...}}.
+
+    Each threshold is an int or None (None = that check is not applied). Falls back
+    per key to _DEFAULTS['health'] so a partial/absent cache never KeyErrors."""
+    cur = _get().get("health") or {}
+    out = {}
+    for typ in ("ssd", "hdd"):
+        merged = dict(_DEFAULTS["health"][typ])
+        sub = cur.get(typ)
+        if isinstance(sub, dict):
+            for k in merged:
+                if k in sub:
+                    merged[k] = sub[k]
+        out[typ] = merged
+    return out
 
 
 def tool(name: str) -> str:

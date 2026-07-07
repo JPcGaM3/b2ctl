@@ -233,5 +233,69 @@ class TestDryRunSingleSource(unittest.TestCase):
         self.assertFalse(raid_actions._dry())
 
 
+class TestTypeAwareThresholds:
+    """assess() bad-sector grading splits SSD/NVMe (strict) vs HDD (banded),
+    driven by the config `health` section (defaults)."""
+
+    def test_ssd_any_realloc_is_critical(self):
+        d = _disk(realloc=1, is_ssd=True)
+        assess(d)
+        assert d.level == "CRITICAL"
+
+    def test_hdd_few_defects_is_normal(self):
+        d = _disk(realloc=10, is_ssd=False)         # <= 50 warn threshold
+        assess(d)
+        assert d.level == "NORMAL"
+
+    def test_hdd_defects_over_warn_is_warning(self):
+        d = _disk(realloc=60, is_ssd=False)
+        assess(d)
+        assert d.level == "WARNING"
+        assert any("reallocated" in r or "defects" in r for r in d.reasons)
+
+    def test_hdd_defects_over_crit_is_critical(self):
+        d = _disk(realloc=300, is_ssd=False)
+        assess(d)
+        assert d.level == "CRITICAL"
+
+    def test_hdd_pending_is_warning_not_critical(self):
+        d = _disk(pending=1, is_ssd=False)
+        assess(d)
+        assert d.level == "WARNING"
+
+    def test_uncorrectable_is_critical_on_hdd_too(self):
+        d = _disk(uncorr=1, is_ssd=False)
+        assess(d)
+        assert d.level == "CRITICAL"
+
+    def test_hdd_has_no_endurance_or_wear_grading(self):
+        # HDD endurance/wear thresholds default to None -> not graded at all
+        d = _disk(end_left=5.0, wear_val=5, is_ssd=False)
+        assess(d)
+        assert d.level == "NORMAL"
+
+    def test_ssd_endurance_critical_at_20(self):
+        d = _disk(end_left=15.0, is_ssd=True)       # < 20 crit
+        assess(d)
+        assert d.level == "CRITICAL"
+
+    def test_ssd_endurance_warning_between_20_and_30(self):
+        d = _disk(end_left=25.0, is_ssd=True)       # 20..30 -> WARNING
+        assess(d)
+        assert d.level == "WARNING"
+
+    def test_config_null_threshold_disables_band(self):
+        # health.hdd.realloc_crit = None -> a huge defect count grades only WARNING
+        d = _disk(realloc=300, is_ssd=False)
+        cfg = {"ssd": {}, "hdd": {"realloc_warn": 50, "realloc_crit": None,
+                                  "pending_warn": None, "pending_crit": None,
+                                  "uncorr_warn": None, "uncorr_crit": None,
+                                  "endurance_warn": None, "endurance_crit": None,
+                                  "wear_warn": None, "wear_crit": None}}
+        with patch("b2ctl.config.health_config", return_value=cfg):
+            assess(d)
+        assert d.level == "WARNING"
+
+
 if __name__ == "__main__":
     unittest.main()

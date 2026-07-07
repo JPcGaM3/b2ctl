@@ -300,6 +300,23 @@ timeout doubles as the poll interval. While a `_handle_new_disk` prompt is open
 (blocking `input()`), polling pauses — acceptable since the operator is at the
 console.
 
+**`[a]ssign` multi-select (v0.11.0).** `_cmd_assign` parses space-separated
+indices via the shared `watch._pick_indices(sel, n)` helper (built on
+`_one_based`): rejects `0`/negatives (F-052) and out-of-range, dedupes, order
+preserved — reused by assign / `[n]ew-pool` / `[e]xtend` / `[b]urnin`, which
+closed a pre-existing F-052 gap where `[n]ew-pool`/`[e]xtend` let `0` select the
+LAST disk (`list[-1]`) and wipe it. A single pick keeps the existing per-disk
+menu; 2+ picks open a **homogeneous** batch menu (candidates are tagged by
+category — `zfs` / `ghost` / `perc` — and mixing types is refused with a per-type
+count). PERC-UGood batch (`raid_actions.assign_perc_batch`) loops
+`hba_raid.set_jbod` / `hba_raid.add_hotspare` per drive (or one `create_vd` for
+"one volume from all"); free-disk batch (`watch._assign_free_disks_batch`) loops
+`zfs.add_spare` / `zfs.wipe`. Each looped PERC mutation gets its own
+`safety.begin_op/end_op`; every batch confirm **lists the selected devices**
+(model+serial) before the `[y/N]` (§9 device-readback); and create-VD **refuses**
+a selection spanning two controllers (a single VD is controller-local). All honor
+`--dry-run`.
+
 ---
 
 ## 6. Safety model

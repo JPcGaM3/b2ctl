@@ -327,6 +327,99 @@ def assign_perc(d, candidates: list) -> int:
     return 0
 
 
+def assign_perc_batch(picks: list, candidates: list) -> int:
+    """Batch menu for 2+ Unconfigured-Good PERC drives (from watch [a]ssign).
+
+    One action applied to every selected drive with a single confirm — the
+    multi-disk companion to assign_perc. `candidates` is accepted for signature
+    symmetry with assign_perc but unused: the picks ARE the target set.
+    """
+    if not _require_raid():
+        return 1
+    n = len(picks)
+    print(f"  {C}{n} PERC Unconfigured-Good drives selected{N}")
+    print("    [1] Blink LED on each (locate)")
+    print("    [2] Set JBOD on all  (expose for ZFS / software RAID)")
+    print("    [3] CREATE one hardware RAID volume from all")
+    print("    [4] Add all as hardware HOT SPARES")
+    print("    [s] skip / decide later")
+    choice = input("  action> ").strip().lower()
+    dr = _dry()
+
+    if choice == "1":
+        from . import locate as _loc
+        for p in picks:
+            if dr:
+                print(f"{Y}[dry-run] would blink LED at bay {p.bay} via perccli{N}")
+            else:
+                _loc.blink_disk(p)
+        return 0
+
+    if choice == "2":
+        for p in picks:
+            print(f"    {disk_label(p)}")
+        if not _confirm(f"set JBOD on these {n} drive(s) (expose to the OS for ZFS)?"):
+            print("cancelled")
+            return 1
+        ok_n = 0
+        for p in picks:
+            cs = p.ctrl_slot or p.bay
+            ctrl = _ctrl(p)
+            cmds = [hba_raid.build_cmd(hba_raid._pd(cs, ctrl), "set", "jbod")]
+            op_id = safety.begin_op("raid_jbod", p.serial, p.bay, p.dev, "", "", cmds, dry_run=dr)
+            ok, out = hba_raid.set_jbod(cs, ctrl, dry_run=dr)
+            safety.end_op(op_id, ok, out, "" if ok else out, 0 if ok else 1, dry_run=dr)
+            print((G + f"  ✔ {disk_label(p)} JBOD" if ok
+                   else R + f"  ✗ {disk_label(p)}: {out}") + N)
+            if ok:
+                ok_n += 1
+        if ok_n and not dr:
+            import subprocess
+            subprocess.run(["udevadm", "settle", "--timeout=10"], check=False)
+            print(f"{G}  ✔ {ok_n}/{n} set to JBOD — they should now appear as /dev/sdX.\n"
+                  f"    Press [r]efresh, then [n]ew-pool or [a]ssign to add them to a ZFS pool.{N}")
+        print(f"  {ok_n} ok / {n - ok_n} failed")
+        return 0 if ok_n == n else 1
+
+    if choice == "3":
+        # A single VD lives on ONE controller: perccli /cN takes controller-local
+        # enc:slots. Refuse a selection spanning controllers or the enc:slots of the
+        # other controller would target the WRONG physical drive (data-destructive).
+        if len({_ctrl(p) for p in picks}) > 1:
+            print(f"{R}  ✗ selected drives span multiple controllers — one VD can't "
+                  f"be built across controllers. Select drives on one controller.{N}")
+            return 1
+        level = input("  raid level (raid0/raid1/raid5/raid10) [raid5]> ").strip() or "raid5"
+        return create_vd(level, [p.ctrl_slot or p.bay for p in picks], controller=_ctrl(picks[0]))
+
+    if choice == "4":
+        dg = input("  drive-group # to protect (blank = global spare)> ").strip()
+        tgt = f"DG{dg}" if dg else "global"
+        for p in picks:
+            print(f"    {disk_label(p)}")
+        if not _confirm(f"add these {n} drive(s) as hot spare(s) ({tgt})?"):
+            print("cancelled")
+            return 1
+        ok_n = 0
+        for p in picks:
+            cs = p.ctrl_slot or p.bay
+            ctrl = _ctrl(p)
+            cmds = [hba_raid.build_cmd(hba_raid._pd(cs, ctrl), "add", "hotsparedrive")
+                    + ([f"DGs={dg}"] if dg else [])]
+            op_id = safety.begin_op("raid_hotspare", p.serial, p.bay, p.dev, tgt, tgt, cmds, dry_run=dr)
+            ok, out = hba_raid.add_hotspare(cs, dg or None, ctrl, dry_run=dr)
+            safety.end_op(op_id, ok, out, "" if ok else out, 0 if ok else 1, dry_run=dr)
+            print((G + f"  ✔ {disk_label(p)} hot spare" if ok
+                   else R + f"  ✗ {disk_label(p)}: {out}") + N)
+            if ok:
+                ok_n += 1
+        print(f"  {ok_n} ok / {n - ok_n} failed")
+        return 0 if ok_n == n else 1
+
+    print("  skipped")
+    return 0
+
+
 def delete_vd(vd: int) -> int:
     """Delete a virtual disk (DESTRUCTIVE — all data lost)."""
     if not _require_raid():

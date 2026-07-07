@@ -260,7 +260,7 @@ Rescans all disks and reprints the table.
 ```
 b2ctl> a
     [1] bay 1:7 /dev/sde (Samsung SSD 870, SN S74ZNS0WXXXXXXX)
-  assign which #>
+  assign which #> (space-separated for batch)
 ```
 
 The list gathers **three** kinds of unassigned disk:
@@ -272,6 +272,25 @@ The list gathers **three** kinds of unassigned disk:
 - a **PERC Unconfigured-Good** disk (RAID-mode boxes only) → `[1] bay 32:4
   (Samsung …, SN …) (PERC Unconfigured-Good)` — routes to the hardware-RAID menu
   (set JBOD for ZFS, create a volume, or add as a hot spare).
+
+**Multi-select / batch (v0.11.0).** Pick **several** disks at once,
+space-separated — the same way as `[n]ew-pool` and `[b]urnin`:
+
+```
+  assign which #> (space-separated for batch) 3 4 5
+```
+
+- **One** pick opens the per-disk action menu below (unchanged — it keeps
+  REPLACE / ATTACH, which act on a single disk).
+- **Two or more** picks open a **batch** menu: choose one action and it applies
+  to **every** selected disk with a single confirm. The selection must be a
+  single disk **type** — mixing types (e.g. a PERC drive + a free NVMe) is
+  refused with a per-type count, so you pick one type at a time.
+  - **PERC Unconfigured-Good** → `[1]` blink all · `[2]` **set JBOD on all** (the
+    common "prep N disks for ZFS" case) · `[3]` create **one** hardware RAID
+    volume from all · `[4]` add all as hot spares.
+  - **Free (ZFS-poolable)** → `[1]` blink all · `[2]` add all to a pool as hot
+    SPARE · `[3]` WIPE all blank.
 
 Pick a normal free disk, then choose an action:
 

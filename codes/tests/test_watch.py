@@ -1214,5 +1214,107 @@ class TestWatchBurnin(unittest.TestCase):
         mock_run_multi.assert_not_called()          # did not start a new one
 
 
+class TestPickIndices(unittest.TestCase):
+    """Shared multi-select parse `_pick_indices` (F-052 guard + dedupe)."""
+
+    def test_multi_dedupe_order_preserved(self):
+        from b2ctl.watch import _pick_indices
+        self.assertEqual(_pick_indices("2 3 4", 5), [1, 2, 3])
+        self.assertEqual(_pick_indices("2 2 3", 5), [1, 2])   # dedupe, keep order
+        self.assertEqual(_pick_indices("1", 5), [0])
+        self.assertEqual(_pick_indices("", 5), [])
+
+    def test_rejects_zero_negative_nonnumeric_and_out_of_range(self):
+        from b2ctl.watch import _pick_indices
+        for bad in ("0", "-1", "x", "1 0", "1 x", "6", "1 6"):   # 6 > n=5
+            with self.assertRaises((ValueError, IndexError)):
+                _pick_indices(bad, 5)
+
+    def test_zero_never_wraps_to_last(self):
+        # F-052: '0' -> index -1 must raise, never silently pick list[-1]
+        from b2ctl.watch import _pick_indices
+        with self.assertRaises(IndexError):
+            _pick_indices("0", 3)
+
+
+class TestAssignMultiSelect(unittest.TestCase):
+    """[a]ssign multi-select: 1 pick -> single per-disk menu (unchanged); 2+ picks
+    -> batch, homogeneous only. Mirrors the burnin space-separated idiom."""
+
+    @staticmethod
+    def _free(dev, sn):
+        d = Disk(dev=dev); d.serial = sn; d.bay = "b"; return d
+
+    @staticmethod
+    def _perc(sn):
+        d = Disk(dev="/dev/sda"); d.serial = sn
+        d.smart_dtype = f"megaraid,{sn}"; d.pd_state = "UGood"; return d
+
+    @patch("b2ctl.watch._assign_free_disks_batch")
+    @patch("b2ctl.watch._assign_free_disk")
+    @patch("b2ctl.raid_actions.assign_perc_batch")
+    @patch("b2ctl.watch._ask", return_value="1 2")
+    @patch("b2ctl.watch.core")
+    def test_batch_zfs_routes_to_free_batch(self, mock_core, _ask, perc_b, single, free_b):
+        import b2ctl.watch as watch
+        a = self._free("/dev/sdb", "A"); b = self._free("/dev/sdc", "B")
+        mock_core.scan.return_value = [a, b]
+        watch._cmd_assign({})
+        free_b.assert_called_once()
+        self.assertEqual(free_b.call_args[0][0], [a, b])
+        single.assert_not_called()
+        perc_b.assert_not_called()
+
+    @patch("b2ctl.watch._assign_free_disks_batch")
+    @patch("b2ctl.watch._assign_free_disk")
+    @patch("b2ctl.watch._ask", return_value="2 2")
+    @patch("b2ctl.watch.core")
+    def test_dedupe_collapses_to_single(self, mock_core, _ask, single, free_b):
+        import b2ctl.watch as watch
+        a = self._free("/dev/sdb", "A"); b = self._free("/dev/sdc", "B")
+        mock_core.scan.return_value = [a, b]
+        watch._cmd_assign({})
+        single.assert_called_once()             # 1 unique pick -> old menu
+        self.assertIs(single.call_args[0][0], b)   # index 2 -> b
+        free_b.assert_not_called()
+
+    @patch("b2ctl.watch._assign_free_disks_batch")
+    @patch("b2ctl.watch._assign_free_disk")
+    @patch("b2ctl.watch.core")
+    def test_reject_zero_and_nonnumeric(self, mock_core, single, free_b):
+        import b2ctl.watch as watch
+        a = self._free("/dev/sdb", "A")
+        mock_core.scan.return_value = [a]
+        for bad in ("0", "x", "1 0", "1 x"):
+            with patch("b2ctl.watch._ask", return_value=bad):
+                watch._cmd_assign({})
+        single.assert_not_called()
+        free_b.assert_not_called()
+
+    @patch("b2ctl.raid_actions.assign_perc_batch")
+    @patch("b2ctl.watch._assign_free_disks_batch")
+    @patch("b2ctl.watch._ask", return_value="1 2")
+    @patch("b2ctl.watch.core")
+    def test_mixed_categories_refused(self, mock_core, _ask, free_b, perc_b):
+        import b2ctl.watch as watch
+        free = self._free("/dev/sdb", "F")      # [1] zfs
+        perc = self._perc("4")                  # [2] perc  (display order: zfs, ghost, perc)
+        mock_core.scan.return_value = [free, perc]
+        watch._cmd_assign({})
+        free_b.assert_not_called()
+        perc_b.assert_not_called()
+
+    @patch("b2ctl.raid_actions.assign_perc_batch", return_value=0)
+    @patch("b2ctl.watch._ask", return_value="1 2")
+    @patch("b2ctl.watch.core")
+    def test_batch_perc_routes_to_perc_batch(self, mock_core, _ask, perc_b):
+        import b2ctl.watch as watch
+        p1 = self._perc("1"); p2 = self._perc("2")
+        mock_core.scan.return_value = [p1, p2]
+        watch._cmd_assign({})
+        perc_b.assert_called_once()
+        self.assertEqual(perc_b.call_args[0][0], [p1, p2])
+
+
 if __name__ == "__main__":
     unittest.main()

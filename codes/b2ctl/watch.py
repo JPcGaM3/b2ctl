@@ -73,6 +73,24 @@ def _one_based(sel) -> int:
     return i - 1
 
 
+def _pick_indices(sel, n: int) -> list:
+    """Parse a space-separated 1-based menu selection into deduped 0-based indices
+    (order preserved). Rejects 0/negative via `_one_based` (F-052) AND any index
+    past the list end, so a stray '0' never wraps to the LAST item in a wipe /
+    create flow. One authority for the multi-select parse shared by assign /
+    new-pool / extend / burn-in — it had been hand-copied and one copy dropped the
+    F-052 guard. Raises ValueError/IndexError so the caller's `except` rejects the
+    whole line."""
+    out = []
+    for x in sel.split():
+        i = _one_based(x)        # ValueError (non-numeric) / IndexError (<1)
+        if i >= n:
+            raise IndexError(x)
+        if i not in out:
+            out.append(i)
+    return out
+
+
 def _ask(prompt: str) -> str:
     # EOF (Ctrl-D) and Ctrl-C at any prompt return '' (a safe decline) instead
     # of crashing watch with a traceback (F-022).
@@ -261,6 +279,61 @@ def _assign_free_disk(d, tbw, all_disks=None) -> None:
         print("  skipped")
 
 
+def _assign_free_disks_batch(disks, tbw) -> None:
+    """Batch actions for 2+ free (ZFS-poolable) disks picked in [a]ssign.
+
+    Only actions that are meaningful applied to many disks at once: blink LEDs,
+    add all as hot spares to one pool, or wipe all blank. REPLACE / ATTACH /
+    ADD-single are inherently 1-to-1 and stay in the single-disk menu
+    (_assign_free_disk)."""
+    print(f"\n{G}  {len(disks)} free disks selected.{N}")
+    print("  Batch action applied to ALL of them:")
+    print("    [1] Blink LED on each (prepare for physical removal)")
+    print("    [2] Add all to a pool as hot SPARE")
+    print("    [3] WIPE all blank")
+    print("    [s] skip / decide later")
+    choice = _ask("  action> ")
+
+    if choice == "1":
+        for d in disks:
+            print(G + f"  ✔ Blinking {d.bay if locate.is_perc_pd(d) else d.dev}..." + N)
+            locate.blink_disk(d, locate.DEFAULT_SECONDS)
+        return
+    if choice == "2":
+        pool = _pick_pool()
+        if not pool:
+            print(f"{Y}  cancelled{N}"); return
+        for d in disks:
+            print(f"    {ui.disk_label(d)}")
+        if not _confirm(f"add these {len(disks)} disk(s) to '{pool}' as hot spare?"):
+            print(f"{Y}  cancelled{N}"); return
+        ok_n = 0
+        for d in disks:
+            ok, out = zfs.add_spare(pool, d.by_id or d.dev, dry_run=_DRY_RUN)
+            print((G + f"  ✔ {ui.disk_label(d)} spare" if ok
+                   else R + f"  ✗ {ui.disk_label(d)}: {out}") + N)
+            if ok:
+                ok_n += 1
+        print(f"  {ok_n} ok / {len(disks) - ok_n} failed")
+        return
+    if choice == "3":
+        print(f"{R}  WIPE erases ALL data on these {len(disks)} disks:{N}")
+        for d in disks:
+            print(f"    {d.dev} (SN {d.serial or '?'})")
+        if not _confirm(f"really wipe all {len(disks)} disks?"):
+            print(f"{Y}  cancelled{N}"); return
+        ok_n = 0
+        for d in disks:
+            ok, out = zfs.wipe(d.by_id or d.dev, dry_run=_DRY_RUN)
+            print((G + f"  ✔ {ui.disk_label(d)} wiped" if ok
+                   else R + f"  ✗ {ui.disk_label(d)}: {out}") + N)
+            if ok:
+                ok_n += 1
+        print(f"  {ok_n} ok / {len(disks) - ok_n} failed")
+        return
+    print("  skipped")
+
+
 def _wait_for_block_device(serial: str, timeout: int = 20) -> str | None:
     """Poll until a disk with this serial appears, or the deadline passes.
 
@@ -343,29 +416,62 @@ def _cmd_assign(tbw) -> None:
     # (set JBOD for ZFS, create a volume, or add as a hot spare).
     raid_avail = [d for d in disks if d.smart_dtype and d.array_type != "HW"
                   and d.pd_state.upper() in ("UGOOD", "READY", "UGUNSP")]
-    avail_all = zfs_avail + ghosts + raid_avail
-    if not avail_all:
+    # Tag each candidate with its category so a multi-select classifies picks by
+    # tag, not dataclass __eq__ (two disks with equal fields must not collide).
+    # The three lists are disjoint (is_poolable excludes smart_dtype/ghosts), so
+    # every pick lands in exactly one category. Display order is unchanged.
+    tagged = ([(d, "zfs") for d in zfs_avail]
+              + [(d, "ghost") for d in ghosts]
+              + [(d, "perc") for d in raid_avail])
+    if not tagged:
         print(f"{Y}  no unassigned disks available to assign{N}")
         return
-    for i, d in enumerate(avail_all, 1):
-        if d.health == "GHOST":
+    for i, (d, cat) in enumerate(tagged, 1):
+        if cat == "ghost":
             print(f"    [{i}] {R}[GHOST]{N} bay {d.bay or '?'} (SN {d.serial or '?'}) — needs wipe")
-        elif d in raid_avail:
+        elif cat == "perc":
             print(f"    [{i}] bay {d.bay or '?'} ({d.model}, SN {d.serial or '?'}) "
                   f"{C}(PERC Unconfigured-Good){N}")
         else:
             print(f"    [{i}] bay {d.bay or '?'} {d.dev} ({d.model}, SN {d.serial or '?'})")
-    sel = _ask("  assign which #> ")
+    sel = _ask("  assign which #> (space-separated for batch) ")
+    # Parse one or more 1-based indices (shared _pick_indices: reject <1, dedupe).
     try:
-        d = avail_all[_one_based(sel)]
+        picks = [tagged[i] for i in _pick_indices(sel, len(tagged))]
     except (ValueError, IndexError):
+        print(f"{Y}  cancelled or invalid selection{N}"); return
+    if not picks:
         print(f"{Y}  cancelled{N}"); return
-    if d in raid_avail:
-        raid_actions.assign_perc(d, raid_avail)
-    elif d.health == "GHOST":
-        _wipe_ghost(d, tbw)
+
+    if len(picks) == 1:                          # unchanged single-disk routing
+        d, cat = picks[0]
+        if cat == "perc":
+            raid_actions.assign_perc(d, raid_avail)
+        elif cat == "ghost":
+            _wipe_ghost(d, tbw)
+        else:
+            _assign_free_disk(d, tbw, all_disks=disks)
+        return
+
+    # 2+ picks → batch. A batch must be homogeneous: each category has a different
+    # action set (and the PERC path is RAID-mode-gated). Mixing → refuse with counts.
+    cats = {cat for _, cat in picks}
+    if len(cats) > 1:
+        counts = ", ".join(f"{sum(1 for _, c in picks if c == k)} {label}"
+                           for k, label in (("perc", "PERC"), ("zfs", "free"), ("ghost", "ghost"))
+                           if any(c == k for _, c in picks))
+        print(f"{Y}  mixed disk types selected ({counts}) — batch actions differ "
+              f"per type. Select one type at a time.{N}")
+        return
+    chosen = [d for d, _ in picks]
+    cat = cats.pop()
+    if cat == "perc":
+        raid_actions.assign_perc_batch(chosen, raid_avail)
+    elif cat == "ghost":
+        for g in chosen:
+            _wipe_ghost(g, tbw)
     else:
-        _assign_free_disk(d, tbw, all_disks=disks)
+        _assign_free_disks_batch(chosen, tbw)
 
 
 # --------------------------------------------------------------------------- #
@@ -664,7 +770,7 @@ def _cmd_create(tbw, raid_type=None) -> bool:
         print(f"    [{i}] {d.dev} (bay {d.bay or '?'})")
     sel = _ask("  pick disks (space-separated #)> ")
     try:
-        indices = [int(x) - 1 for x in sel.split()]
+        indices = _pick_indices(sel, len(available))
         devs = [available[i].by_id or available[i].dev for i in indices]
     except (ValueError, IndexError):
         print(f"{Y}  cancelled or invalid selection{N}")
@@ -906,7 +1012,8 @@ def _cmd_extend(tbw) -> None:
             print(f"    [{i}] {d.dev} (bay {d.bay or '?'})")
         sel = _ask("  pick disk(s) (space-separated #)> ")
         try:
-            devs = [avail[int(x) - 1].by_id or avail[int(x) - 1].dev for x in sel.split()]
+            devs = [avail[i].by_id or avail[i].dev
+                    for i in _pick_indices(sel, len(avail))]
         except (ValueError, IndexError):
             print(f"{Y}  cancelled or invalid selection{N}"); return
         if not devs:
@@ -974,12 +1081,7 @@ def _cmd_burnin(tbw) -> None:
         print(f"    [{i}] {d.dev} (bay {d.bay or '?'}) {d.model}")
     sel = _ask("  burn in which #> (space-separated) ")
     try:
-        picks = []
-        for x in sel.split():
-            i = int(x) - 1
-            if i < 0:
-                raise IndexError(x)
-            picks.append(avail[i])
+        picks = [avail[i] for i in _pick_indices(sel, len(avail))]
     except (ValueError, IndexError):
         print(f"{Y}  cancelled or invalid selection{N}"); return
     if not picks:

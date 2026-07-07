@@ -434,7 +434,8 @@ Storage summary:
     <p><b>ขั้นที่ 1</b> — <kbd>a</kbd> จะลิสต์เฉพาะดิสก์ที่ยังไม่ได้ assign ให้เลือก:</p>
 <pre><span class="p">b2ctl&gt;</span> a
     [1] bay 1:7 /dev/sde (Samsung SSD 870, SN S74ZNS0WXXXXXXX)
-  assign which #&gt; <span class="hl">1</span></pre>
+  assign which #&gt; (space-separated for batch) <span class="hl">1</span></pre>
+    <p><b>เลือกหลายตัว / batch (v0.11.0):</b> พิมพ์เลขคั่นเว้นวรรค (เหมือน <kbd>n</kbd>/<kbd>b</kbd>) — เลือก 1 ตัว = เมนูต่อดิสก์เหมือนเดิม; เลือก ≥2 ตัว = เมนู <b>batch</b> ทำ action เดียวกับทุกตัว (ยืนยันครั้งเดียว): <b>PERC</b> → blink / <b>set JBOD ทุกตัว</b> / สร้าง volume ก้อนเดียว / เพิ่มเป็น hot spare ทุกตัว; <b>ดิสก์ว่าง</b> → blink / เพิ่มเป็น SPARE ทุกตัว / WIPE ทุกตัว. ต้องเป็นดิสก์ชนิดเดียวกัน (ปนชนิด = ปฏิเสธ)</p>
     <p>รายการนี้รวมดิสก์ว่าง <b>3 แบบ</b>: <b>ดิสก์ว่างปกติ</b> (เปิดเมนู action ด้านล่าง); ดิสก์ <b class="mono">[GHOST]</b> (OS ปฏิเสธ ไม่มี <code class="inl">/dev</code>, ขึ้นว่า <code class="inl">— needs wipe</code>) → ไปทาง wipe/rescue (ดูปุ่ม <kbd>u</kbd>); และดิสก์ <b>PERC Unconfigured-Good</b> (เฉพาะเครื่อง RAID mode) → ไปเมนู hardware RAID (set JBOD / สร้าง volume / เพิ่มเป็น spare)</p>
     <p><b>ขั้นที่ 2</b> — เลือกดิสก์ว่างปกติ แล้วเด้งเมนูเดียวกับตอนเสียบดิสก์ใหม่ (NEW DISK DETECTED):</p>
 <pre>  Disk /dev/disk/by-id/wwn-0x5002538... is free.

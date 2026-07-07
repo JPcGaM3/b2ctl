@@ -1,11 +1,13 @@
-"""b2ctl.common — shared primitives for the IT-mode (HBA) build.
+"""b2ctl.common — shared primitives for both backends.
 
 Colours, external-command execution, the Disk model, and the health-level
 assessment. No other b2ctl module depends on anything above this one.
 
-This build targets a crossflashed PERC H710 (LSI SAS9207-8i / SAS2308) in
-IT/HBA mode: disks are raw, so there is no storcli/perccli or megaraid
-passthrough. SMART is read directly and LEDs are driven by sas2ircu.
+Two backends share this model: IT/HBA (crossflashed PERC → LSI SAS2308, raw
+disks, SMART direct, LEDs via sas2ircu) and RAID (Dell PERC via perccli, member
+SMART via `smartctl -d megaraid`). The Disk model carries both ZFS membership
+(pool/vdev) and hardware-RAID fields (array_type/array_name/smart_dtype/did/
+pd_state); a HW member is treated as 'assigned' and graded by its PERC PD state.
 """
 
 from __future__ import annotations
@@ -27,6 +29,21 @@ LEVEL_COLOR = {"CRITICAL": R, "WARNING": Y, "CONFIG": C, "NORMAL": G}
 END_WARN = 30
 END_CRIT = 10
 
+# ---- dry-run flag (single owner at the bottom layer) ---------------------- #
+# The mode used to live in watch.py, forcing action modules (raid_actions,
+# burnin) to `import watch` — the interactive UI — just to read a flag (F-098).
+# It lives here now; cli/watch set it, everyone reads via is_dry_run().
+DRY_RUN = False
+
+
+def set_dry_run(value: bool) -> None:
+    global DRY_RUN
+    DRY_RUN = bool(value)
+
+
+def is_dry_run() -> bool:
+    return DRY_RUN
+
 
 def die(msg: str) -> None:
     print(f"{R}[-] {msg}{N}", file=sys.stderr)
@@ -38,23 +55,33 @@ def need_root() -> None:
         die("run as root (smartctl / sas2ircu / zpool need it): sudo b2ctl ...")
 
 
-def run(args, timeout: int = 30) -> str:
-    """Run a command (list form, no shell) and return stdout ('' on failure)."""
+def run(args, timeout: int = 30, *, none_on_timeout: bool = False):
+    """Run a command (list form, no shell) and return stdout ('' on failure).
+
+    With none_on_timeout=True the caller opts in to a sentinel: a
+    subprocess.TimeoutExpired returns None (distinguishable from '' for a
+    nonzero exit / other error). Callers that do out.splitlines() unguarded
+    (e.g. zfs.list_pools) MUST NOT set this — the default keeps the str contract
+    (F-049)."""
     try:
         r = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                            text=True, timeout=timeout)
         return r.stdout
+    except subprocess.TimeoutExpired:
+        return None if none_on_timeout else ""
     except Exception:
         return ""
 
 
-def run_check(args, timeout: int = 120, *, op_id=None, dry_run: bool = False):
+def run_check(args, timeout: int | None = 120, *, op_id=None, dry_run: bool = False):
     """Run a state-changing command; return (ok, combined_output)."""
     # dry-run: suppress write cmds, pass read cmds through
     if dry_run:
         try:
             from . import safety as _safety
-            is_write = bool(args) and args[0] in _safety.WRITE_CMDS
+            # Match the basename so a config-resolved absolute tool path
+            # (/usr/sbin/perccli64) is gated exactly like the bare name.
+            is_write = bool(args) and os.path.basename(str(args[0])) in _safety.WRITE_CMDS
         except ImportError:
             is_write = False
         if is_write:
@@ -66,6 +93,25 @@ def run_check(args, timeout: int = 120, *, op_id=None, dry_run: bool = False):
         return r.returncode == 0, (r.stdout + r.stderr).strip()
     except Exception as exc:
         return False, str(exc)
+
+
+# ---- interactive prompts (shared; never raise on EOF / Ctrl-C) ------------ #
+def ask(prompt: str) -> str:
+    """Prompt for a line of input; return '' on EOF (Ctrl-D) or Ctrl-C."""
+    try:
+        return input(prompt).strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return ""
+
+
+def confirm(msg: str) -> bool:
+    """Yes/No confirm; accepts 'y'/'yes' (case-insensitive). Default No.
+
+    Returns False on EOF/Ctrl-C so an interrupted destructive prompt is a
+    safe decline, never a traceback.
+    """
+    return ask(f"{msg} [y/N] ").lower() in ("y", "yes")
 
 
 # --------------------------------------------------------------------------- #
@@ -99,14 +145,46 @@ class Disk:
     level: str = "NORMAL"
     reasons: list = field(default_factory=list)
     spare_replacing: str | None = None
+    # RAID-mode (PERC) fields — empty/None on IT-mode so existing behaviour is unchanged
+    array_type: str = ""           # "HW" (PERC VD member) | "SW" (derived from pool) | ""
+    array_name: str = ""           # HW only, e.g. "vd0/raid1"
+    smart_dtype: str = ""          # smartctl -d arg, e.g. "megaraid,7"
+    did: int | None = None         # megaraid device id
+    pd_state: str = ""             # perccli PD state: Onln/Rbld/JBOD/UGood/Failed
+    ctrl_slot: str = ""            # raw controller enc:slot for perccli actions,
+                                   # kept separate from the (possibly remapped) bay label
+    ctrl: int | None = None        # perccli controller index this PD lives on;
+                                   # None -> default (0). Actions target /c<ctrl> (F-085)
+    # Burn-in self-test progress (transient). Set by smart.read() from the SAME
+    # `smartctl -a` output it already fetches — no extra subprocess on the scan path.
+    selftest_running: bool = False
+    selftest_pct: int | None = None    # percent COMPLETE (0..100) of the running test
+    selftest_eta: str = ""             # formatted time remaining, e.g. "~1h10m" or ""
 
     @property
     def in_pool(self) -> bool:
         return self.pool is not None
 
     @property
+    def is_poolable(self) -> bool:
+        """True if this disk may be handed to a ZFS mutation (wipe/add/replace).
+
+        The single authority for the 'free, poolable disk' invariant that was
+        copy-pasted across watch's assign/create/aux/offload filters (F-103). A
+        HIDDEN PERC member shares the VD's /dev/sda (smart_dtype set) and MUST
+        never reach `sgdisk --zap-all` — that would destroy the OS's hardware VD.
+        Ghosts have dev == '-'.
+        """
+        return (not self.in_pool and self.dev != "-"
+                and not self.smart_dtype and self.health != "GHOST")
+
+    @property
     def is_spare(self) -> bool:
-        return self.vdev is not None and "spare" in self.vdev
+        # Only the pool's spares SECTION (vdev == "spares"), never a transient
+        # spare-N/replacing-N sub-vdev — the FAULTED original leaf nested under
+        # spare-1 during activation must stay a regular member so it renders red
+        # and remains a [r]eplace/[s]wap candidate (F-074).
+        return self.vdev == "spares"
 
 
 # --------------------------------------------------------------------------- #
@@ -130,6 +208,26 @@ def assess(d: Disk) -> None:
     if d.vdev_state and d.vdev_state.upper() in _BAD_VDEV:
         sev = "WARNING" if d.vdev_state.upper() == "DEGRADED" else "CRITICAL"
         bump(sev, f"vdev state={d.vdev_state}")
+    elif d.array_type == "HW":
+        # Hardware-RAID member: the controller owns it, so it's "assigned".
+        # Level follows the PERC physical-drive state, not pool membership.
+        st = (d.pd_state or "").upper()
+        if st and st not in ("ONLN", "ONLINE", "OPTL", "OPTIMAL"):
+            sev = "WARNING" if st in ("RBLD", "REBUILD") else "CRITICAL"
+            bump(sev, f"PD state={d.pd_state}")
+    elif d.pd_state and d.smart_dtype:
+        # A HIDDEN PERC physical drive (read via megaraid passthrough, shares the
+        # VD's /dev/sdX): UGood/Failed/etc. — available, not a ghost. An EXPOSED
+        # JBOD drive has its own block device (smart_dtype == "") and falls
+        # through to the normal "unassigned" path below, so ZFS can pool it.
+        st = d.pd_state.upper()
+        if st in ("UGOOD", "READY", "UGUNSP"):
+            bump("CONFIG", "available (Unconfigured Good) — set JBOD for ZFS, "
+                           "or add to a RAID volume (raid-create)")
+        elif st in ("OFFLN", "FAILED", "UBAD", "MISSING"):
+            bump("CRITICAL", f"PD state={d.pd_state}")
+        else:
+            bump("CONFIG", f"PD state={d.pd_state}")
     elif not d.in_pool and not d.is_spare:
         bump("CONFIG", "unassigned (not in any pool — add to a pool or set as spare)")
 
@@ -137,8 +235,11 @@ def assess(d: Disk) -> None:
     if not d.readable:
         bump("CRITICAL", "SMART unreadable")
     else:
-        if d.health == "FAILED":
-            bump("CRITICAL", "SMART health=FAILED")
+        # Any readable health that is neither PASSED nor UNKNOWN (unparsed) is a
+        # drive-declared failure/prediction — grade CRITICAL. Covers SAS
+        # 'FAILURE PREDICTION THRESHOLD EXCEEDED' and future parse variants.
+        if d.health not in ("PASSED", "UNKNOWN"):
+            bump("CRITICAL", f"SMART health={d.health}")
         if d.realloc > 0:
             bump("CRITICAL", f"reallocated/defects={d.realloc}")
         if d.pending > 0:

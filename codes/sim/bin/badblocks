@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+"""Fake `badblocks -sv -b 4096 /dev/sdX` — read-only surface-scan progress.
+
+Emits incremental 'NN.NN% done ... (bad/read/corrupt errors)' to stderr like the
+real tool, spread over B2CTL_SIM_SCAN_SECS (default 15) so the burn-in live view's
+SCAN bar advances. A disk flagged `dirty` in sim state reports bad blocks and exits
+non-zero, exercising the WARN/verdict path. Write-mode (-w) stays refused.
+"""
+import os
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _simstate as S  # noqa: E402
+
+
+def main() -> int:
+    argv = sys.argv[1:]
+    dev = next((a for a in argv if a.startswith("/dev/")), "/dev/sdX")
+    # Refuse the destructive write-test mode outright (b2ctl never uses it).
+    if "-w" in argv:
+        print("badblocks: write-mode disabled in sim", file=sys.stderr)
+        return 1
+    d = S.disk_by_name(S.load(), dev)
+    if not d or not d.get("present"):
+        sys.stderr.write(f"{dev}: No such device or address\n")
+        return 1
+    try:
+        secs = float(os.environ.get("B2CTL_SIM_SCAN_SECS", "15"))
+    except ValueError:
+        secs = 15.0
+    steps = 20
+    dirty = bool(d.get("dirty"))
+    sys.stderr.write(f"Checking blocks 0 to 999999 (read-only test) on {dev}\n")
+    sys.stderr.write("Checking for bad blocks (read-only test): ")
+    bad = 0
+    for i in range(1, steps + 1):
+        if dirty and i == steps // 2:
+            bad = 3
+        pct = i / steps * 100.0
+        sys.stderr.write(f"{pct:6.2f}% done, 0:{i:02d} elapsed. ({bad}/0/0 errors)")
+        sys.stderr.flush()
+        time.sleep(secs / steps)
+    sys.stderr.write("\n")
+    if bad:
+        sys.stderr.write(f"Pass completed, {bad} bad blocks found. ({bad}/0/0 errors)\n")
+        return 1
+    sys.stderr.write("Pass completed, 0 bad blocks found. (0/0/0 errors)\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

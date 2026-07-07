@@ -1,6 +1,13 @@
-"""b2ctl.installer — download and install sas2ircu / storcli / perccli."""
+"""b2ctl.installer — download and install sas2ircu (IT) / perccli (RAID).
+
+storcli was dropped: it is the LSI tool, blind to a Dell PERC, and only caused
+false RAID detection. RAID mode uses perccli; IT/HBA mode uses sas2ircu.
+Binaries are copied (cp -f) to /usr/sbin so they survive deletion of the
+download dir or /opt/MegaRAID — matching install.sh.
+"""
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -11,35 +18,84 @@ import zipfile
 
 _GDRIVE = {
     "sas2ircu": "1rP7f8weCvXEaqWSAj5MDNwMDvK2RXTCt",
-    "storcli":  "1nMbQFD94vdDl6QNjUzRtp1UHlKwDwmYN",
     "perccli":  "1hJt5Sr2xNW4OHCD-AoefiHhjJCeWVWVk",
 }
+# Pinned SHA-256 per archive. These binaries run as root on both nodes, so a
+# swapped/tampered Drive file must be rejected before extraction (F-043). Fill
+# from a trusted copy: `sha256sum SAS2IRCU_P20.zip`. Left empty = unverified
+# (still size-checked); populate once the archives are pinned, and keep it in
+# lockstep with install.sh's `sha256sum -c`.
+_SHA256: dict[str, str] = {}
 _BASE = "https://drive.usercontent.google.com/download?export=download&confirm=t&id="
 _ARCHIVE_NAME = {
     "sas2ircu": "SAS2IRCU_P20.zip",
-    "storcli":  "storcli.zip",
     "perccli":  "perccli.tar.gz",
 }
+# Harmless probe args used to confirm a tool can actually run (any exit code).
+_PROBE = {"sas2ircu": ["list"], "perccli": ["show"]}
+# Install profiles: which tools + which controller mode each one sets.
+_PROFILE_TOOLS = {"perc": ["perccli"], "flash": ["sas2ircu"]}
+_PROFILE_MODE = {"perc": "raid", "flash": "it"}
+
+
+def _executes(path: str, probe: list[str]) -> bool:
+    """True if the binary can exec at all (any exit code counts as 'runs').
+
+    A 32-bit ELF whose loader (/lib/ld-linux.so.2) is missing fails execve with
+    ENOENT, which subprocess surfaces as FileNotFoundError even though the file
+    is present — exactly the 'cannot execute: required file not found' case.
+    """
+    try:
+        subprocess.run([path, *probe], capture_output=True, timeout=10)
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def tool_ok(name: str) -> bool:
-    """Return True if tool binary is present and executable."""
-    return shutil.which(name) is not None
+    """Return True if tool binary is present AND executes."""
+    path = shutil.which(name)
+    return path is not None and _executes(path, _PROBE.get(name, []))
 
 
-def download(file_id: str, dest_path: str) -> None:
-    """Download a Google Drive file to dest_path. Raises RuntimeError if result < 1 KB."""
+def download(file_id: str, dest_path: str, *, sha256: str | None = None) -> None:
+    """Download a Google Drive file to dest_path.
+
+    Uses urlopen with a 60 s timeout so a black-holed connection can't hang the
+    install forever (F-043). Raises RuntimeError on a <1 KB result (HTML error
+    page) or, when a hash is pinned, on a SHA-256 mismatch (tampered archive).
+    """
     url = _BASE + file_id
     print(f"    downloading...", end="", flush=True)
-    urllib.request.urlretrieve(url, dest_path)
+    with urllib.request.urlopen(url, timeout=60) as resp, open(dest_path, "wb") as f:
+        shutil.copyfileobj(resp, f)
     size = os.path.getsize(dest_path)
     if size < 1024:
         raise RuntimeError(f"download too small ({size} bytes) — may be HTML error page")
+    if sha256:
+        h = hashlib.sha256()
+        with open(dest_path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        got = h.hexdigest()
+        if got != sha256:
+            raise RuntimeError(f"sha256 mismatch — expected {sha256}, got {got}; "
+                               f"refusing to install a tampered archive")
     print(f" {size // 1024} KB")
 
 
+def _install_to_usr_sbin(src: str, name: str, probe: list[str]) -> tuple[bool, str]:
+    """cp -f a binary to /usr/sbin/<name>, chmod +x, verify it executes."""
+    dest = f"/usr/sbin/{name}"
+    shutil.copy2(src, dest)
+    os.chmod(dest, 0o755)
+    if not _executes(dest, probe):
+        return False, "installed but won't execute (missing runtime libs)"
+    return True, dest
+
+
 def install_sas2ircu(archive: str) -> tuple[bool, str]:
-    """Extract linux_x86_rel/sas2ircu from zip, install to /usr/local/bin/sas2ircu."""
+    """Extract linux_x86_rel/sas2ircu from zip, cp -f to /usr/sbin/sas2ircu."""
     tmp = tempfile.mkdtemp()
     try:
         with zipfile.ZipFile(archive) as zf:
@@ -53,44 +109,11 @@ def install_sas2ircu(archive: str) -> tuple[bool, str]:
                     break
         if not sas:
             return False, "binary not found in archive"
-        dest = "/usr/local/sbin/sas2ircu"
-        shutil.copy2(sas, dest)
-        os.chmod(dest, 0o755)
-        return True, dest
-    except Exception as exc:
-        return False, str(exc)
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-
-
-def install_storcli(archive: str) -> tuple[bool, str]:
-    """Extract Ubuntu/*.deb from zip, run dpkg -i, symlink storcli64 -> /usr/local/bin/storcli."""
-    tmp = tempfile.mkdtemp()
-    try:
-        with zipfile.ZipFile(archive) as zf:
-            zf.extractall(tmp)
-        deb = None
-        for root, _dirs, files in os.walk(tmp):
-            if os.path.basename(root) == "Ubuntu":
-                for f in files:
-                    if f.endswith(".deb"):
-                        deb = os.path.join(root, f)
-                        break
-            if deb:
-                break
-        if not deb:
-            return False, "Ubuntu .deb not found in archive"
-        r = subprocess.run(["dpkg", "-i", deb], capture_output=True, text=True)
-        if r.returncode != 0:
-            return False, f"dpkg failed: {r.stderr.strip()}"
-        binary = "/opt/MegaRAID/storcli/storcli64"
-        if not os.path.exists(binary):
-            return False, f"dpkg succeeded but {binary} not found"
-        symlink = "/usr/local/bin/storcli"
-        if os.path.lexists(symlink):
-            os.remove(symlink)
-        os.symlink(binary, symlink)
-        return True, symlink
+        ok, msg = _install_to_usr_sbin(sas, "sas2ircu", _PROBE["sas2ircu"])
+        if not ok:
+            return False, (msg + " — 32-bit loader missing; "
+                           "run: apt-get install -y libc6-i386")
+        return True, msg
     except Exception as exc:
         return False, str(exc)
     finally:
@@ -98,11 +121,13 @@ def install_storcli(archive: str) -> tuple[bool, str]:
 
 
 def install_perccli(archive: str) -> tuple[bool, str]:
-    """Extract *.rpm from tar.gz, run alien --scripts -i, symlink perccli64 -> /usr/local/bin/perccli."""
+    """Extract *.rpm from tar.gz, alien -i, cp -f perccli64 -> /usr/sbin/perccli."""
     tmp = tempfile.mkdtemp()
     try:
         with tarfile.open(archive) as tf:
-            tf.extractall(tmp)
+            # filter="data" (stdlib 3.12+) rejects '../' path-traversal members —
+            # a tampered archive can't write /usr/sbin/zpool as root (F-086).
+            tf.extractall(tmp, filter="data")
         rpm = None
         for root, _dirs, files in os.walk(tmp):
             for f in files:
@@ -120,22 +145,67 @@ def install_perccli(archive: str) -> tuple[bool, str]:
         binary = "/opt/MegaRAID/perccli/perccli64"
         if not os.path.exists(binary):
             return False, f"alien succeeded but {binary} not found"
-        symlink = "/usr/local/bin/perccli"
-        if os.path.lexists(symlink):
-            os.remove(symlink)
-        os.symlink(binary, symlink)
-        return True, symlink
+        return _install_to_usr_sbin(binary, "perccli", _PROBE["perccli"])
     except Exception as exc:
         return False, str(exc)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# Prereq package tiers — the single source of truth shared with install.sh
+# (F-087/F-111). Per-tool prereqs install ONLY when that tool is requested so
+# --perc never registers i386 on a RAID box; runtime deps are always useful.
+PREREQ_SAS2IRCU = ["libc6-i386"]        # 32-bit ELF loader (needs dpkg i386 arch)
+PREREQ_PERCCLI = ["alien"]              # RPM -> .deb conversion
+RUNTIME_PKGS = ["smartmontools", "zfsutils-linux", "gdisk"]
+
+
+def ensure_prereqs(tools: list[str] | None = None) -> None:
+    """Install + verify apt prerequisites for the requested tool subset.
+
+    - alien      : perccli ships only as an RPM; alien converts it to a .deb.
+    - libc6-i386 : sas2ircu is a 32-bit ELF and needs the i386 multiarch loader.
+                   On amd64 Debian/Proxmox the i386 architecture must be
+                   registered (dpkg --add-architecture i386) and the cache
+                   refreshed before apt can even see libc6-i386 — do that first.
+
+    Verifies the OUTCOME (does the 32-bit loader exist?) rather than trusting
+    apt's exit code, and surfaces the apt error tail when it really failed.
+    """
+    tools = tools if tools is not None else ["sas2ircu", "perccli"]
+    want_sas = "sas2ircu" in tools
+    want_perc = "perccli" in tools
+    pkgs = list(RUNTIME_PKGS)
+    if want_sas:
+        pkgs += PREREQ_SAS2IRCU
+    if want_perc:
+        pkgs += PREREQ_PERCCLI
+    print(f"  [*] ensuring prerequisites ({', '.join(pkgs)})...")
+    if want_sas:                         # only touch i386 when sas2ircu is wanted
+        subprocess.run(["dpkg", "--add-architecture", "i386"],
+                       capture_output=True, check=False)
+    subprocess.run(["apt-get", "update", "-qq"],
+                   capture_output=True, check=False)
+    r = subprocess.run(["apt-get", "install", "-y", *pkgs],
+                       capture_output=True, text=True, check=False)
+
+    if want_sas:
+        loader_ok = any(os.path.exists(p) for p in
+                        ("/lib/ld-linux.so.2", "/lib32/ld-linux.so.2"))
+        if not loader_ok:
+            print("  [✗] libc6-i386 not active — sas2ircu (32-bit) will not run.")
+            for ln in (r.stderr or r.stdout or "").strip().splitlines()[-3:]:
+                print(f"        apt: {ln}")
+            print("        fix: dpkg --add-architecture i386 && apt-get update "
+                  "&& apt-get install -y libc6-i386")
+    if want_perc and shutil.which("alien") is None:
+        print("  [✗] alien not installed — perccli install will fail.")
+
+
 def install_tools(tools: list[str] | None = None) -> None:
     """Download and install tools. tools=None means all missing ones."""
     _install_fn = {
         "sas2ircu": install_sas2ircu,
-        "storcli":  install_storcli,
         "perccli":  install_perccli,
     }
     if tools is None:
@@ -143,6 +213,7 @@ def install_tools(tools: list[str] | None = None) -> None:
         if not tools:
             print("  all tools already installed")
             return
+    ensure_prereqs(tools)                # only the prereqs the subset needs (F-111)
 
     tmp = tempfile.mkdtemp()
     try:
@@ -154,8 +225,10 @@ def install_tools(tools: list[str] | None = None) -> None:
             print(f"  [*] {name}...")
             archive = os.path.join(tmp, _ARCHIVE_NAME[name])
             try:
-                download(_GDRIVE[name], archive)
-            except RuntimeError as exc:
+                download(_GDRIVE[name], archive, sha256=_SHA256.get(name))
+            except (RuntimeError, OSError) as exc:
+                # OSError covers urllib URLError/HTTPError/socket errors on an
+                # offline box — print the clean line, don't traceback (F-044).
                 print(f"  [✗] {name}: {exc}")
                 continue
             ok, msg = fn(archive)
@@ -165,3 +238,42 @@ def install_tools(tools: list[str] | None = None) -> None:
                 print(f"  [✗] {name}: {msg}")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def install_base() -> None:
+    """No-download status report — the CLI mirror of a plain `./install.sh`.
+
+    b2ctl is already installed (we are running from it), so there is nothing to
+    deploy and nothing to download. Show which tools are present and the current
+    controller mode, and point at the flags that actually add tools.
+    """
+    from . import config as _cfg
+    print("  b2ctl package: installed")
+    for t in ("sas2ircu", "perccli"):
+        print(f"  {'[ok]' if tool_ok(t) else '[--]'} {t}")
+    print(f"  controller.mode = {_cfg.controller_mode()}")
+    print("  add tools:  b2ctl install --with-tools | --perc | --flash")
+
+
+def install_profile(profile: str) -> None:
+    """Install the tools for a profile and set the matching controller mode.
+
+    'perc'  -> perccli  + controller.mode=raid
+    'flash' -> sas2ircu + controller.mode=it
+    """
+    from . import config as _cfg
+    tools = _PROFILE_TOOLS.get(profile)
+    if tools is None:
+        print(f"  [✗] unknown profile: {profile}")
+        return
+    install_tools(tools)
+    mode = _PROFILE_MODE[profile]
+    # Only commit the mode if every requested tool is actually present AND
+    # executable — otherwise the box is forced onto a backend it cannot serve
+    # (e.g. mode=raid with no working perccli), breaking every later run (F-045).
+    if all(tool_ok(t) for t in tools):
+        _cfg.set_mode(mode)
+        print(f"  [✔] controller.mode = {mode}  ({_cfg.CONFIG_PATH})")
+    else:
+        print(f"  [!] controller.mode left unchanged — {profile} tool install "
+              f"failed; fix it then re-run, or set controller.mode by hand.")

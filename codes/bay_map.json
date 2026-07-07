@@ -1,5 +1,19 @@
-{
-  "_comment": "Dell 12G backplane on LSI IT mode reports scrambled slots (known issue). This server is a clean mirror-reversal across 8 bays. If yours is an arbitrary permutation instead, delete reverse_slots and use an explicit 'map' of raw->physical, e.g. {\"map\": {\"1:0\": \"1:7\", \"1:3\": \"1:4\"}}. Calibrate with: b2ctl locate <serial>",
-  "reverse_slots": true,
-  "slots_per_enclosure": 8
-}
+[
+  {
+    "panel": "front",
+    "type": "sas",
+    "reverse_slots": false,
+    "slots_per_enclosure": 8,
+    "map": {},
+    "_comment": "Front backplane (PERC RAID + PERC-flashed sas2ircu), addressed as enc:slot. Dell 12G on LSI IT mode reports a clean mirror-reversal across 8 bays -> reverse_slots. For an arbitrary permutation instead, drop reverse_slots and use 'map': {\"32:0\": \"32:7\", ...}. Calibrate with: b2ctl locate <serial>"
+  },
+  {
+    "panel": "back",
+    "type": "nvme",
+    "map": [
+      { "bdf": "d8:00.0", "bay": "PCIe2:0" },
+      { "bdf": "d9:00.0", "bay": "PCIe2:1" }
+    ],
+    "_comment": "Back PCIe SSD enclosure(s) (NVMe). Relabel each drive to a custom bay by 'by-id' (substring of /dev/disk/by-id/nvme-<model>_<serial>), 'serial' (the SERIAL column in `b2ctl status` — easiest), or PCIe 'bdf'. Precedence: by-id > serial > bdf. e.g. map: [ {\"by-id\": \"nvme-Samsung_SSD_990_EVO_Plus_4TB_S7..\", \"bay\": \"PCIe2:0\"}, {\"serial\": \"S7XXNS0W123\", \"bay\": \"PCIe2:1\"}, {\"bdf\": \"d8:00.0\", \"bay\": \"PCIe2:2\"} ]. A drive's bdf: cat /sys/class/nvme/nvme0/address . One or more back panels are allowed."
+  }
+]

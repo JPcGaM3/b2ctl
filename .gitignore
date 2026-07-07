@@ -40,3 +40,11 @@ tools/
 .agents
 codes/sim/state.json
 codes/sim/var/
+
+# AI assistant / working artifacts (kept on disk, not tracked)
+.claude/
+.scout/
+CLAUDE.md
+TASKS.md
+prompts/
+reviews/

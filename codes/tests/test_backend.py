@@ -64,17 +64,28 @@ class TestBackend:
             bk = bk_mod.get_backend()
         assert isinstance(bk, bk_mod.ITBackend)
 
-    def test_get_backend_autodetects_raid_via_storcli(self):
+    def test_detect_ignores_sas2ircu_error_banner(self):
+        # F-010: sas2ircu banner + 'MPTLib2 Error 1' (no controller table) on a
+        # RAID box must NOT select IT-mode when perccli reports a controller.
         import b2ctl.backend as bk_mod
+        import b2ctl.hba_raid as raid_mod
+        self._auto_mode_cache()
+        banner = ("LSI Corporation SAS2 IR Configuration Utility.\n"
+                  "Version 20.00.00.00\n"
+                  "SAS2IRCU: MPTLib2 Error 1\n")
+        with patch("b2ctl.backend.run", return_value=banner), \
+             patch.object(raid_mod, "have_tool", return_value=True):
+            bk = bk_mod.get_backend()
+        assert isinstance(bk, bk_mod.RaidBackend)
+
+    def test_get_backend_autodetects_raid_via_perccli(self):
+        import b2ctl.backend as bk_mod
+        import b2ctl.hba_raid as raid_mod
         self._auto_mode_cache()
 
-        def _mock_run(cmd):
-            # sas2ircu list → empty; storcli64 show ctrlcount → match
-            if cmd[-1] == "list":
-                return ""
-            return "Number of Controllers = 1"
-
-        with patch("b2ctl.backend.run", side_effect=_mock_run):
+        # sas2ircu list → empty (no IT tool); perccli reports a controller.
+        with patch("b2ctl.backend.run", return_value=""), \
+             patch.object(raid_mod, "have_tool", return_value=True):
             bk = bk_mod.get_backend()
         assert isinstance(bk, bk_mod.RaidBackend)
 

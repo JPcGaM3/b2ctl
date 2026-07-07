@@ -18,13 +18,26 @@ LBA_BYTES = 512
 WEAR_ATTR_IDS = [177, 233, 202, 231, 173, 169, 232]
 
 
-def _smartctl(dev: str) -> str:
+SMART_TIMEOUT = 10   # per-probe; a hung disk must not stall the whole scan (F-049)
+
+
+def _smartctl(dev: str, dtype: str = "") -> str:
     from . import config as _cfg
     _sc = _cfg.tool("smartctl")
-    for dtype in (None, "sat", "scsi"):
-        cmd = [_sc, "-a", dev] if dtype is None \
-            else [_sc, "-a", "-d", dtype, dev]
-        o = run(cmd)
+    # When a device type is forced (RAID-mode "megaraid,7"), the drive is a hidden
+    # member with no valid raw identity: try only the passthrough forms, never the
+    # auto-detect ladder (that would read the shared VD node and misattribute the
+    # VD's SMART to a dead member — F-049). IT-mode uses the raw ladder.
+    if dtype:
+        attempts: list[str | None] = [dtype, f"sat+{dtype}"]
+    else:
+        attempts = [None, "sat", "scsi"]
+    for dt in attempts:
+        cmd = [_sc, "-a", dev] if dt is None \
+            else [_sc, "-a", "-d", dt, dev]
+        o = run(cmd, timeout=SMART_TIMEOUT, none_on_timeout=True)
+        if o is None:
+            break  # the device timed out; retrying the same hung drive only stalls
         if o and ("ATTRIBUTE_NAME" in o or "Health Status" in o
                   or "SMART overall-health" in o):
             return o
@@ -33,7 +46,7 @@ def _smartctl(dev: str) -> str:
 
 def read(d: Disk, tbw_table: dict) -> None:
     """Populate SMART-derived fields on a Disk in place."""
-    out = _smartctl(d.dev)
+    out = _smartctl(d.dev, d.smart_dtype)
     if not out:
         d.readable = False
         d.health = "NOREAD"
@@ -51,9 +64,15 @@ def read(d: Disk, tbw_table: dict) -> None:
     if m:
         d.health = m.group(1).upper()
     else:
-        m = re.search(r"SMART Health Status:\s*(\w+)", out)
+        # SCSI/SAS: the status can be a multi-word phrase, e.g.
+        # 'FAILURE PREDICTION THRESHOLD EXCEEDED [asc=5d, ascq=0]'. Anything that
+        # is not a bare 'OK' means the drive itself is predicting failure, so map
+        # it to FAILED (which assess() grades CRITICAL) rather than storing the
+        # first word 'FAILURE', which no rule matched (F-018).
+        m = re.search(r"SMART Health Status:\s*(.+)", out)
         if m:
-            d.health = "PASSED" if m.group(1).upper() == "OK" else m.group(1).upper()
+            status = m.group(1).strip()
+            d.health = "PASSED" if status.upper() == "OK" else "FAILED"
 
     if "ATTRIBUTE_NAME" in out:
         _parse_ata(d, out)
@@ -63,6 +82,15 @@ def read(d: Disk, tbw_table: dict) -> None:
         _parse_sas(d, out)
 
     _endurance(d, tbw_table)
+
+    # Surface a running burn-in self-test in the status table, reusing THIS -a
+    # output — no extra subprocess (parse_selftest is pure). See burnin.py.
+    from . import burnin, ui
+    stt = burnin.parse_selftest(out)
+    if stt["running"]:
+        d.selftest_running = True
+        d.selftest_pct = stt["pct"]
+        d.selftest_eta = ui.fmt_eta(stt["eta_min"])
 
 
 def _parse_ata(d: Disk, out: str) -> None:
@@ -79,21 +107,42 @@ def _parse_ata(d: Disk, out: str) -> None:
             aid = int(p[0])
             try:
                 val = int(p[3])
-                raw = int(re.sub(r"\D", "", p[9]) or 0)
             except ValueError:
                 continue
+            # Take only the LEADING integer of the raw token: composite raws like
+            # Seagate's '29229h+18m+27.459s' or '30 (Min/Max 25/45)' must not have
+            # every digit concatenated into one absurd number (F-050).
+            rm = re.match(r"\d+", p[9])
+            if not rm:
+                continue
+            raw = int(rm.group())
             if aid in WEAR_ATTR_IDS and d.wear_val is None:
                 d.wear_val = val
             if aid == 9:
                 d.poh = raw
             if aid == 241:
-                d.lba_written = raw
+                # Attribute 241 units vary by vendor; the name (p[1]) reveals them.
+                # Normalise everything to 512-byte LBAs so _endurance's LBA_BYTES
+                # math is correct for Intel (32MiB) / SanDisk (GB) drives (F-051).
+                d.lba_written = _lba241(p[1], raw)
             if aid == 5:
                 d.realloc = raw
             if aid == 197:
                 d.pending = raw
             if aid in (187, 188, 198):
                 d.uncorr = max(d.uncorr, raw)
+
+
+def _lba241(name: str, raw: int) -> int:
+    """Convert an attribute-241 raw to 512-byte LBA-equivalents by unit name."""
+    n = (name or "").lower()
+    if "32mib" in n:
+        return raw * (32 * 1024 * 1024) // LBA_BYTES
+    if "gib" in n:
+        return raw * (1024 ** 3) // LBA_BYTES
+    if "gb" in n:
+        return raw * (10 ** 9) // LBA_BYTES
+    return raw   # plain Total_LBAs_Written already in 512-byte sectors
 
 
 def _parse_sas(d: Disk, out: str) -> None:
@@ -119,6 +168,11 @@ def _parse_sas(d: Disk, out: str) -> None:
     md = re.search(r"Elements in grown defect list:\s*(\d+)", out, re.I)
     if md:
         d.realloc = int(md.group(1))
+    # SAS error-counter log: column 7 of read/write/verify rows is 'total
+    # uncorrected errors' — the standard media-failure signal (F-095). Column 6
+    # (GB processed) has a decimal, so use \S+ for the skipped columns.
+    for mu in re.finditer(r"^(?:read|write|verify):\s+(?:\S+\s+){6}(\d+)", out, re.M):
+        d.uncorr = max(d.uncorr, int(mu.group(1)))
 
 
 def _parse_nvme(d: Disk, out: str) -> None:

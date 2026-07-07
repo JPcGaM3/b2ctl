@@ -11,30 +11,45 @@ stable /dev/disk/by-id names, maps each disk to its physical bay via
 from __future__ import annotations
 
 import glob
-import json
 import os
 import re
 
 from .common import Disk, run
+from . import blockdev
 
 CONTROLLER = 0          # sas2ircu controller index
-_EXCLUDE = ("loop", "sr", "ram", "zd", "dm-", "md")
-_PAIR_RE = re.compile(r'(\w+)="(.*?)"')
+# Block-device listing now lives in the backend-agnostic blockdev module (F-099).
+# Kept as module names so hba internals and existing tests keep working.
+_EXCLUDE = blockdev.EXCLUDE
+_lsblk_pairs = blockdev.lsblk_pairs
+vd_usage = blockdev.vd_usage
 
 
-def _lsblk_pairs(cols: str) -> list[dict]:
-    """Parse `lsblk -P` KEY="value" lines into dicts (robust to spaces)."""
-    out = run(["lsblk", "-dnb", "-P", "-o", cols])
-    rows = []
-    for line in out.splitlines():
-        if line.strip():
-            rows.append(dict(_PAIR_RE.findall(line)))
-    return rows
+def _tool(name: str) -> str:
+    """Resolve a binary through config.tool() so tool_paths overrides for
+    lsblk/udevadm are honored, not only sas2ircu/smartctl (F-035)."""
+    from . import config as _cfg
+    return _cfg.tool(name)
+
+
+def _nvme_pcie(name: str) -> str | None:
+    """PCIe BDF for an nvme namespace, e.g. 'nvme0n1' -> 'd8:00.0' (domain dropped)."""
+    m = re.match(r"(nvme\d+)", name)
+    if not m:
+        return None
+    try:
+        with open(f"/sys/class/nvme/{m.group(1)}/address") as f:
+            addr = f.read().strip()
+    except OSError:
+        return None
+    return addr.split(":", 1)[1] if addr.startswith("0000:") else addr
 
 
 def enumerate_disks() -> list[Disk]:
     """Return one Disk per physical block device (sd*/nvme*)."""
+    from . import baymap
     byid = _by_id_index()
+    panels = baymap.load()
     disks: list[Disk] = []
     for row in _lsblk_pairs("NAME,SIZE,SERIAL,MODEL,TRAN,ROTA,TYPE"):
         name = row.get("NAME", "")
@@ -51,6 +66,13 @@ def enumerate_disks() -> list[Disk]:
         d.iface = (row.get("TRAN") or "").strip().upper()
         d.is_ssd = (row.get("ROTA") == "0")
         d.by_id = byid.get(os.path.realpath(dev), "")
+        # NVMe has no enclosure:slot — use its PCIe address (relabel-able via the
+        # back/type=nvme panel in bay_map.json).
+        if name.startswith("nvme"):
+            bdf = _nvme_pcie(name) or ""
+            bay = baymap.remap_nvme(bdf, panels, by_id=d.by_id, serial=d.serial)
+            if bay:
+                d.bay = bay
         disks.append(d)
     return disks
 
@@ -61,7 +83,12 @@ def _by_id_index() -> dict:
     bydir = "/dev/disk/by-id"
     if not os.path.isdir(bydir):
         return index
-    rank = {"ata-": 0, "scsi-SATA": 1, "wwn-": 2, "scsi-": 3}
+    # NVMe exposes several links; prefer nvme-<model>_<serial> over nvme-eui.*,
+    # nvme-uuid.* and the systemd >=256 namespace-suffixed nvme-..._1 duplicate,
+    # so d.by_id is the human-readable one (a bay_map.json key). Order matters:
+    # the more-specific prefixes must be tested before "nvme-" (F-081).
+    rank = {"ata-": 0, "scsi-SATA": 1, "wwn-": 2, "scsi-": 3,
+            "nvme-eui.": 5, "nvme-uuid.": 6, "nvme-": 4}
 
     def score(name: str) -> int:
         for pfx, s in rank.items():
@@ -78,9 +105,12 @@ def _by_id_index() -> dict:
             real = os.path.realpath(link)
         except OSError:
             continue
-        s = score(name)
-        if real not in best or s < best[real][0]:
-            best[real] = (s, link)
+        # (score, len, name): the tie-break deterministically prefers the shorter,
+        # un-suffixed friendly link over its _<nsid> duplicate regardless of
+        # os.listdir() order.
+        key = (score(name), len(name), name)
+        if real not in best or key < best[real][0]:
+            best[real] = (key, link)
     for real, (_, link) in best.items():
         index[real] = link
     return index
@@ -89,19 +119,49 @@ def _by_id_index() -> dict:
 # --------------------------------------------------------------------------- #
 # sas2ircu — physical bay mapping + LED locate
 # --------------------------------------------------------------------------- #
+_HAVE_CACHE: bool | None = None   # per-process memo (F-037)
+
+
 def have_sas2ircu() -> bool:
-    from . import config as _cfg
-    return bool(run([_cfg.tool("sas2ircu"), "list"]))
+    # A real IT/HBA controller shows a numbered SAS row in `sas2ircu list`; the
+    # banner/error output on a RAID box does not (F-010). Memoized: one scan
+    # spawns this probe up to 5x, and the 32-bit sas2ircu is slow (F-037).
+    global _HAVE_CACHE
+    if _HAVE_CACHE is None:
+        from . import config as _cfg
+        out = run([_cfg.tool("sas2ircu"), "list"])
+        _HAVE_CACHE = bool(re.findall(r"^\s*(\d+)\s+SAS", out, re.MULTILINE))
+    return _HAVE_CACHE
+
+
+def _reset_have_cache() -> None:
+    """Clear the have_sas2ircu memo (tests / a forced re-probe)."""
+    global _HAVE_CACHE
+    _HAVE_CACHE = None
 
 
 def bay_map(controller: int = CONTROLLER) -> dict:
-    """serial -> 'enclosure:slot' from `sas2ircu <c> DISPLAY`."""
+    """serial -> 'enclosure:slot' from `sas2ircu <c> DISPLAY`.
+
+    Only 'Device is a Hard disk' sections are recorded: expander backplanes
+    also emit an SES ('Enclosure services device') section carrying Enclosure#/
+    Slot#/Serial No, whose serial would otherwise enter the map, never match a
+    real disk, and surface as a permanent phantom GHOST row (F-036).
+    """
     from . import config as _cfg
     out = run([_cfg.tool("sas2ircu"), str(controller), "DISPLAY"])
     mapping: dict[str, str] = {}
     enc = slot = serial = None
+    in_disk = False
     for line in out.splitlines():
         s = line.strip()
+        m = re.match(r"Device is a (.+)", s)
+        if m:
+            in_disk = m.group(1).strip().lower().startswith("hard disk")
+            enc = slot = serial = None
+            continue
+        if not in_disk:
+            continue
         m = re.match(r"Enclosure #\s*:\s*(\d+)", s)
         if m:
             enc = m.group(1); slot = serial = None; continue
@@ -126,27 +186,23 @@ def attach_bays(disks: list[Disk], controller: int = CONTROLLER, bm=None) -> Non
     bay is display-only here (LEDs are driven by device, not slot — see
     locate.py), so we remap purely for the human label using bay_map.json.
     """
-    if not have_sas2ircu():
+    from . import baymap
+    # A populated bm already proves the tool works; only probe when the caller
+    # (a direct call, not core.scan) passed nothing (F-037).
+    if bm is None and not have_sas2ircu():
         return
-    cfg = _load_bay_map()
+    panels = baymap.load()
     if bm is None:
         bm = bay_map(controller)
-    for d in disks:
-        if d.serial:
-            if d.serial in bm:
-                d.bay = _remap(bm[d.serial], cfg)
-            else:
-                for bm_serial, bay in bm.items():
-                    if d.serial.startswith(bm_serial) or bm_serial.startswith(d.serial):
-                        d.bay = _remap(bay, cfg)
-                        break
+    baymap.assign_bays(disks, bm, panels)      # shared serial-match loop (F-084)
 
 
 def get_ghost_disks(disks: list[Disk], controller: int = CONTROLLER, bm=None) -> list[Disk]:
     """Find physical disks that the HBA sees but Linux rejected (no block dev)."""
-    if not have_sas2ircu():
+    from . import baymap
+    if bm is None and not have_sas2ircu():
         return []
-    cfg = _load_bay_map()
+    panels = baymap.load()
     if bm is None:
         bm = bay_map(controller)
     os_serials = [d.serial for d in disks if d.serial]
@@ -159,7 +215,7 @@ def get_ghost_disks(disks: list[Disk], controller: int = CONTROLLER, bm=None) ->
                 break
         if not matched:
             d = Disk(dev="-")
-            d.bay = _remap(raw_bay, cfg)
+            d.bay = baymap.remap_slot(raw_bay, panels)
             d.serial = serial
             d.model = "(Ghost / OS Rejected)"
             d.health = "GHOST"
@@ -215,49 +271,12 @@ def udev_rescue_ghost(serial: str) -> bool:
         sg_name = os.path.basename(sg)
         dev_path = f"/sys/class/scsi_generic/{sg_name}/device"
         if os.path.exists(dev_path):
-            run(["udevadm", "trigger", "--action=add", dev_path])
-    run(["udevadm", "settle", "--timeout=3"])
+            run([_tool("udevadm"), "trigger", "--action=add", dev_path])
+    run([_tool("udevadm"), "settle", "--timeout=3"])
     for row in _lsblk_pairs("NAME,SERIAL,TYPE"):
         if row.get("TYPE") == "disk" and row.get("SERIAL", "").strip() == serial:
             return True
     return False
 
 
-def _load_bay_map() -> dict:
-    from . import config as _cfg
-    path = _cfg.bay_map_path()
-    if os.path.exists(path):
-        try:
-            with open(path) as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
-
-
-def _remap(raw_bay: str, cfg: dict) -> str:
-    """Translate a raw 'enclosure:slot' to the physical label.
-
-    cfg supports either an explicit table::
-
-        {"map": {"1:0": "1:7", "1:7": "1:0", ...}}
-
-    or a reversal rule (clean mirror-reversed backplane)::
-
-        {"reverse_slots": true, "slots_per_enclosure": 8}
-
-    No config -> identity (unchanged).
-    """
-    if not cfg:
-        return raw_bay
-    table = cfg.get("map")
-    if table and raw_bay in table:
-        return table[raw_bay]
-    if cfg.get("reverse_slots"):
-        n = int(cfg.get("slots_per_enclosure", 8))
-        try:
-            enc, slot = raw_bay.split(":")
-            return f"{enc}:{(n - 1) - int(slot)}"
-        except (ValueError, AttributeError):
-            return raw_bay
-    return raw_bay
+# bay_map.json parsing + remap now live in b2ctl.baymap (shared by both backends).

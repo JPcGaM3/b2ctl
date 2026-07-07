@@ -14,6 +14,14 @@ def fmt_poh(poh) -> str:
     return "N/A" if poh is None else f"{poh}h(~{poh/8766:.1f}y)"
 
 
+def fmt_eta(minutes) -> str:
+    """Compact remaining-time label: '~8m', '~1h10m', '' when unknown."""
+    if minutes is None:
+        return ""
+    m = max(0, int(minutes))
+    return f"~{m}m" if m < 60 else f"~{m // 60}h{m % 60:02d}m"
+
+
 def disk_label(d) -> str:
     """Human-readable one-line id for prompts: (bay) model (serial)."""
     return f"({d.bay or '?'}) {d.model or '?'} ({d.serial or 'N/A'})"
@@ -52,35 +60,81 @@ def _status_cell(d: Disk) -> str:
         if d.vdev_state in ("FAULTED", "REMOVED", "UNAVAIL", "OFFLINE"):
             return R + raw + N
         return raw
+    # Free disk running a burn-in self-test -> show TEST xx% in the blank cell.
+    if d.selftest_running and d.selftest_pct is not None:
+        return Y + f"{('TEST ' + str(d.selftest_pct) + '%')[:10]:<10}" + N
     return f"{'':10}"
 
 
+def _disk_row(d: Disk) -> str:
+    wear_used = "N/A" if d.wear_val is None else f"{100 - d.wear_val}%"
+    end_left = "N/A" if d.end_left is None else f"{d.end_left:.1f}%"
+    if d.written_tb is None:
+        written = "N/A"
+    elif d.is_ssd:
+        cap = f"/{d.tbw_rating:.0f}TBW" if d.tbw_rating else "/?"
+        written = f"{d.written_tb:.2f}TB{cap}"
+    else:
+        written = f"{d.written_tb:.2f}TB (HDD)"
+    # POOL cell encodes the array type: SW = ZFS, HW = PERC virtual disk.
+    if d.pool:
+        pool = f"SW:{d.pool}" + (f"/{d.vdev}" if d.vdev else "")
+    elif d.array_type == "HW":
+        pool = f"HW:{d.array_name}"
+    else:
+        pool = "-"
+    return (
+        f"{(d.bay or '-'):<8}{d.dev.replace('/dev/',''):<10}"
+        f"{(d.iface or '?'):<5}{(d.model or '?')[:23]:<24}"
+        f"{(d.serial or 'N/A')[:17]:<18}{fmt_poh(d.poh):<14}"
+        f"{wear_used:<11}{end_left:<11}{written:<19}{d.realloc:<6}"
+        f"{d.health:<9}{pool[:20]:<21}{_status_cell(d)}{color_level(d.level)}")
+
+
+def _subhdr(label: str) -> str:
+    s = f"--- {label} "
+    return C + s + "-" * max(0, 184 - len(s)) + N
+
+
 def render_table(disks: list[Disk]) -> str:
-    hdr = (f"{'BAY':<6}{'DEV':<10}{'IF':<5}{'MODEL':<24}{'SERIAL':<18}"
+    hdr = (f"{'BAY':<8}{'DEV':<10}{'IF':<5}{'MODEL':<24}{'SERIAL':<18}"
            f"{'POWER_ON':<14}{'WEAR(used)':<11}{'END(left)':<11}"
-           f"{'WRITTEN':<19}{'BAD':<6}{'HEALTH':<9}{'POOL':<17}{'STATUS':<10}{'LEVEL'}")
-    lines = ["=" * 178, hdr, "-" * 178]
-    for d in disks:
-        wear_used = "N/A" if d.wear_val is None else f"{100 - d.wear_val}%"
-        end_left = "N/A" if d.end_left is None else f"{d.end_left:.1f}%"
-        if d.written_tb is None:
-            written = "N/A"
-        elif d.is_ssd:
-            cap = f"/{d.tbw_rating:.0f}TBW" if d.tbw_rating else "/?"
-            written = f"{d.written_tb:.2f}TB{cap}"
-        else:
-            written = f"{d.written_tb:.2f}TB (HDD)"
-        pool = d.pool or "-"
-        if d.vdev:
-            pool = f"{pool}/{d.vdev}"
-        lines.append(
-            f"{(d.bay or '-'):<6}{d.dev.replace('/dev/',''):<10}"
-            f"{(d.iface or '?'):<5}{(d.model or '?')[:23]:<24}"
-            f"{(d.serial or 'N/A')[:17]:<18}{fmt_poh(d.poh):<14}"
-            f"{wear_used:<11}{end_left:<11}{written:<19}{d.realloc:<6}"
-            f"{d.health:<9}{pool[:16]:<17}{_status_cell(d)}{color_level(d.level)}")
-    lines.append("=" * 178)
+           f"{'WRITTEN':<19}{'BAD':<6}{'HEALTH':<9}{'POOL/ARRAY':<21}{'STATUS':<10}{'LEVEL'}")
+    lines = ["=" * 184, hdr, "-" * 184]
+    # Group hardware (PERC RAID volume members) above software (ZFS + free),
+    # but only when both kinds are present — single-type boxes stay flat.
+    hw = [d for d in disks if d.array_type == "HW"]
+    sw = [d for d in disks if d.array_type != "HW"]
+    if hw and sw:
+        lines.append(_subhdr("Hardware (PERC RAID)"))
+        lines += [_disk_row(d) for d in hw]
+        lines.append(_subhdr("Software (ZFS / unassigned)"))
+        lines += [_disk_row(d) for d in sw]
+    else:
+        lines += [_disk_row(d) for d in hw + sw]
+    lines.append("=" * 184)
     return "\n".join(lines)
+
+
+def render_storage(rows: list[dict]) -> str:
+    """Unified storage summary — hardware rows above software rows (caller orders).
+    Columns mean the same for both; HW used/free come from a mounted VD filesystem
+    (else '-'), SW from `zpool list`."""
+    if not rows:
+        return ""
+    out = ["Storage summary:",
+           f"  {'TYPE':<5}{'NAME':<16}{'LEVEL':<9}{'STATE':<10}"
+           f"{'SIZE':<10}{'USED':<10}{'FREE'}"]
+    for r in rows:
+        st = str(r.get("state", "?"))
+        low = st.lower()
+        col = G if (low.startswith("optl") or low == "online") else (
+            Y if low == "degraded" else R)
+        out.append(
+            f"  {r['kind']:<5}{str(r['name'])[:15]:<16}{str(r['level'])[:8]:<9}"
+            f"{col}{st[:9]:<10}{N}{str(r['size'])[:9]:<10}"
+            f"{str(r['used'])[:9]:<10}{r['free']}")
+    return "\n".join(out)
 
 
 def render_pools(pools: list[dict]) -> str:
@@ -107,6 +161,9 @@ def render_details(disks: list[Disk], pools: list[dict] | None = None) -> str:
         for d in config:
             out.append(f"{C}- bay {d.bay or '?'} {d.dev} "
                        f"({d.model or '?'}, SN {d.serial or 'N/A'}) [CONFIG]{N}")
+            if d.selftest_running and d.selftest_pct is not None:
+                eta = f", {d.selftest_eta} remaining" if d.selftest_eta else ""
+                out.append(f"    - self-test running: {d.selftest_pct}% complete{eta}")
             for r in d.reasons:
                 out.append(f"    - {r}")
 
@@ -142,3 +199,39 @@ def render_new_disk(d: Disk) -> str:
             f"  bay    : {d.bay or '?'}   size {size}   {d.iface or '?'}"
             f"   {'SSD' if d.is_ssd else 'HDD'}\n"
             f"  health : {d.health}   wear {wear}   endurance {end}")
+
+
+# --------------------------------------------------------------------------- #
+# Burn-in live progress (multi-disk: self-test + surface-scan bars + ETA)
+# --------------------------------------------------------------------------- #
+def _bar(pct, width: int = 14) -> str:
+    if pct is None:
+        return "[" + "-" * width + "]"
+    filled = max(0, min(width, int(round(pct / 100.0 * width))))
+    return "[" + "#" * filled + "-" * (width - filled) + "]"
+
+
+def _progress_cell(running: bool, pct, eta_min, done: bool, *, na: bool = False,
+                   bad: int = 0) -> str:
+    """One 'test' column: a bar+%+ETA while running, else a terminal label."""
+    if na:
+        return "n/a"
+    if running:
+        return f"{_bar(pct)} {(pct if pct is not None else 0):>3}%  {fmt_eta(eta_min):<7}"
+    if pct is not None or done:
+        return f"done ({bad} bad)" if bad else "done"
+    return "-"
+
+
+def render_burnin_row(row: dict) -> str:
+    dev = row["dev"].replace("/dev/", "")
+    st = _progress_cell(row["st_running"], row["st_pct"], row["st_eta"], row["done"])
+    sc = _progress_cell(row["sc_running"], row["sc_pct"], row["sc_eta"], row["done"],
+                        na=not row["do_scan"], bad=row.get("sc_bad") or 0)
+    return f" {(row.get('bay') or '?'):<8}{dev:<10}{st:<30}{sc}"
+
+
+def render_burnin_view(rows: list[dict]) -> str:
+    """Header + one row per disk (line count = 1 + len(rows), for the redraw)."""
+    hdr = f" {'BAY':<8}{'DISK':<10}{'SELF-TEST':<30}SURFACE SCAN (badblocks)"
+    return "\n".join([hdr] + [render_burnin_row(r) for r in rows])

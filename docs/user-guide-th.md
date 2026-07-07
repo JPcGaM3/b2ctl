@@ -49,16 +49,25 @@ cd b2ctl/codes
 sudo ./install.sh
 ```
 
-ติดตั้งพร้อม tool binaries (แนะนำสำหรับเซิร์ฟเวอร์ใหม่):
+`./install.sh` เปล่า ๆ = ลง **เฉพาะ b2ctl** (package + launcher) ไม่โหลด tool ไม่
+แตะ `apt` ไม่ต้องต่อเน็ต
 
-```bash
-cd codes
-sudo ./install.sh --with-tools
-```
+**รูปแบบติดตั้ง 4 แบบ (เหมือนกันทั้ง `./install.sh` และ `b2ctl install`):**
 
-Flag `--with-tools` จะ **ดาวน์โหลด** `sas2ircu`, `storcli64`, และ `perccli64`
-จาก Google Drive โดยอัตโนมัติ ติดตั้งลงใน `/usr/local/sbin/` แล้วลบไฟล์ที่ดาวน์โหลดออก
-ต้องการ `curl` หรือ `wget` (มีติดตั้งมาแล้วใน Proxmox VE)
+| คำสั่ง | ลงอะไร |
+|--------|--------|
+| `./install.sh` · `b2ctl install` | **เฉพาะ b2ctl** ไม่มี tool ไม่โหลด |
+| `./install.sh --with-tools` · `b2ctl install --with-tools` | b2ctl **+ tool ทั้งคู่** (sas2ircu + perccli) จาก Google Drive |
+| `./install.sh --perc` · `b2ctl install --perc` | b2ctl + **perccli** + `controller.mode=raid` (เครื่อง Dell PERC RAID) |
+| `./install.sh --flash` · `b2ctl install --flash` | b2ctl + **sas2ircu** + `controller.mode=it` (เครื่อง crossflashed HBA) |
+
+- `./install.sh` deploy package; `b2ctl install` (ไม่มี flag) แค่รายงานสถานะ tool +
+  mode ปัจจุบัน (b2ctl ลงไปแล้ว) — flag อื่น ๆ ทำงานเหมือนกันทั้งสองทาง
+- `--with-tools` **ดาวน์โหลด** archive จาก Google Drive แตกลง `/usr/sbin/` + ลง apt
+  prerequisite (`libc6-i386` สำหรับ sas2ircu 32-bit, `alien` สำหรับ perccli) ลบไฟล์
+  โหลดทิ้งเมื่อเสร็จ; ต้องมี `curl`/`wget` (มีใน Proxmox VE)
+- เลือก `--perc` **หรือ** `--flash` ตามฮาร์ดแวร์ — ลงเฉพาะ tool ของ backend นั้น +
+  ตั้ง mode ใน `/etc/b2ctl/config.json`
 
 ### สิ่งที่ต้องมีในเครื่องก่อน:
 
@@ -116,12 +125,13 @@ BAY   DEV       IF   MODEL                   SERIAL            POWER_ON      WEA
 1:6   sdd       SAS  Samsung SSD 870         S74ZNS0WXXXXXXX   18246h(~2.1y) 1%         98.4%      ...
 1:7   sde       SAS  Samsung SSD 870         S74ZNS0WXXXXXXX   18247h(~2.1y) 1%         99.8%      ...
 ========================================================================================================
-Pools:
-  rpool     952G    4.83G   free=947G    ONLINE    cap=0%
-  tank      2.72T   1.72G   free=2.72T   ONLINE    cap=0%
+Storage summary:
+  TYPE NAME            LEVEL    STATE     SIZE      USED      FREE
+  SW   rpool           mirror   ONLINE    952G      4.83G     947G
+  SW   tank            raidz1   ONLINE    2.72T     1.72G     2.72T
 [OK] all disks healthy and assigned
 
-[r]efresh  [a]ssign  [o]ffload  [s]wap  [d]emote  [n]ew-pool  [t]oggle-dryrun  [l]ocate  [q]uit   (or hot-plug)
+[r]efresh  [a]ssign  [o]ffload  [s]wap  [d]emote  [t]oggle-dryrun  [n]ew-pool  [e]xtend  [b]urnin  [u]dev-rescue  [x]destroy-pool  [l]ocate  [q]uit   (or hot-plug)
 b2ctl&gt;
 </pre>
 </details>
@@ -278,7 +288,16 @@ b2ctl> a
   assign which #>
 ```
 
-พิมพ์หมายเลขของดิสก์ที่ต้องการ ระบบจะถามว่าจะทำอะไรกับมัน:
+รายการนี้รวมดิสก์ว่าง **3 แบบ**:
+
+- ดิสก์ว่างปกติ → `[1] bay 1:7 /dev/sde (Samsung SSD 870, SN …)` — เปิดเมนู action ด้านล่าง
+- ดิสก์ **`[GHOST]`** (OS ปฏิเสธ ไม่มี `/dev`) → `[1] [GHOST] bay 1:4 (SN …) — needs
+  wipe` — ไปทาง wipe/rescue (ดู `[u]dev-rescue` ด้วย)
+- ดิสก์ **PERC Unconfigured-Good** (เฉพาะเครื่อง RAID mode) → `[1] bay 32:4 (Samsung
+  …, SN …) (PERC Unconfigured-Good)` — ไปเมนู hardware RAID (set JBOD, สร้าง volume,
+  หรือเพิ่มเป็น spare)
+
+เลือกดิสก์ว่างปกติ ระบบจะถามว่าจะทำอะไรกับมัน:
 
 ```
   Disk /dev/disk/by-id/wwn-0x5002538... is free.
@@ -426,7 +445,7 @@ b2ctl> n
     [3] /dev/sdd (bay 1:6)
   pick disks (space-separated #)> 1 2 3
   pool name> backup
-  raid type (stripe, mirror, raidz1, raidz2) [mirror]> raidz1
+  raid type (stripe, mirror, raid10, raidz1, raidz2) [mirror]> raidz1
   create pool 'backup' (raidz1) with 3 disks? [y/N]> y
   ✔ pool created
 ```
@@ -444,7 +463,93 @@ b2ctl> n
 
 ---
 
-### 6.7 `l` — Locate (ค้นหาดิสก์ทางกายภาพ)
+### 6.7 `e` — Extend (เพิ่ม/ถอด cache · log)
+
+**ใช้เมื่อ:** เร่งความเร็ว pool เดิมด้วย L2ARC (read cache) หรือ SLOG (sync-write log)
+รายละเอียดเต็มดูหัวข้อ "เพิ่ม cache / log ให้ pool" ท้ายคู่มือ
+
+```
+b2ctl> e
+  pool #> 2
+  [1] add L2ARC cache (read cache; loss = harmless)
+  [2] add SLOG log   (sync-write accel; mirror + PLP recommended)
+  [3] remove a cache/log device
+  action> 1
+    [1] /dev/sde (bay 1:7)
+  pick disk(s) (space-separated #)> 1
+  add 1 L2ARC cache device(s) to 'tank'? [y/N]> y
+  ✔ cache added
+```
+
+- **[1] cache** = L2ARC (พังแล้วแค่ cache miss ไม่ mirror) · **[2] log** = SLOG (เลือก 2
+  ลูกเพื่อ mirror + ต้องมี PLP; ลูกเดียว b2ctl เตือน) · **[3] remove** = ถอด cache/log ออก
+
+---
+
+### 6.8 `b` — Burn-in (ตรวจดิสก์ก่อนเข้าใช้ · หลายลูก + เบื้องหลัง)
+
+**ใช้เมื่อ:** vet ดิสก์ใหม่/มือสองก่อนเข้า pool — เลือกได้**หลายลูก** (คั่นเว้นวรรค) รัน long
+self-test (+เลือก badblocks) แบบ**ไม่บล็อก** มีหน้าจอสดโชว์แถบ + เวลาที่เหลือ ออกทิ้งให้รันต่อ
+ได้ (Ctrl-C) รายละเอียดเต็มดูหัวข้อ "Burn-in ดิสก์ก่อนเข้าใช้" ท้ายคู่มือ
+
+```
+b2ctl> b
+    [1] /dev/sdb (bay 32:4) Samsung SSD 870 EVO 1TB
+    [2] /dev/sda (bay 32:5) Samsung SSD 870 EVO 1TB
+  burn in which #> (space-separated) 1 2
+  burn-in 2 disk(s) (long self-test)? [y/N]> y
+  also run a full read-surface scan (badblocks, read-only, hours)? [y/N]> y
+
+ BAY     DISK      SELF-TEST                     SURFACE SCAN (badblocks)
+ 32:4    sdb       [########------]  62%  ~1h10m  [###-----------]  18%  ~4h30m
+```
+
+- กลับเข้าดูด้วย `b2ctl burnin --status` · ระหว่างเทส `b2ctl status` โชว์ `TEST xx%` ในคอลัมน์ STATUS
+
+---
+
+### 6.9 `u` — Udev-rescue (กู้ดิสก์ที่ OS ปฏิเสธ)
+
+**ใช้เมื่อ:** ดิสก์เสียบอยู่จริงแต่ OS ไม่รับ (ขึ้นเป็น **GHOST** ไม่มี `/dev`) — `u` สั่ง
+`udevadm trigger`/`settle` ให้ kernel มองเห็น เป็น**อ่านอย่างเดียว**/diagnostic ไม่แตะข้อมูล
+
+```
+b2ctl> u
+    ghost bay 1:4 serial S74ZNS0WXXXXXXX
+  run udevadm trigger/settle to rescue 1 ghost disk(s)? [y/N]> y
+  ✔ rescued 1 disk(s)
+```
+
+ถ้ากู้ไม่ได้: `no disks recovered — reseat physically or wipe via [a]ssign` · ถ้าไม่มี ghost
+เลย: `no ghost (OS-rejected) disks to rescue` (alias: `u` หรือ `rescue`)
+
+---
+
+### 6.10 `x` — Destroy pool (ลบ pool)
+
+**ใช้เมื่อ:** ลบ ZFS pool ถาวร — **ข้อมูลหายหมด** กันด้วยยืนยันสองชั้น + พิมพ์ชื่อ pool
+รายละเอียดเต็มดูหัวข้อ "ลบ ZFS pool" ท้ายคู่มือ
+
+```
+b2ctl> x
+    [1] rpool (952G, ONLINE)
+    [2] tank (2.72T, ONLINE)
+  destroy which #> 2
+  members:
+    - (1:4) Samsung SSD 870 EVO 1TB (S74ZNS0WXXXXXXX)
+    ...
+  [!] destroying 'tank' ERASES ALL DATA on it. This cannot be undone.
+  destroy pool 'tank'? [y/N]> y
+  type the pool name 'tank' to confirm> tank
+  ✔ pool 'tank' destroyed; cron removed
+```
+
+> ⚠️ 2 ด่าน: กด `[y/N]` **และ** พิมพ์ชื่อ pool ให้ตรง b2ctl ลบ cron ของ pool นั้นให้ด้วย
+> (ปุ่ม `x` เดี่ยว ไม่มี alias)
+
+---
+
+### 6.11 `l` — Locate (ค้นหาดิสก์ทางกายภาพ)
 
 **ใช้เมื่อ:** ต้องการรู้ว่าดิสก์ตัวไหนอยู่ช่องไหนในเครื่อง
 
@@ -466,7 +571,7 @@ b2ctl> l
 
 ---
 
-### 6.8 `t` — สลับโหมด Dry-run (ทดลองโดยไม่เปลี่ยนแปลงจริง)
+### 6.12 `t` — สลับโหมด Dry-run (ทดลองโดยไม่เปลี่ยนแปลงจริง)
 
 **ใช้เมื่อ:** ต้องการดูว่าระบบจะรันคำสั่งอะไร **โดยไม่แตะดิสก์จริงๆ** — เหมาะสำหรับ
 ฝึกซ้อม ตรวจสอบ หรือเรียนรู้การทำงานของ b2ctl
@@ -494,7 +599,7 @@ b2ctl> t
 
 ---
 
-### 6.9 `q` — Quit (ออก)
+### 6.13 `q` — Quit (ออก)
 
 ```
 b2ctl> q
@@ -503,7 +608,7 @@ bye
 
 ---
 
-### 6.10 การเสียบ/ถอดดิสก์ขณะ watch ทำงาน (Hot-plug)
+### 6.14 การเสียบ/ถอดดิสก์ขณะ watch ทำงาน (Hot-plug)
 
 **เสียบดิสก์ใหม่:**
 
@@ -684,26 +789,40 @@ b2ctl rollback 20260617-143022-replace
 | `sudo b2ctl watch` | ⭐ เข้าโหมดเฝ้าดู (แนะนำ) |
 | `sudo b2ctl --dry-run watch` | เข้าโหมดเฝ้าดูแบบ dry-run (ไม่เปลี่ยนแปลงจริง) |
 | `sudo b2ctl locate <bay/serial/sdX>` | กะพริบไฟดิสก์ตัวนั้น |
+
+**ใช้ไฟดวงไหน?** locate เลือกไฟที่เจาะจงสุด: disk หลัง PERC → ไฟ slot ของ
+controller (`perccli`); SATA/SAS raw → ไฟ locate เฉพาะของ backplane ผ่าน `ledctl`
+ถ้าลง package `ledmon` แล้ว (`apt install ledmon`), ไม่งั้น fallback เป็นไฟ
+activity ผ่าน `dd`. `b2ctl locate` จะบอกว่าใช้ทางไหน (`via ledctl` / `via dd` /
+`via perccli`). หมายเหตุ: ไฟ locate เป็น *กะพริบ* (SES identify) ไม่ใช่ติดนิ่ง — ไม่มี
+tool ไหนทำให้ไฟ drive ที่ healthy ติดนิ่งหรือดับสนิทได้
 | `sudo b2ctl log` | ดู 20 operation ล่าสุดจาก audit trail |
 | `sudo b2ctl log --last N` | ดู N operation ล่าสุด |
 | `sudo b2ctl rollback <op_id>` | ย้อนกลับ operation ก่อนหน้า (พร้อม confirm) |
 | `sudo b2ctl version` | แสดงเวอร์ชัน |
-| `sudo b2ctl install` | ดาวน์โหลดและติดตั้ง sas2ircu, storcli, perccli จาก Google Drive (ข้ามตัวที่ติดตั้งแล้ว) |
-| `sudo b2ctl install --tool sas2ircu` | ติดตั้งเฉพาะ tool ที่ระบุ (`sas2ircu`, `storcli`, หรือ `perccli`) |
-| `b2ctl update` | ตรวจสอบ config และ tool ทั้งหมด แสดงสถานะ |
-| `sudo b2ctl update --export-bay-map` | คัดลอก bay_map.json ไปยัง /etc/b2ctl/ เพื่อแก้ไขได้อิสระ |
+| `b2ctl install` | รายงานสถานะ tool + mode (ไม่โหลดอะไร = เหมือน `./install.sh`) |
+| `sudo b2ctl install --with-tools` | ดาวน์โหลด + ติดตั้ง sas2ircu **และ** perccli จาก Google Drive |
+| `sudo b2ctl install --perc` / `--flash` | ลง tool ของ backend นั้น + ตั้ง mode (raid/it) |
+| `sudo b2ctl install --tool sas2ircu` | ติดตั้งเฉพาะ tool ที่ระบุ (`sas2ircu` หรือ `perccli`) |
+| `b2ctl update` | ตรวจ config; **ถ้าเป็น root** จะ sync `bay_map.json` + `ssd_spec.json` ไปที่ `/etc/b2ctl/` และผูกใน config (ไฟล์ที่แก้เองไม่ถูกทับ) |
+| `sudo b2ctl update --force` | เขียนทับไฟล์ `/etc/b2ctl/` ที่ผู้ใช้แก้ (สำรอง `.bak` ให้ก่อน) |
+| `sudo b2ctl update --export-bay-map` | (เลิกใช้) alias ของ `--force` — ตอนนี้ `update` เฉยๆ sync ทั้งสองไฟล์แล้ว |
 
 ### คำสั่งในโหมด watch (พิมพ์ที่ `b2ctl>`)
 
 | ปุ่ม | คำสั่ง | ทำอะไร |
 |-----|--------|--------|
 | `r` | refresh | รีเฟรชตาราง |
-| `a` | assign | จัดสรรดิสก์ว่างเข้า pool |
+| `a` | assign | จัดสรรดิสก์ว่างเข้า pool (รวม GHOST + PERC-UG) |
 | `o` | offload | ถอดดิสก์ออกจาก pool (เพื่อดึงออกทางกายภาพ) |
 | `s` | swap | สลับดิสก์สึกหรอไปยัง spare (ดิสก์เก่ากลายเป็น spare) |
 | `d` | demote | ลดดิสก์ mirror ลงเป็น spare |
-| `n` | new-pool | สร้าง pool ใหม่ |
 | `t` | toggle dry-run | สลับโหมด dry-run เปิด/ปิด |
+| `n` | new-pool | สร้าง pool ใหม่ |
+| `e` | extend | เพิ่ม/ถอด L2ARC cache หรือ SLOG log |
+| `b` | burnin | ตรวจดิสก์หลายลูก (self-test + badblocks) เบื้องหลัง |
+| `u` | udev-rescue | กู้ดิสก์ที่ OS ปฏิเสธ (GHOST) |
+| `x` | destroy-pool | ลบ pool (ยืนยันสองชั้น + พิมพ์ชื่อ pool) |
 | `l` | locate | กะพริบไฟ LED หาดิสก์ (~5 วินาที) |
 | `q` | quit | ออก |
 
@@ -723,3 +842,184 @@ b2ctl rollback 20260617-143022-replace
 
 > 💡 Tip: **มีปัญหา?** ถ้าไม่แน่ใจว่าจะทำอะไร ให้กด `s` (skip) ไว้ก่อนเสมอ — ดิสก์จะไม่ถูก
 > เปลี่ยนแปลง แล้วค่อยกลับมาจัดการทีหลังด้วย `a` (assign)
+
+---
+
+## เครื่องที่ใช้ RAID จริง (Dell PERC เช่น R640 / H730P)
+
+b2ctl รองรับเครื่องที่ PERC ทำ **hardware RAID** (ไม่ได้ crossflash) ด้วย ติดตั้งแบบ
+RAID แล้วมันจะสลับเป็นโหมด RAID เอง:
+
+```
+b2ctl install --perc      # ลง perccli + ตั้ง controller.mode=raid
+b2ctl install --flash     # เครื่อง IT/HBA: ลง sas2ircu + mode=it
+```
+
+`b2ctl status` จะโชว์ **ดิสก์จริงที่อยู่หลัง RAID volume** (อ่านผ่าน controller) คอลัมน์
+`POOL/ARRAY` บอกชนิด:
+
+- `HW:vd0/raid1` — เป็นสมาชิกของ **hardware** RAID (PERC คุม)
+- `SW:tank/raidz1-0` — เป็นสมาชิก **software** RAID (ZFS)
+- `-` — ดิสก์เดี่ยว/ยังไม่ได้ assign (เช่น NVMe, JBOD)
+
+เครื่องที่มี **ทั้งสองแบบ** ตาราง disk จะแบ่งกลุ่ม — บล็อก
+`--- Hardware (PERC RAID) ---` อยู่บน, `--- Software (ZFS) ---` อยู่ล่าง — และ
+summary รวมเป็นตาราง **Storage summary** เดียว (hardware บน / software ล่าง):
+
+```
+Storage summary:
+  TYPE NAME            LEVEL    STATE     SIZE      USED      FREE
+  HW   MainSSD         raid1    Optl      640.0 GB  12.0G     628.0G
+  SW   tank            mirror   ONLINE    928G      598M      927G
+```
+
+- **NAME** — ชื่อ volume ของ hardware (เช่น `MainSSD`) / ชื่อ pool ของ software
+- **USED/FREE** — software เอาจาก pool; hardware อ่านจาก **filesystem ที่ mount**
+  ของ volume ผ่าน `lsblk` ถ้า volume เป็น raw/ไม่ได้ mount จะขึ้น `-` (ไม่มี FS ให้วัด)
+
+### เปลี่ยนดิสก์ RAID ที่เสีย
+
+```
+b2ctl raid-replace          # เลือกตัว หรือระบุ: b2ctl raid-replace 32:0
+```
+
+มันจะ fail ดิสก์ออก, **เปิดไฟ LED ช่องนั้น**, รอให้ถอดของเก่าใส่ของใหม่, แล้วเฝ้าดู
+controller **rebuild** พร้อมแถบความคืบหน้า คำสั่งอื่น: `raid-offline <bay>`,
+`locate <bay|serial|dev> [secs]` (ไฟกะพริบตามเวลาที่กำหนดแล้วดับเสมอ — ไม่มีโหมด
+ค้างไฟ `on`/`off` โดยตั้งใจ), และ (อันตราย ยืนยันสองครั้ง) `raid-create` / `raid-del`
+
+> หมายเหตุ: การ์ด NVMe 2×M.2 ถ้าโชว์แค่ตัวเดียว ต้องเปิด **PCIe bifurcation (x4x4)**
+> ใน BIOS — เป็นเรื่องฮาร์ดแวร์ ไม่ใช่ b2ctl
+
+---
+
+## สร้าง ZFS pool (`[n]ew-pool`)
+
+หลังเลือกดิสก์/ตั้งชื่อ/เลือก raid level แล้ว b2ctl จะถามค่า property ทีละตัว โดยมีค่า
+default ที่เหมาะกับ SSD อยู่แล้ว — **กด Enter เพื่อใช้ค่า default** หรือพิมพ์เพื่อเปลี่ยน
+(`ashift`, `compression`, `atime`, `xattr`, `dnodesize`, `acltype`, `recordsize`)
+`recordsize` ปรับตาม workload ได้ (ทั่วไป 128K, DB 16K, media 1M, VM 64–128K) และ
+เปลี่ยนภายหลังราย dataset ได้
+
+**autotrim** เป็นตัวเลือก:
+- **off (Monthly)** *(แนะนำ)* — ติดตั้ง schedule รายเดือนให้ pool: `zpool trim`
+  อาทิตย์แรก + `zpool scrub` อาทิตย์ที่สอง (cron ที่ `/etc/cron.d/b2ctl-<pool>`)
+- **on** — trim ต่อเนื่องโดย ZFS เอง; ไม่สร้าง cron
+
+**raid10** = stripe ของ mirror (เร็ว/ resilver ไว / random IOPS ดีสุด): เลือกดิสก์
+**จำนวนคู่ (even, ≥4)** b2ctl จะจับคู่ให้เอง (`mirror d1 d2 mirror d3 d4 …`) และโชว์คู่
+ก่อนยืนยัน — จาก CLI ใช้ `b2ctl create --raid10`
+
+## เพิ่ม cache / log ให้ pool (`[e]xtend`)
+
+เร่งความเร็ว pool เดิมตาม runbook ของเครื่อง storage:
+
+- **L2ARC cache** — read-cache บน SSD/NVMe เร็ว ๆ พังแล้วแค่ cache miss (ไม่ mirror)
+  ช่วยเฉพาะตอน working set ใหญ่กว่า RAM. CLI: `b2ctl cache-add|cache-rm <pool> <dev…>`
+- **SLOG log** — เร่ง write แบบ **sync** (เช่น NFS `sync`) เลือก **2 ลูกเพื่อ mirror**
+  (log ลูกเดียวเสีย = เสีย write ที่ค้างอยู่) และต้องเป็น SSD ที่มี **PLP**; b2ctl เตือน
+  ถ้าเลือกลูกเดียว. CLI: `b2ctl log-add|log-rm <pool> <dev…>`
+- เลือก `[3]` เพื่อถอด cache/log ออก (`zpool remove`)
+
+## Burn-in ดิสก์ก่อนเข้าใช้ (`[b]urnin`)
+
+ก่อนเชื่อดิสก์ใหม่/มือสอง รัน SMART long self-test (เลือกสแกนผิวอ่านทั้งลูกได้) แล้วได้ผล
+**PASS / WARN / FAIL** — ทำ**หลายลูกพร้อมกัน**ได้ (v0.10.0)
+
+**เลือกหลายลูก + รันเบื้องหลัง:** เลือกดิสก์แบบเดียวกับ `[n]ew-pool` (คั่นด้วยเว้นวรรค)
+ยืนยัน แล้วเลือกว่าจะสแกนผิว (`badblocks`) ด้วยไหม self-test รันบนเฟิร์มแวร์ของดิสก์เอง
+ส่วน scan รันเป็น process เบื้องหลัง จึงมี**หน้าจอสด**โชว์แถบความคืบหน้า + เวลาที่เหลือของ
+แต่ละลูก และ**ออกทิ้งให้รันต่อได้** (กด Ctrl-C)
+
+```
+b2ctl> b
+    [1] /dev/sdb (bay 32:4) Samsung SSD 870 EVO 1TB
+    [2] /dev/sda (bay 32:5) Samsung SSD 870 EVO 1TB
+  burn in which #> (space-separated) 1 2
+  burn-in 2 disk(s) (long self-test)? [y/N]> y
+  also run a full read-surface scan (badblocks, read-only, hours)? [y/N]> y
+
+ BAY     DISK      SELF-TEST                     SURFACE SCAN (badblocks)
+ 32:4    sdb       [########------]  62%  ~1h10m  [###-----------]  18%  ~4h30m
+ 32:5    sda       [##########----]  74%  ~40m    [####----------]  22%  ~4h05m
+```
+
+- **ออก & กลับเข้ามาดูใหม่:** กด **Ctrl-C** กลับไปที่ prompt — test/scan ยังรันต่อ กด `[b]`
+  อีกครั้ง (หรือ `b2ctl burnin --status`) เพื่อกลับเข้าหน้าจอสด พอลูกไหนเสร็จจะเห็นผลตรงนั้น
+- ระหว่าง self-test `b2ctl status` จะโชว์ `TEST xx%` ในคอลัมน์ STATUS ของดิสก์ลูกนั้น
+- **PASS** สะอาด · **WARN** ใช้ได้แต่เก่า (POH > 40000 ชม., grown defect, หรือ scan เจอ bad
+  block) → จัด priority ต่ำ · **FAIL** มี uncorrected error หรือ self-test ไม่ผ่าน → อย่าเข้า pool
+- **อ่านอย่างเดียว**: ทำแค่สั่ง self-test และ (ถ้าเลือก) `badblocks` แบบ read-only — ไม่
+  เขียนทับดิสก์. CLI: `b2ctl burnin <bay|dev> [<bay|dev> …] [--scan] [--short]`,
+  กลับเข้าดูด้วย `b2ctl burnin --status`
+
+## ลบ ZFS pool (`[x]` หรือ `b2ctl destroy <pool>`)
+
+ลบ pool ด้วย `zpool destroy` — **ข้อมูลหายทั้งหมด** ต้องยืนยันและ**พิมพ์ชื่อ pool**
+เพื่อดำเนินการ b2ctl จะลบ cron ของ pool นั้นให้ด้วย (ถ้าลบ pool เองด้วย `zpool destroy`
+b2ctl จะเก็บกวาด cron ที่ค้างให้ตอนเปิด `b2ctl watch` ครั้งถัดไป)
+
+## เปลี่ยนดิสก์ที่กำลังจะเสีย ตอนไม่มี spare (`[o]ffload`)
+
+raidz1 (และ mirror) ยังทำงานได้แม้ดิสก์หายไป 1 ลูก ถ้าดิสก์กำลังจะเสีย บายเต็มหมด และ
+**ไม่มี hot spare** ให้ `[o]ffload` ตัวนั้น:
+
+1. b2ctl เช็คก่อนว่า pool **redundant เต็มอยู่ตอนนี้** (ลูกอื่นปกติหมด) ถ้าไม่ → **ปฏิเสธ**
+   เพราะ offline ลูกที่สองอาจทำ pool ล่ม
+2. รัน `zpool offline` — pool จะเป็น **DEGRADED แต่ยังออนไลน์** (ไม่มี redundancy จนกว่าจะ
+   เสร็จ) และเปิดไฟ LED ช่องนั้น
+3. **ถอดดิสก์ช่องนั้น แล้วใส่ดิสก์ใหม่ในช่องเดิม** จากนั้นกด Enter
+4. b2ctl จะ `zpool replace` ดิสก์ใหม่เข้าไป + โชว์ความคืบหน้า resilver พอเสร็จ pool กลับมา
+   **ONLINE**
+
+> ⚠️ ระหว่าง DEGRADED / resilver ไม่มี redundancy — ถ้ามีดิสก์ลูกที่สองเสียในช่วงนี้ข้อมูลหาย
+> b2ctl จะไม่ยอมให้ offline ลูกที่สองระหว่างนี้
+
+## ป้ายชื่อ bay — `bay_map.json`
+
+`/etc/b2ctl/bay_map.json` เป็น list ของ **panel** ที่อธิบาย chassis:
+
+- **front** (`type: sas`) — backplane หลัง PERC (RAID) หรือ PERC ที่ flash เป็น
+  `sas2ircu` บายเป็น `enc:slot` ถ้า controller รายงาน slot สลับ ให้ตั้ง
+  `reverse_slots`+`slots_per_enclosure` หรือ `map` ตรง ๆ (`{"32:0": "32:7"}`)
+  เทียบตำแหน่งด้วย `b2ctl locate <serial>`
+- **back** (`type: nvme`) — กล่อง PCIe/M.2 SSD (มีได้หลายอัน) NVMe ไม่มี enc:slot
+  เลยโชว์ **PCIe address** (เช่น `d8:00.0`) จนกว่าจะ relabel แต่ละ entry ใน `map`
+  match ได้ด้วย key 3 แบบ (**ลำดับความสำคัญ by-id > serial > bdf**):
+
+```json
+{ "panel": "back", "type": "nvme",
+  "map": [ {"by-id":  "nvme-Samsung_SSD_990_EVO_Plus_4TB_S7..", "bay": "PCIe2:0"},
+           {"serial": "S7XXNS0W123", "bay": "PCIe2:1"},
+           {"bdf":    "d8:00.0",     "bay": "PCIe2:2"} ] }
+```
+
+- **`serial`** ง่ายสุด — copy จากคอลัมน์ **SERIAL** ใน `b2ctl status` ได้เลย
+- **`by-id`** เป็น substring ของลิงก์ `/dev/disk/by-id/nvme-<model>_<serial>`
+  (`ls /dev/disk/by-id/ | grep nvme`) ไม่เปลี่ยนแม้ย้าย slot การ์ด
+- **`bdf`** ยังใช้ได้ — หาได้จาก `b2ctl status` (คอลัมน์ BAY) หรือ
+  `cat /sys/class/nvme/nvme0/address`
+
+> NVMe ขึ้นในตารางและใช้ `[a]ssign` / `[b]urnin` ได้เหมือน disk อื่นทุกอย่าง —
+> ต่างแค่คอลัมน์ BAY (ไม่มี enc:slot) ป้าย bay เป็นแค่ชื่อแสดงผล ตั้งผิดก็ไม่อันตราย
+
+### ให้ป้าย bay ใช้ได้จากทุก directory
+
+แก้ bay_map ที่ **copy ใน `/etc/b2ctl/`** — ไม่ใช่ตัวใน source checkout สร้าง/รีเฟรช
+ด้วย **`b2ctl update`** (เป็น root):
+
+```bash
+sudo b2ctl update          # สร้าง /etc/b2ctl/bay_map.json + ssd_spec.json + ผูกใน config
+sudo nano /etc/b2ctl/bay_map.json   # ใส่ entry serial NVMe -> bay
+b2ctl watch                # map ถูกต้องจากทุก directory แล้ว
+```
+
+`b2ctl update` คัดลอก `bay_map.json` และ `ssd_spec.json` (ตาราง TBW ของ SSD) ที่
+bundle มา ไปที่ `/etc/b2ctl/` และบันทึก path ลง config ดังนั้น b2ctl โหลดไฟล์เดียวกัน
+เสมอไม่ว่ารันจาก directory ไหน และ **จะไม่ทับไฟล์ที่คุณแก้เอง** — ไฟล์ที่แก้แล้วจะขึ้น
+`customized-kept` (ถ้าอยากทับใช้ `sudo b2ctl update --force` ซึ่งสำรอง `.bak` ให้ก่อน)
+
+> **ทำไมสำคัญ:** ก่อน v0.8.5 การรัน `b2ctl` จากใน source checkout อาจโหลด
+> `bay_map.json` ของ copy นั้นแทนตัวที่ติดตั้งไว้ ทำให้ mapping เหมือนเปลี่ยนตาม
+> directory ปัจจุบัน ตอนนี้ launcher รัน copy ที่ติดตั้งเสมอ (`PYTHONSAFEPATH`) และ
+> `b2ctl update` วางไฟล์ที่แก้ได้ไว้ที่เดียว (`/etc/b2ctl/`)

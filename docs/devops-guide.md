@@ -52,7 +52,7 @@ those only work behind a RAID controller and are removed in this build.
 | `common.py` | colours, `run()`/`run_check()`, `Disk` model, `assess()` | none |
 | `spec.py` | load/lookup TBW ratings (`ssd_spec.json`) | none |
 | `hba.py` | enumerate disks, by-id index, bay map + **remap** | `lsblk`, `sas2ircu` |
-| `locate.py` | device-based LED locate (ledctl -> dd), timed | `ledctl`, `dd` |
+| `locate.py` | LED locate: perccli (PERC PD) / ledctl → dd (raw), timed | `perccli`, `ledctl`, `dd` |
 | `smart.py` | direct SMART read + parse, endurance | `smartctl` |
 | `zfs.py` | pool/topology parse, membership, actions | `zpool`, `wipefs`, `sgdisk` |
 | `core.py` | the `scan()` pipeline | (composes the above) |
@@ -86,8 +86,11 @@ lsblk -dnb -P -o NAME,SIZE,SERIAL,MODEL,TRAN,ROTA,TYPE
 ### 3.2 Stable names — `hba._by_id_index()`
 Walks `/dev/disk/by-id`, `realpath`s each link, and keeps the
 highest-priority link per real device: `ata-` > `scsi-SATA` > `wwn-` >
-`scsi-`. Skips `*-part*`. This `by_id` is what every `zpool` action uses, so a
-disk keeps a stable name across reboots/reslots.
+`scsi-` > `nvme-<model>_<serial>` > `nvme-eui.<hex>`. Skips `*-part*`. This
+`by_id` is what every `zpool` action uses, so a disk keeps a stable name across
+reboots/reslots. The NVMe model link is ranked above `nvme-eui.*` so `d.by_id`
+is the human-readable one operators put in `bay_map.json` (the `nvme-eui.` rule
+must be listed before `nvme-` in `rank`, since both share the `nvme-` prefix).
 
 ### 3.3 Physical bay — `hba.attach_bays()` / `bay_map()`
 ```
@@ -106,6 +109,14 @@ is **display-only** (LEDs key off the device, not the slot), so a wrong map is
 cosmetic, never dangerous. Calibrate with `b2ctl locate <serial>`.
 
 If `sas2ircu list` returns nothing the step is skipped and `bay` stays `None`.
+
+**NVMe bays — `baymap.remap_nvme()`.** NVMe has no enc:slot; its raw bay is the
+PCIe BDF (`hba._nvme_pcie()` reads `/sys/class/nvme/<ctrl>/address`, drops the
+`0000:` domain). A back/`type:nvme` panel relabels it; each map entry keys on
+`by-id` (substring of the drive's `/dev/disk/by-id/nvme-…` link), `serial`, or
+`bdf`, matched in **precedence by-id > serial > bdf**. Remap runs even when the
+BDF is unavailable, so a by-id/serial entry still labels the drive. `hba_raid`
+reuses `hba.enumerate_disks`, so NVMe in RAID mode is covered with no extra code.
 
 ### 3.4 SMART — `smart.read()`
 ```
@@ -159,20 +170,78 @@ resilvering pool, which is rare). Finds `replacing-N` vdev blocks; returns
 | swap-to-spare | `zpool replace <pool> <member> <spare-token>` |
 | demote-to-spare | `zpool detach <pool> <member>` → `zpool add <pool> spare <by-id>` |
 | add mirror vdev | `zpool add <pool> mirror <a> <b>` |
+| add L2ARC cache | `zpool add -f <pool> cache <by-id...>` (`zfs.add_cache`) |
+| add SLOG log | `zpool add -f <pool> log [mirror] <by-id...>` (`zfs.add_log`; ≥2 devs → mirrored) |
+| remove aux vdev | `zpool remove <pool> <token>` (`zfs.remove_vdev`; cache/log/spare leaf) |
 | attach | `zpool attach <pool> <existing> <new>` |
 | create pool | `zpool create ...` (checks `wipefs -n` for existing labels first) |
+| create RAID10 | `zpool create ... <name> mirror a b mirror c d ...` (repeated `mirror` from disk pairs) |
 | wipe | `zpool labelclear -f <dev>` → `wipefs -a <dev>` → `sgdisk --zap-all <dev>` |
 
-### 3.7 LED locate — `locate.py` (by DEVICE, never by slot)
+**Aux vdevs (runbook STEP 03).** L2ARC `cache` loss is harmless (cache miss),
+so it is added unguarded. SLOG `log` holds in-flight sync writes: `add_log`
+mirrors automatically with ≥2 devices, and the watch/CLI workflow warns on a
+single (non-mirrored) log and always reminds the operator to use a **PLP** SSD
+(PLP is not reliably exposed by SMART, so it is a warning, not a gate). All three
+honor `--dry-run`. CLI: `b2ctl cache-add|cache-rm|log-add|log-rm <pool> <dev…>`;
+watch: `[e]xtend`.
+
+### 3.6a Disk burn-in — `burnin.py` (runbook STEP 02, read-only vetting)
+
+**Multi-disk & non-blocking (v0.10.0).** `run_multi(targets, …)` vets several disks
+at once and returns to the prompt while they run; a state file makes it
+re-attachable. See **ADR-002** for the background-process/state-file architecture.
+
+| step | command / mechanism |
+|------|---------|
+| start self-test | `smartctl -t long\|short [-d <dtype>] <dev>` (`start_selftest`) — runs on the drive firmware, returns immediately |
+| start surface scan (opt) | `subprocess.Popen(["badblocks","-sv","-b","4096",<dev>], stderr=<logfile>, start_new_session=True)` — **read-only, never `-w`**, detached (`start_scan`) |
+| self-test progress | `smartctl -a <dev>` → `parse_selftest()` reads `% of test remaining` (ATA) / `% complete` (SAS); ETA = `Extended self-test routine recommended polling time: (N) minutes` × remaining% (`_selftest_eta_min`, ATA only) |
+| scan progress | tail the badblocks logfile for the last `NN% done` (`_parse_badblocks_log`); liveness via `os.kill(pid,0)` + `waitpid(WNOHANG)` reaping (`_pid_alive`); ETA computed from our own elapsed time (`scan_progress`) |
+| live view | `live_view()` redraws `ui.render_burnin_view()` every ~2.5 s (ANSI cursor-up + clear). **Ctrl-C detaches** (saves state, keeps running); it does NOT abort |
+| verdict | on completion `_finish()` re-reads SMART (`core.scan_one`) + `assess(disk)` → FAIL (uncorrected>0 / self-test error), WARN (POH>40000 / grown defects / surface-scan bad blocks), else PASS |
+
+- **State file:** `os.path.join(safety.LOG_DIR, "burnin.json")` (records keyed by
+  serial: dev/bay/dtype/kind/do_scan/scan_pid/scan_log/started), plus per-disk
+  `scan-<serial>.log`. Path is read at call time so the sim's `safety.LOG_DIR`
+  monkeypatch redirects it to `sim/var/` (`save_state`/`load_state`).
+- **Re-entrancy:** `run_multi` polls `selftest_status` first and **never restarts**
+  a disk already under a self-test; `_finish` prunes completed records from state.
+- **Exit code note:** because the run is backgrounded, `b2ctl burnin <disk>` exits
+  `0` once the tests are *started* — the PASS/WARN/FAIL verdict is shown later in
+  the live view / `--status`, not encoded in the exit code (the old single-disk
+  synchronous FAIL→exit-1 is gone).
+
+CLI `b2ctl burnin <bay\|dev> [<bay\|dev> …] [--scan] [--short]` and
+`b2ctl burnin --status` (re-attach); watch `[b]urnin` (space-separated
+multi-select). Only spare/new disks (`in_pool` is refused). The only writes are
+the self-test trigger and a read-only `badblocks`; nothing on the disk is modified.
+
+### 3.7 LED locate — `locate.py`
 `sas2ircu ... LOCATE <slot>` is **not used** — on this backplane it lights a
-whole range of bays, and the slot numbers are scrambled anyway. Locate is keyed
-to the `/dev/sdX` device, backend chain:
-1. fallback: `dd if=/dev/sdX of=/dev/null bs=1M` for N seconds (READ ONLY) — the
-   activity LED flickers; nothing to switch off.
-Default blink is 5 s then auto-stop. `b2ctl locate <bay|serial|sdX> [secs]`
-resolves any identifier to the device first. `b2ctl status --locate` blinks all
-at-risk disks at once (`blink_many`). **Invariant: never construct a writing
-`dd` (`of=` is always `/dev/null`).**
+whole range of bays, and the slot numbers are scrambled anyway. `blink_disk()`
+picks the most-dedicated indicator, **perccli → ledctl → dd**, by applicability:
+
+1. **PERC PD** (`is_perc_pd`: VD member / UGood) → `hba_raid.locate(enc:slot, on)`
+   (`perccli start/stop locate`) **only**. If perccli fails, report failed — **no
+   `/dev` fallback**: a member shares `/dev/sda`, so ledctl/dd there would light
+   the whole VD (all members' bays = wrong bay).
+2. **raw disk** (own `/dev` node) → `blink(dev, …)`:
+   - **ledctl** (v0.8.7) if `shutil.which(ledctl)` (`_have_ledctl`) — the
+     backplane's dedicated locate LED via SGPIO/SES: `_ledctl(dev, on)` runs
+     `ledctl locate=<dev>` / `ledctl locate_off=<dev>`. The first `locate=` doubles
+     as a support probe; the LED is **always turned off in a `finally`**.
+   - **dd** fallback (`_blink_dd`) if ledctl is absent or can't drive the device
+     (`ledctl locate=` returned non-zero): `dd if=<dev> of=/dev/null bs=1M` for N
+     seconds (READ ONLY) — the activity LED flickers, nothing to switch off.
+
+`ledctl` needs SGPIO/SES; PERC VD members (no per-drive node) and non-VMD M.2
+NVMe won't drive it → dd fallback. Default blink is 5 s then auto-stop.
+`b2ctl locate <bay|serial|sdX> [secs]` resolves any identifier to the device
+first and prints `via {perccli|ledctl|dd}`. `b2ctl status --locate` blinks all
+at-risk disks at once (`blink_many`, still dd). **Invariants: LED-only (never a
+writing command; `dd` `of=` is always `/dev/null`); always end with the locate
+LED off.**
 
 ---
 
@@ -202,7 +271,19 @@ Ghost disks are detected by `hba.get_ghost_disks()`. They are drives seen by the
 
 A single `select.select([sys.stdin], [], [], 2.0)` loop:
 
-1. Print table + pools + details once (`_cmd_refresh`).
+1. Print disk table + **Storage summary** + details once (`_cmd_refresh`), the
+   same blocks the CLI `status` path prints. The summary
+   (`ui.render_storage(core.assemble_storage(disks, pools, vols))`) is one
+   unified table with **hardware rows above software**:
+   - `core.assemble_storage` maps each PERC volume (`backend.raid_volumes()`) to
+     its block device via the HW member disks and reads used/free from
+     `hba.vd_usage(dev)` (lsblk FS columns of the mounted VD, else `-`); each ZFS
+     pool (`zfs.list_pools()`) gets its level from `zfs.pool_level()` and used/free
+     from `zpool list`.
+   - The disk table itself (`ui.render_table`) groups rows under
+     `--- Hardware (PERC RAID) ---` / `--- Software (ZFS) ---` sub-headers when
+     both kinds are present (single-type boxes stay flat).
+   - IT-only box: no volumes → the summary is just the software (pool) rows.
 2. Snapshot block devices (`_block_devs()` via `lsblk -P NAME,TYPE`).
 3. Each iteration:
    - If stdin is ready → read a line → dispatch `r/a/o/s/d/n/t/l/q`.
@@ -423,38 +504,77 @@ A tmpdir is created via `mktemp -d` and cleaned on EXIT via `trap`.
 **Error handling:** missing archive or failed extraction prints `[✗] <tool>: reason`
 and continues. Never aborts the b2ctl package install above it.
 
-### §7.2 `b2ctl install` — post-install tool management
+### §7.2 `b2ctl install` — 1:1 mirror of `./install.sh`
 
-After b2ctl is installed, tool binaries can be installed or reinstalled without re-running `install.sh`:
+`b2ctl install` (`cli.py::_install` → `b2ctl/installer.py`) reproduces the
+`./install.sh` contract, flag-for-flag. The package itself is already deployed (we
+are running from it), so the no-flag form does **not** redeploy — it reports
+status. Everything else matches:
 
-```bash
-sudo b2ctl install                  # install all missing tools
-sudo b2ctl install --tool sas2ircu  # install one specific tool
-```
+| `b2ctl install …` | `installer` call | tools | mode | root |
+|-------------------|------------------|-------|------|:----:|
+| *(no flag)* | `install_base()` | — (report only, no download) | — | no |
+| `--with-tools` | `install_tools(["sas2ircu","perccli"])` | both | — | yes |
+| `--perc` | `install_profile("perc")` | perccli | `raid` | yes |
+| `--flash` | `install_profile("flash")` | sas2ircu | `it` | yes |
+| `--tool TOOL` | `install_tools([TOOL])` | one | — | yes |
 
-Implemented in `b2ctl/installer.py`. Each tool is independent — one failure does not abort others.
+The flags are an `argparse` mutually-exclusive group. `install_base()` needs no
+root (it only reads `tool_ok()` + `config.controller_mode()`); the acting branches
+check `os.geteuid()==0` individually. Each tool is independent — one failure does
+not abort others.
 
 | tool | archive | method | binary path |
 |------|---------|--------|------------|
-| sas2ircu | SAS2IRCU_P20.zip (zip) | `cp + chmod` | `/usr/local/bin/sas2ircu` |
-| storcli | storcli.zip (zip) | `dpkg -i Ubuntu/*.deb` | `/opt/MegaRAID/storcli/storcli64` → `/usr/local/bin/storcli` |
-| perccli | perccli.tar.gz | `alien --scripts -i *.rpm` | `/opt/MegaRAID/perccli/perccli64` → `/usr/local/bin/perccli` |
+| sas2ircu | SAS2IRCU_P20.zip (zip) | unzip `*x86*_rel/sas2ircu` → `cp -f` + chmod | `/usr/sbin/sas2ircu` |
+| perccli | perccli.tar.gz | `alien --scripts -i *.rpm` → `cp -f perccli64` | `/usr/sbin/perccli` |
 
-Downloads use `urllib.request` (stdlib) from Google Drive. Size validation: < 1 KB = HTML error page → aborts with `[✗]`. Temp dir cleaned up via `try/finally`.
+`install_tools()` first runs `ensure_prereqs()` (`dpkg --add-architecture i386`,
+`apt-get install -y alien libc6-i386`, verifying the 32-bit loader actually
+exists). Downloads use `urllib.request` (stdlib) from Google Drive; < 1 KB = HTML
+error page → `[✗]`. Temp dir cleaned via `try/finally`.
 
-### §7.3 `b2ctl update` — config validation and bay_map export
+> `./install.sh` (no flag) installs **only** the b2ctl package — no `apt`, no
+> downloads. The apt prerequisites are installed by `install_tools()` only when a
+> tool is actually being added (`--with-tools`/`--perc`/`--flash`).
+
+### §7.3 `b2ctl update` — config validation + resource sync
 
 ```bash
-b2ctl update                        # validate config, report tool status (no root needed)
-sudo b2ctl update --export-bay-map  # copy bundled bay_map.json to /etc/b2ctl/
+b2ctl update            # non-root: validate config + report status only
+sudo b2ctl update       # root: also sync bay_map.json + ssd_spec.json -> /etc/b2ctl/ + bind config
+sudo b2ctl update --force   # overwrite operator-customized files (saves .bak first)
 ```
 
 `b2ctl update` reads the active config and reports per-item status:
-- `[✔]` — config file parses OK, tool found, bay_map exists
-- `[i]` — warn: config missing (using defaults), tool not found, bay_map is bundled
-- `[✗]` — error: JSON parse error, bay_map file missing
+- `[✔]` — config parses OK, tool found, data file is a config override or the `/etc` standard
+- `[i]` — warn: config missing (defaults), tool not found, data file is the bundled fallback
+- `[✗]` — error: JSON parse error, data file missing
 
-`--export-bay-map`: copies `/opt/b2ctl/bay_map.json` → `/etc/b2ctl/bay_map.json` and writes `bay_map_path` into `/etc/b2ctl/config.json`. The `/etc/b2ctl/` copy is never overwritten by `install.sh`.
+**Resource sync (root only).** For each managed file `(bay_map.json, ssd_spec.json)`
+`cli._sync_resource()` compares the bundled copy with `/etc/b2ctl/<file>` via
+`filecmp.cmp(src, dest, shallow=False)`:
+- dest missing → copy → `created`
+- identical → `current` (no write)
+- differs (operator-customized) → **preserved** as `customized-kept` unless
+  `--force`, which backs up to `<file>.bak` then overwrites → `updated (backup .bak)`
+
+After syncing, it writes `bay_map_path` / `ssd_spec_path` (absolute `/etc/b2ctl/`
+paths) into `/etc/b2ctl/config.json` so resolution is directory-independent.
+`--export-bay-map` is a deprecated alias of `--force`. The `/etc/b2ctl/` copies
+are never touched by `install.sh`.
+
+**Why directory-independence needed two fixes (v0.8.5).**
+1. *Code path* — the launcher runs `python -m b2ctl`, and `python -m` prepends
+   the cwd to `sys.path[0]` ahead of `PYTHONPATH`. Running from a directory that
+   contains a `b2ctl/` package (the source checkout) silently shadowed the
+   installed `/opt/b2ctl`. The launcher now sets `PYTHONSAFEPATH=1` (Python ≥3.11)
+   so cwd is not prepended → the installed copy always wins.
+2. *Data path* — `config.bay_map_path()` / `ssd_spec_path()` resolve
+   **override > `/etc/b2ctl/<file>` > bundled `__file__`-relative**
+   (`config._resource_path`). The `__file__` fallback is cwd/copy-sensitive; the
+   `/etc` standard is absolute, so preferring it (and `b2ctl update` binding it in
+   config) makes the mapping load the same file from any directory.
 
 ---
 
@@ -466,6 +586,7 @@ sudo b2ctl update --export-bay-map  # copy bundled bay_map.json to /etc/b2ctl/
 | BAY all `-` | `sas2ircu` missing or can't execute; bays are optional (locate still works by serial/dev). If `b2ctl check` shows "binary exists but won't execute", run `apt-get install -y libc6-i386` — sas2ircu is a 32-bit ELF |
 | BAY all `-` (RAID-mode detected despite IT HBA) | crossflashed PERC H710 responds to storcli's management plane; auto-detect sees storcli and picks RaidBackend. Fix: `apt-get install libc6-i386` so sas2ircu executes, or set `controller.mode = "it"` in `/etc/b2ctl/config.json` |
 | BAY numbers wrong | edit `bay_map.json` (reverse rule or explicit map); recalibrate with `b2ctl locate <serial>` |
+| BAY mapping works in one directory but not another (raw BDF elsewhere) | pre-v0.8.5 `python -m` cwd-shadowing: running from the source checkout loaded that copy's `bay_map.json`. Fix: `sudo b2ctl update` (bind `/etc/b2ctl/bay_map.json` in config) and redeploy so the launcher has `PYTHONSAFEPATH=1` |
 | locate lights many bays | you're on old sas2ircu-slot locate; this build uses device-based locate — rebuild/redeploy |
 | POOL `-` for in-pool disk | by-id/dev mismatch — verify `zpool status -P` leaf paths resolve (`realpath`) to the same `/dev/sdX` lsblk reports |
 | END(left) `N/A` on SSD | model not in `ssd_spec.json` / no `241 Total_LBAs_Written` attr; add the rating |
@@ -555,17 +676,52 @@ no boot pool*. IT mode invalidates that:
 
 Update ADR-001 accordingly when this build supersedes the RAID-mode one.
 
+### 11a. v0.9.0 audit deltas (Fable5 review) — for maintainers
+
+Structural/behavioral changes from resolving `reviews/REVIEW_FABLE_001.md`
+(see `docs/adr/ADR-001` and `prompts/FIX_fable5_audit.md`):
+
+- **Version** lives in `b2ctl/_version.py` (not `cli.py`) — importing the version
+  no longer loads the whole app graph. Bump it there.
+- **Lifecycle CLI subcommands are now scriptable:** `offload/replace/create/
+  destroy/swap/demote` return a real exit code (`0` = op completed, `1` =
+  cancelled/failed) via the new public `zfs_actions` module — they no longer
+  always exit 0. cron/scripts can gate on `$?`.
+- **Audit log is append-only:** `/var/log/b2ctl/ops.jsonl` gets one *begin* line
+  and one *end* line per op; `b2ctl log`/`rollback` merge them by `op_id`
+  (last-record-wins). A crash mid-op can no longer truncate history, and a
+  full/read-only `/var` still yields a result + post-op check (in-memory
+  fallback). Rollback hints are built from recorded `old_dev`/`new_dev`, not
+  positional argv indices.
+- **PERC actions target the member's controller** (`Disk.ctrl` → `/c<ctrl>`),
+  and the audited command equals what runs (`hba_raid.build_cmd`).
+- **New shared modules:** `blockdev.py` (lsblk listing/`vd_usage`, moved out of
+  `hba`), `zfs_actions.py` (public ZFS-lifecycle contract), `_version.py`. Read
+  path stays side-effect-free via `core.scan_light`/targeted `scan_one`.
+- **locate syntax** is `b2ctl locate <bay|serial|dev> [secs]` — a timed blink,
+  always left off; there is no latched `on`/`off` verb (§9).
+
 ---
 
 ## 12. Simulation harness (`codes/sim/`)
 
 b2ctl talks to hardware **only** through `run()`/`run_check()` (subprocess). That
-seam lets you run the *real, unmodified* b2ctl against a simulated 6-disk server
-on a laptop — no hardware, SSH, or root. `sim/bin/` holds fake
-`zpool`/`lsblk`/`sas2ircu`/`storcli`/`perccli`/`smartctl`/… that read and mutate
+seam lets you run the *real, unmodified* b2ctl against a simulated 8-disk server
+(6 SATA/SAS + 2 NVMe) on a laptop — no hardware, SSH, or root. `sim/bin/` holds
+fake `zpool`/`lsblk`/`sas2ircu`/`perccli`/`smartctl`/… that read and mutate
 `sim/state.json`; `sim/run` is a launcher that sets `PATH`, points `B2CTL_STATE`
 at the state, fakes root (`os.geteuid → 0`), uses an identity bay map, selects
 the backend from `state.mode`, and redirects the audit trail to `sim/var/`.
+
+Since v0.9.0 the harness models **both backends and the full lifecycle**: RAID
+mode presents a synthetic PERC vd0 (perccli VD/PD/rebuild tables + `smartctl -d
+megaraid` passthrough, front drives hidden behind the VD); resilver progress is
+**time-based** (`zpool status` reads are side-effect-free — set
+`B2CTL_SIM_RESILVER_SECS` to slow it down for stepping through Task-B), a replace
+creates a real `replacing-N`/`spare-N` intermediate vdev until detach/completion,
+and `offline`/`online` change pool state. `sim/state.json` writes are atomic
+(tmp + `os.replace`); a corrupt state file fails loudly instead of silently
+resetting.
 
 ```bash
 cd codes
@@ -588,3 +744,97 @@ python3 sim/simctl show           # disks + pools + mode
 
 b2ctl source (`b2ctl/*.py`) is **unchanged** — everything sim-specific lives in
 `sim/` (fake binaries + launcher). Full detail: `codes/sim/README.md`.
+
+---
+
+## RAID mode (Dell PERC) — every subprocess
+
+b2ctl auto-detects (or `controller.mode=raid`) and drives **perccli**. storcli is
+gone (blind to a PERC). Enumeration + SMART:
+
+| step | command | parsed for |
+|------|---------|-----------|
+| tool pick | `perccli show ctrlcount` | `Controller Count = N` (>0 wins) |
+| members | `perccli /cN/vall show all` | VD row (raid/state/size/name) + `PDs for VD n` (EID:Slt, DID, State, Med, Model) |
+| bay→serial | `perccli /cN/eall/sall show all` | `Drive /cN/eE/sS` + `SN =` |
+| member SMART | `smartctl -a -d megaraid,<DID> /dev/sda` | ATA attrs (POH, LBAs written, wear), `test result: PASSED` |
+| VD block dev | `lsblk -dnb -P` MODEL contains `PERC` | which `/dev/sdX` is the virtual disk (dropped from rows) |
+
+Actions (each `[y/N]`-guarded + audited via `safety.begin_op/end_op`):
+
+| op | command |
+|----|---------|
+| locate | `perccli /cN/eE/sS start|stop locate` (verb first) |
+| offline / missing | `perccli /cN/eE/sS set offline` → `set missing` |
+| rebuild | `perccli /cN/eE/sS start rebuild`; progress `… show rebuild` (`NN%`) |
+| create VD | `perccli /cN add vd type=raidL drives=e:s,e:s` |
+| delete VD | `perccli /cN/vV del force` |
+
+> All perccli mutating actions honor `--dry-run` / the watch `[t]oggle` (preview
+> the command, no mutation) — the `dry_run` flag is threaded `raid_actions` →
+> `hba_raid.*` → `run_check`, same as the ZFS actions.
+>
+> Mutating ops + the rebuild-progress parser are **defensive** — validate on the
+> R640. ADR: b2ctl is now **dual-backend** (IT/HBA via sas2ircu + ZFS; RAID via
+> perccli + `smartctl -d megaraid`). On HW RAID the **controller** owns the
+> array, so lifecycle is perccli-driven, not ZFS — that is why the old IT-only
+> ban on `perccli`/`-d megaraid` was lifted.
+
+### Install profiles
+
+`b2ctl install --perc` → perccli + `controller.mode=raid`;
+`b2ctl install --flash` → sas2ircu + `controller.mode=it`
+(same flags on `./install.sh`). Binaries `cp -f` to `/usr/sbin` so they survive
+deletion of `/opt/MegaRAID` or the download dir. `config.set_mode()` is the only
+writer of `/etc/b2ctl/config.json`.
+
+---
+
+## ZFS pool lifecycle + maintenance cron
+
+`create` (`[n]ew-pool` / `b2ctl create`) prompts each pool property with an
+SSD-optimal default (`ashift=12`, `compression=lz4`, `atime=off`, `xattr=sa`,
+`dnodesize=auto`, `acltype=posixacl`, `recordsize=128K`) and an **autotrim
+choice**:
+
+- **off (Monthly)** — `autotrim=off` + writes a per-pool cron
+  `/etc/cron.d/b2ctl-<pool>` (root, absolute zpool path):
+  ```
+  24 0 1-7  * * root [ "$(date +\%w)" -eq 0 ] && /usr/sbin/zpool trim <pool>    # 1st Sunday
+  24 0 8-14 * * root [ "$(date +\%w)" -eq 0 ] && /usr/sbin/zpool scrub <pool>   # 2nd Sunday
+  ```
+- **on** — `autotrim=on` (continuous); no cron written.
+
+`destroy` (`[x]` / `b2ctl destroy <pool>`) runs `zpool destroy <pool>` behind a
+double-confirm (must type the pool name; ALL-DATA-LOST warning; audited via
+`safety.begin_op/end_op`) and then removes `/etc/cron.d/b2ctl-<pool>`.
+
+Pools destroyed **outside** b2ctl (manual `zpool destroy`) leave a stale cron;
+`b2ctl watch` **prunes orphan crons** at startup (`prune_orphan_crons` deletes
+`b2ctl-*` files whose pool is absent from `zpool list`).
+
+### bay_map.json (panel schema) + NVMe PCIe bay
+
+`b2ctl.baymap` is the single parser/remapper (used by both `hba` and
+`hba_raid`). `bay_map.json` is a **list of panels**:
+
+- `type: sas` (front) — `enc:slot` remap via `reverse_slots`/`slots_per_enclosure`
+  or an explicit `map` dict; from `sas2ircu DISPLAY` / `perccli … show all`.
+- `type: nvme` (back, 1+) — `map: [{bdf, bay}]`; the raw bay is the PCIe BDF read
+  from `/sys/class/nvme/<ctrl>/address` (domain stripped), set in
+  `hba.enumerate_disks`.
+
+The pre-0.8 flat dict format is no longer read (logged + ignored → identity).
+
+### Spare-less offload (offline → degrade → replace in place)
+
+`[o]ffload` on a pool member, when there is **no AVAIL spare**:
+
+- `zfs.can_offline(pool, dev)` gate — the member's vdev must be redundant
+  (raidz/mirror) and every OTHER member ONLINE. Refuses on a stripe/single or an
+  already-degraded vdev (so a second offline can't fault the pool).
+- `zpool offline <pool> <dev>` → pool **DEGRADED** (online, no redundancy); LED on.
+- Operator pulls the bay, inserts a new disk in the SAME bay; b2ctl matches it by
+  bay (`not in_pool`, `smart_dtype==""`) and runs `zpool replace -f <pool> <old>
+  <new-by-id>` + resilver. Audited as `offline` then `replace`
+  (`safety.begin_op/end_op`; rollback hint `offline`→`zpool online`).

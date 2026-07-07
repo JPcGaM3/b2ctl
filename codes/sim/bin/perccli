@@ -1,10 +1,85 @@
 #!/usr/bin/env python3
-"""Fake `storcli`/`perccli` (RAID-mode bay tool). Active only when mode=='raid'."""
+"""Fake `storcli`/`perccli` (RAID-mode tool). Active only when mode=='raid'.
+
+Models enough of a PERC in RAID mode to exercise b2ctl's RAID backend end to end
+(F-115): a synthetic RAID5 virtual disk (vd0) over the first RAID_VD_SIZE
+front-panel drives, the remaining front drives as Unconfigured-Good, plus the
+`show rebuild` query. NVMe drives (no enc:slot) are invisible to the controller.
+Serials come from the shared sim state so `smartctl -d megaraid,<DID>` lines up.
+"""
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import _simstate as S  # noqa: E402
+
+
+def _pd_row(idx, d, member):
+    """One 'EID:Slt DID State DG ... Model Sp' PD table row (>=12 tokens, Sp last)."""
+    state = "Onln" if member else "UGood"
+    dg = "0" if member else "-"
+    med = "SSD" if d.get("rota", 0) == 0 else "HDD"
+    return (f"{d['enc']}:{d['slot']}  {idx:>3} {state:<5} {dg:>2} 931.0 GB "
+            f"SATA {med} N   N 512B {d['model']} U")
+
+
+def _vall(state):
+    pds = S.raid_pds(state)
+    members = pds[:S.RAID_VD_SIZE]
+    print("/c0/v0 :")
+    print("======")
+    print("")
+    print("DG/VD TYPE  State Access Consist Cache Cac sCC     Size Name")
+    print("----------------------------------------------------------------")
+    print("0/0   RAID5 Optl  RW     Yes     RWBD  -   ON  2.727 TB vd0")
+    print("----------------------------------------------------------------")
+    print("")
+    print("PDs for VD 0 :")
+    print("============")
+    print("")
+    print("EID:Slt DID State DG     Size Intf Med SED PI SeSz Model                Sp")
+    print("--------------------------------------------------------------------------")
+    for i, d in enumerate(pds):
+        if d in members:
+            print(_pd_row(i, d, member=True))
+    print("--------------------------------------------------------------------------")
+    return 0
+
+
+def _eall_sall(state):
+    pds = S.raid_pds(state)
+    members = pds[:S.RAID_VD_SIZE]
+    # PD table (parsed by hba_raid._parse_pd_rows for UGood/JBOD surfacing).
+    print("Drive Information :")
+    print("EID:Slt DID State DG     Size Intf Med SED PI SeSz Model                Sp")
+    print("--------------------------------------------------------------------------")
+    for i, d in enumerate(pds):
+        print(_pd_row(i, d, member=(d in members)))
+    print("--------------------------------------------------------------------------")
+    print("")
+    # Drive attribute + SN sections (parsed by hba_raid._parse_bay_map for the
+    # serial<->enc:slot map — must be KEPT alongside the PD table, F-115).
+    for d in pds:
+        print(f"Drive /c0/e{d['enc']}/s{d['slot']} Device attributes :")
+        print("==================================")
+        print(f"SN = {d['serial']}")
+        print("Manufacturer Id = ATA")
+        print(f"Model Number = {d['model']}")
+        print("")
+    return 0
+
+
+def _rebuild():
+    # Progress is a BARE integer under a 'Progress%' header on real perccli;
+    # here the sim has no in-flight rebuild, so report 'Not in progress' — which
+    # hba_raid.rebuild_progress reads as done=True (F-115).
+    print("Controller = 0")
+    print("Status = Success")
+    print("")
+    print("Drive-ID    Progress% Status         Estimated Time Left")
+    print("-----------------------------------------------------------")
+    print("/c0/eX/sX   -         Not in progress -")
+    return 0
 
 
 def main():
@@ -13,26 +88,23 @@ def main():
     if state.get("mode") != "raid":
         return 1   # not RAID-mode → no controller (auto-detect skips RAID)
 
-    # storcli show ctrlcount
+    # show ctrlcount
     if argv[:2] == ["show", "ctrlcount"] or (argv and argv[-1] == "ctrlcount"):
         print("Controller Count = 1")
         return 0
 
-    # storcli /c0/eall/sall show all
-    if argv and argv[0].startswith("/c") and "show" in argv:
-        print("Drive Information :")
-        for d in state["disks"]:
-            if not d.get("present"):
-                continue
-            print(f"Drive /c0/e{d['enc']}/s{d['slot']} Device attributes :")
-            print("==================================")
-            print(f"SN = {d['serial']}")
-            print(f"Manufacturer Id = ATA")
-            print(f"Model Number = {d['model']}")
-            print("")
-        return 0
+    if argv and argv[0].startswith("/c"):
+        # `.../show rebuild` MUST be matched before the generic show branch, else
+        # it is answered with the VD/PD listing and progress parses as 0 (F-115).
+        if argv[-1] == "rebuild":
+            return _rebuild()
+        if "show" in argv:
+            if "vall" in argv[0]:
+                return _vall(state)
+            # eall/sall (or any other enc:slot show) -> PD table + attributes
+            return _eall_sall(state)
 
-    return 0
+    return 0   # set offline/missing/locate/rebuild/add/del -> succeed silently
 
 
 if __name__ == "__main__":

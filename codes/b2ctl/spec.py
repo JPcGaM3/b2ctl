@@ -14,9 +14,6 @@ import re
 
 from .common import Y, N
 
-_SPEC_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                          "..", "ssd_spec.json")
-
 # rated TBW in terabytes-written
 _DEFAULT_TBW = {
     "samsung ssd 860 pro 1tb": 1200,
@@ -29,8 +26,9 @@ def _norm(s: str) -> str:
 
 
 def load() -> dict:
+    from . import config
     table = {_norm(k): float(v) for k, v in _DEFAULT_TBW.items()}
-    path = os.path.abspath(_SPEC_FILE)
+    path = config.ssd_spec_path()
     if os.path.exists(path):
         try:
             with open(path) as f:
@@ -42,10 +40,25 @@ def load() -> dict:
 
 
 def lookup(model: str, table: dict):
+    """Rated TBW for a model, or None (unknown) if the match is ambiguous.
+
+    Preference order (F-097): exact normalized match; then the LONGEST spec key
+    contained in the model (most specific capacity wins); finally, for a
+    truncated model contained in a key, return a value only if every candidate
+    agrees — otherwise None, so a 16-char SCSI-truncated 'Samsung SSD 870' never
+    silently picks the 1TB rating for a 4TB drive and shows a false 0% endurance.
+    """
     m = _norm(model)
     if not m:
         return None
-    for k, v in table.items():
-        if k and (k in m or m in k):
-            return v
+    if m in table:
+        return table[m]
+    # spec key contained in the model -> pick the longest (most specific) key
+    contained = [(k, v) for k, v in table.items() if k and k in m]
+    if contained:
+        return max(contained, key=lambda kv: len(kv[0]))[1]
+    # model contained in a key (truncated model) -> only if unambiguous
+    candidates = {v for k, v in table.items() if k and m in k}
+    if len(candidates) == 1:
+        return next(iter(candidates))
     return None

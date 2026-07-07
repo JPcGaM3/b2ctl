@@ -16,7 +16,17 @@ import _simstate as S  # noqa: E402
 
 
 def _find(state, ident):
-    return S.disk_by_bay(state, ident) if ":" in ident else S.disk_by_name(state, ident)
+    if ":" in ident:
+        return S.disk_by_bay(state, ident) or S.disk_by_token(state, ident)
+    return S.disk_by_name(state, ident) or S.disk_by_token(state, ident)
+
+
+def _bay_label(d):
+    """enc:slot, or the mapped NVMe label / device name when enc is None, so
+    NVMe rows never print 'bay None:None' (F-123)."""
+    if d.get("enc") is not None and d.get("slot") is not None:
+        return f"{d['enc']}:{d['slot']}"
+    return S.nvme_label_for_serial(d.get("serial")) or d["name"]
 
 
 def cmd_init(_):
@@ -46,11 +56,11 @@ def cmd_pull(args):
                  if s not in {r["spare"] for r in pool.get("replacements", [])}]
         if avail:
             pool.setdefault("replacements", []).append(
-                {"removed": d["name"], "spare": avail[0]})
-            pool["resilver"] = {"pct": 0}
+                {"removed": d["name"], "spare": avail[0], "kind": "spare"})
+            pool["resilver"] = S.resilver_seed()      # time-based, no per-read bump (F-116)
             note = f" → spare {avail[0]} kicking in (resilver)"
     S.save(state)
-    print(f"[sim] pulled {d['name']} (bay {d['enc']}:{d['slot']}){note}")
+    print(f"[sim] pulled {d['name']} (bay {_bay_label(d)}){note}")
 
 
 def cmd_insert(args):
@@ -60,7 +70,7 @@ def cmd_insert(args):
         print(f"[sim] no such disk: {args[0]}", file=sys.stderr); return 1
     d["present"] = True
     S.save(state)
-    print(f"[sim] inserted {d['name']} (bay {d['enc']}:{d['slot']})")
+    print(f"[sim] inserted {d['name']} (bay {_bay_label(d)})")
 
 
 def cmd_dirty(args):
@@ -80,7 +90,7 @@ def cmd_show(_):
     for d in state["disks"]:
         flag = "" if d["present"] else "  [PULLED]"
         dirty = "  (dirty)" if d.get("dirty") else ""
-        print(f"  {d['enc']}:{d['slot']}  {d['name']:<4} {d['serial']:<16} {d['model']}{flag}{dirty}")
+        print(f"  {_bay_label(d):<8}  {d['name']:<4} {d['serial']:<16} {d['model']}{flag}{dirty}")
     print("pools:")
     for p in state["pools"]:
         repl = "".join(f"  repl[{r['removed']}->{r['spare']}]" for r in p.get("replacements", []))

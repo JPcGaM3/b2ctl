@@ -58,20 +58,28 @@ sudo ./install.sh
 
 Copies the package to `/opt/b2ctl`, creates the `b2ctl` launcher at
 `/usr/local/sbin/b2ctl`, and creates `/var/log/b2ctl/snapshots/` for the audit
-system.
+system. A plain `./install.sh` installs **only b2ctl** — no downloads, no `apt`,
+no internet needed.
 
-**Install tool binaries at the same time (recommended on a fresh server):**
+**The four install forms (same for `./install.sh` and `b2ctl install`):**
 
-```bash
-cd codes
-sudo ./install.sh --with-tools
-```
+| command | what it installs |
+|---------|------------------|
+| `./install.sh` · `b2ctl install` | **only b2ctl** (package + launcher); no tools, no download |
+| `./install.sh --with-tools` · `b2ctl install --with-tools` | b2ctl **+ both** tools (sas2ircu + perccli) from Google Drive |
+| `./install.sh --perc` · `b2ctl install --perc` | b2ctl + **perccli** + `controller.mode=raid` (Dell PERC RAID box) |
+| `./install.sh --flash` · `b2ctl install --flash` | b2ctl + **sas2ircu** + `controller.mode=it` (crossflashed HBA box) |
 
-The `--with-tools` flag automatically **downloads** `sas2ircu`, `storcli64`, and
-`perccli64` archives from Google Drive, extracts the binaries, and places them in
-`/usr/local/sbin/`. Downloads are deleted on completion. Each tool installs
-independently — if a download or extraction fails it prints `[✗]` and continues.
-Requires `curl` or `wget` (both available by default on Proxmox VE).
+- `./install.sh` deploys the package; `b2ctl install` (no flag) just reports tool
+  status + the current mode (b2ctl is already installed) — otherwise the flags
+  behave identically on both.
+- `--with-tools` **downloads** the tool archives from Google Drive, extracts the
+  binaries to `/usr/sbin/`, and installs their apt prerequisites
+  (`libc6-i386` for the 32-bit sas2ircu, `alien` for perccli). Downloads are
+  deleted on completion; each tool installs independently (`[✗]` + continue on
+  failure). Requires `curl` or `wget` (both default on Proxmox VE).
+- Pick `--perc` **or** `--flash` to match your hardware — it installs just that
+  backend's tool and sets the controller mode in `/etc/b2ctl/config.json`.
 
 **Dependencies:**
 
@@ -135,12 +143,13 @@ BAY   DEV  IF   MODEL            SERIAL            POWER_ON      WEAR   END    .
 1:6   sdd  SAS  Samsung SSD 870  S74ZNS0WXXXXXXX   18246h(~2.1y) 1%     98.4% ...
 1:7   sde  SAS  Samsung SSD 870  S74ZNS0WXXXXXXX   18247h(~2.1y) 1%     99.8% ...
 ================================================================================
-Pools:
-  rpool   952G   4.83G  free=947G   ONLINE   cap=0%
-  tank    2.72T  1.72G  free=2.72T  ONLINE   cap=0%
+Storage summary:
+  TYPE NAME            LEVEL    STATE     SIZE      USED      FREE
+  SW   rpool           mirror   ONLINE    952G      4.83G     947G
+  SW   tank            raidz1   ONLINE    2.72T     1.72G     2.72T
 [OK] all disks healthy and assigned
 
-[r]efresh  [a]ssign  [o]ffload  [s]wap  [d]emote  [n]ew-pool  [t]oggle-dryrun  [l]ocate  [q]uit
+[r]efresh  [a]ssign  [o]ffload  [s]wap  [d]emote  [t]oggle-dryrun  [n]ew-pool  [e]xtend  [b]urnin  [u]dev-rescue  [x]destroy-pool  [l]ocate  [q]uit   (or hot-plug)
 b2ctl&gt;
 </pre>
 </details>
@@ -254,7 +263,17 @@ b2ctl> a
   assign which #>
 ```
 
-Pick the disk, then choose an action:
+The list gathers **three** kinds of unassigned disk:
+
+- a normal free disk → `[1] bay 1:7 /dev/sde (Samsung SSD 870, SN …)` — opens the
+  action menu below.
+- a **`[GHOST]`** disk (OS-rejected, no `/dev` node) → `[1] [GHOST] bay 1:4 (SN …)
+  — needs wipe` — routes to a wipe/rescue flow (also see `[u]dev-rescue`).
+- a **PERC Unconfigured-Good** disk (RAID-mode boxes only) → `[1] bay 32:4
+  (Samsung …, SN …) (PERC Unconfigured-Good)` — routes to the hardware-RAID menu
+  (set JBOD for ZFS, create a volume, or add as a hot spare).
+
+Pick a normal free disk, then choose an action:
 
 | choice | action | when to use |
 |--------|--------|-------------|
@@ -381,7 +400,7 @@ b2ctl> n
     [3] /dev/sdd (bay 1:6)
   pick disks (space-separated #)> 1 2 3
   pool name> backup
-  raid type (stripe, mirror, raidz1, raidz2) [mirror]> raidz1
+  raid type (stripe, mirror, raid10, raidz1, raidz2) [mirror]> raidz1
   create pool 'backup' (raidz1) with 3 disks? [y/N]> y
   ✔ pool created
 ```
@@ -392,14 +411,135 @@ b2ctl> n
 |------|--------------|-------------------|--------------|
 | **stripe** | 1 | 0 — one failure = total data loss | 100% |
 | **mirror** | 2 | 1 | 50% |
+| **raid10** | 4 (even) | 1 per mirror pair | 50% (fast resilver, best random IOPS) |
 | **raidz1** | 2 (recommend 3+) | 1 | (N-1)/N |
 | **raidz2** | 4 | 2 | (N-2)/N |
+
+> **raid10** = stripe of mirrors. Pick an even number of disks; b2ctl pairs them
+> (`mirror d1 d2 mirror d3 d4 …`) and shows the pairs before you confirm. From the
+> CLI: `b2ctl create --raid10`.
 
 > ⚠️ Warning: If disks have existing labels or data, b2ctl warns and asks to wipe first.
 
 ---
 
-### 6.7 `t` — Toggle dry-run mode
+### 6.7 `e` — Extend a pool (L2ARC cache / SLOG log)
+
+**When to use:** speed up an existing pool with a read cache (L2ARC) or a
+sync-write log (SLOG), as in the storage-box runbook.
+
+```
+b2ctl> e
+  [1] add L2ARC cache (read cache; loss = harmless)
+  [2] add SLOG log   (sync-write accel; mirror + PLP recommended)
+  [3] remove a cache/log device
+  action> 2
+    [1] /dev/sdg (bay 1:8)
+    [2] /dev/sdh (bay 1:9)
+  pick disk(s) (space-separated #)> 1 2
+  [!] ensure the SSD(s) have Power-Loss Protection (PLP).
+  add SLOG (mirror) to 'tank'? [y/N]> y
+  ✔ SLOG added
+```
+
+- **L2ARC cache** — a read cache on a fast SSD/NVMe. Losing it only costs a cache
+  miss, so it is never mirrored. Helps only when your working set is larger than RAM.
+- **SLOG log** — accelerates **synchronous** writes (e.g. NFS `sync`). Pick **two**
+  disks for a mirror (a lone log device can lose in-flight writes), and use SSDs
+  with **Power-Loss Protection (PLP)**. b2ctl warns if you choose a single device.
+- CLI: `b2ctl cache-add|cache-rm|log-add|log-rm <pool> <dev…>`.
+
+---
+
+### 6.8 `b` — Burn-in disk(s) (vet before pooling)
+
+**When to use:** before trusting new or second-hand disks, run a SMART long
+self-test (optionally a full read-surface scan) on **several disks at once** and
+get a PASS/WARN/FAIL verdict per disk.
+
+**Multi-select + background (v0.10.0).** Pick disks the same way as `[n]ew-pool`
+(space-separated), confirm, then choose whether to also run a surface scan. The
+self-tests run on the drives' own firmware and the scans run as detached
+processes, so a **live view** shows a progress bar + estimated time remaining for
+each disk — and you can **leave it running** (Ctrl-C) and come back later.
+
+```
+b2ctl> b
+    [1] /dev/sdb (bay 32:4) Samsung SSD 870 EVO 1TB
+    [2] /dev/sda (bay 32:5) Samsung SSD 870 EVO 1TB
+    [3] /dev/nvme0n1 (bay PCIe2:0) Samsung 990 EVO Plus
+  burn in which #> (space-separated) 1 2 3
+  burn-in 3 disk(s) (long self-test)? [y/N]> y
+  also run a full read-surface scan (badblocks, read-only, hours)? [y/N]> y
+  live burn-in — Ctrl-C to leave running in background
+
+ BAY     DISK      SELF-TEST                     SURFACE SCAN (badblocks)
+ 32:4    sdb       [########------]  62%  ~1h10m  [###-----------]  18%  ~4h30m
+ 32:5    sda       [##########----]  74%  ~40m    [####----------]  22%  ~4h05m
+ PCIe2:0 nvme0     [#############-]  90%  ~8m     n/a
+```
+
+- **Leaving & re-attaching:** press **Ctrl-C** to return to the prompt — the tests
+  and scans keep running. Press `[b]` again (or run `b2ctl burnin --status`) to
+  re-open the live view; when a disk finishes you'll see its verdict there.
+- While a self-test runs, `b2ctl status` shows `TEST xx%` in that disk's STATUS
+  column (and the details block adds a `self-test running: …%` line).
+- **PASS** — clean. **WARN** — usable but aged (power-on hours > 40000, grown
+  defects, or the surface scan found bad blocks): use as lower-priority. **FAIL** —
+  uncorrected errors or a failed self-test: do not pool it.
+- Read-only: the only actions are the self-test trigger and (optionally) a
+  read-only `badblocks` scan — your data/disk is never written.
+- CLI: `b2ctl burnin <bay|dev> [<bay|dev> …] [--scan] [--short]`;
+  re-attach with `b2ctl burnin --status`.
+
+---
+
+### 6.9 `u` — Udev-rescue (recover an OS-rejected disk)
+
+**When to use:** a disk is physically present but the OS rejected it — it shows as
+a **GHOST** (no `/dev` node). `u` fires `udevadm trigger`/`settle` to try to make
+the kernel enumerate it. Read-only/diagnostic — it does not touch disk contents.
+
+```
+b2ctl> u
+    ghost bay 1:4 serial S74ZNS0WXXXXXXX
+  run udevadm trigger/settle to rescue 1 ghost disk(s)? [y/N]> y
+  ✔ rescued 1 disk(s)
+```
+
+If nothing recovers: `no disks recovered — reseat physically or wipe via
+[a]ssign`. When there are no ghosts: `no ghost (OS-rejected) disks to rescue`.
+(Aliases: `u` or `rescue`.)
+
+---
+
+### 6.10 `x` — Destroy a pool
+
+**When to use:** permanently delete a ZFS pool. **All data is lost** — guarded by a
+double confirm plus typing the pool name. (Deep-dive: the **Destroying a ZFS pool**
+section near the end of this guide.)
+
+```
+b2ctl> x
+    [1] rpool (952G, ONLINE)
+    [2] tank (2.72T, ONLINE)
+  destroy which #> 2
+  members:
+    - (1:4) Samsung SSD 870 EVO 1TB (S74ZNS0WXXXXXXX)
+    - (1:5) Samsung SSD 870 EVO 1TB (S74ZNS0WXXXXXXX)
+    ...
+  [!] destroying 'tank' ERASES ALL DATA on it. This cannot be undone.
+  destroy pool 'tank'? [y/N]> y
+  type the pool name 'tank' to confirm> tank
+  ✔ pool 'tank' destroyed; cron removed
+```
+
+> ⚠️ Two gates: the `[y/N]` **and** re-typing the exact pool name. b2ctl also
+> removes that pool's maintenance cron. (Bare key `x` only — no word alias.)
+
+---
+
+### 6.11 `t` — Toggle dry-run mode
 
 **When to use:** want to see exactly what commands would run without making any changes — for learning, rehearsing, or verifying before a real operation.
 
@@ -423,7 +563,7 @@ Also available as a startup flag: `sudo b2ctl --dry-run watch`
 
 ---
 
-### 6.8 `l` — Locate (blink LED)
+### 6.12 `l` — Locate (blink LED)
 
 **When to use:** need to confirm which physical bay a disk occupies before pulling it.
 
@@ -445,7 +585,7 @@ The bay's activity LED blinks for ~5 seconds then stops automatically.
 
 ---
 
-### 6.9 `q` — Quit
+### 6.13 `q` — Quit
 
 ```
 b2ctl> q
@@ -454,7 +594,7 @@ bye
 
 ---
 
-### 6.10 Hot-plug (automatic detection)
+### 6.14 Hot-plug (automatic detection)
 
 **Inserting a disk:**
 
@@ -660,6 +800,14 @@ ESP partition **manually**. b2ctl does not touch Proxmox boot config.
 | `b2ctl status --json` | JSON output |
 | `b2ctl --dry-run <cmd>` | preview what commands would run — no writes |
 | `b2ctl locate <bay\|serial\|dev> [secs]` | blink one disk's LED (~5s) |
+
+**Which LED?** locate picks the most-dedicated indicator: PERC drives → the
+controller's slot LED (`perccli`); raw SATA/SAS → the backplane's dedicated
+**locate LED via `ledctl`** if the `ledmon` package is installed (`apt install
+ledmon`), otherwise the **`dd` activity-LED** fallback. `b2ctl locate` prints
+which it used (`via ledctl` / `via dd` / `via perccli`). Note the locate LED is a
+*blink* (SES identify), not solid — no tool can make a healthy drive's LED solid
+or fully dark.
 | `b2ctl offload` | guided: safely remove an in-pool disk |
 | `b2ctl replace` | guided: replace a disk onto a spare |
 | `b2ctl swap` | guided: swap a worn disk onto an existing spare |
@@ -671,22 +819,29 @@ ESP partition **manually**. b2ctl does not touch Proxmox boot config.
 | `b2ctl config show` | print current effective config as JSON |
 | `b2ctl config init` | write `/etc/b2ctl/config.json` with auto-detected defaults |
 | `b2ctl version` | print version string |
-| `sudo b2ctl install` | download and install sas2ircu, storcli, perccli from Google Drive (skips already-installed) |
-| `sudo b2ctl install --tool sas2ircu` | install only one tool (`sas2ircu`, `storcli`, or `perccli`) |
-| `b2ctl update` | validate config, check tool paths, report missing tools |
-| `sudo b2ctl update --export-bay-map` | copy bundled bay_map.json to /etc/b2ctl/ and update config |
+| `b2ctl install` | report tool + mode status (no download — same as `./install.sh`) |
+| `sudo b2ctl install --with-tools` | download + install **both** tools (sas2ircu + perccli) |
+| `sudo b2ctl install --perc` / `--flash` | install that backend's tool + set the mode (raid/it) |
+| `sudo b2ctl install --tool sas2ircu` | install only one tool (`sas2ircu` or `perccli`) |
+| `b2ctl update` | validate config; **as root** also sync `bay_map.json` + `ssd_spec.json` into `/etc/b2ctl/` and bind them in config (preserves files you edited) |
+| `sudo b2ctl update --force` | overwrite operator-customized `/etc/b2ctl/` files (keeps a `.bak`) |
+| `sudo b2ctl update --export-bay-map` | deprecated alias of `--force` (plain `update` now syncs both files) |
 
 ### Watch mode keys (at `b2ctl>`)
 
 | key | action |
 |-----|--------|
 | `r` | refresh the health table |
-| `a` | assign a free disk to a pool |
+| `a` | assign a free disk to a pool (also lists GHOST + PERC-UG disks) |
 | `o` | offload (remove) a disk from a pool |
 | `s` | swap a worn in-pool disk onto a spare |
 | `d` | demote a mirror member to a spare |
-| `n` | create a new pool |
 | `t` | toggle dry-run mode on/off |
+| `n` | create a new pool |
+| `e` | extend a pool — add/remove L2ARC cache or SLOG log |
+| `b` | burn-in disk(s) — multi-select self-test (+ optional badblocks) |
+| `u` | udev-rescue an OS-rejected (GHOST) disk |
+| `x` | destroy a pool (double-confirm + type the pool name) |
 | `l` | blink one disk's LED (~5s) by bay/serial/device |
 | `q` | quit |
 
@@ -729,3 +884,148 @@ exists.
 
 > 💡 Tip: **Not sure what to do?** Press `s` (skip) — nothing changes. Come back with
 > `a` (assign) when you're ready.
+
+---
+
+## RAID-mode boxes (Dell PERC, e.g. R640 / H730P)
+
+b2ctl works on servers where the PERC runs **hardware RAID** (not crossflashed).
+Install it for that box and it switches to RAID mode:
+
+```
+b2ctl install --perc      # installs perccli, sets controller.mode=raid
+b2ctl install --flash     # (the IT/HBA boxes) installs sas2ircu, mode=it
+```
+
+`b2ctl status` then shows the **physical drives behind the RAID volume** (read
+through the controller), with the `POOL/ARRAY` column marking each disk:
+
+- `HW:vd0/raid1` — member of a **hardware** RAID volume (the PERC owns it)
+- `SW:tank/raidz1-0` — member of a **software** RAID (ZFS pool)
+- `-` — direct/unassigned (e.g. an NVMe, a JBOD disk)
+
+On a box that has **both** kinds, the disk table groups them — a
+`--- Hardware (PERC RAID) ---` block on top, `--- Software (ZFS) ---` below — and
+the summary becomes one **Storage summary** table, hardware rows above software:
+
+```
+Storage summary:
+  TYPE NAME            LEVEL    STATE     SIZE      USED      FREE
+  HW   MainSSD         raid1    Optl      640.0 GB  12.0G     628.0G
+  SW   tank            mirror   ONLINE    928G      598M      927G
+```
+
+- **NAME** — the hardware volume's name (e.g. `MainSSD`) / the ZFS pool name.
+- **USED/FREE** — for software, from the pool; for hardware, read from the
+  volume's **mounted filesystem** via `lsblk`. If the hardware volume is raw or
+  not mounted, USED/FREE show `-` (there's no filesystem to measure).
+
+### Replacing a failed RAID disk
+
+```
+b2ctl raid-replace          # pick the member, or: b2ctl raid-replace 32:0
+```
+
+It fails the drive out, **lights its bay LED**, waits for you to pull it and
+insert the replacement, then watches the controller **rebuild** with a live
+progress bar. Related: `b2ctl raid-offline <bay>` (just fail it out + LED),
+`b2ctl locate <bay|serial|dev> [secs]` (a timed blink — the LED is always
+turned back off; there is no latched `on`/`off` form, by design), and
+(destructive, double-confirmed) `b2ctl raid-create
+--level raid1 --drives 32:0,32:1` / `b2ctl raid-del <vd>`.
+
+> Note: on a 2×M.2 NVMe card, if only one NVMe shows, enable **PCIe bifurcation
+> (x4x4)** for that slot in the BIOS — that is a hardware setting, not b2ctl.
+
+---
+
+## Creating a ZFS pool (`[n]ew-pool`)
+
+After you pick disks, name, and raid level, b2ctl asks for each pool property
+with an SSD-optimal default — **press Enter to accept**, or type to override
+(`ashift`, `compression`, `atime`, `xattr`, `dnodesize`, `acltype`,
+`recordsize`). `recordsize` is workload-tunable (128K general, DB 16K, media 1M,
+VM 64–128K) and can be changed per-dataset later.
+
+**autotrim** is a choice:
+- **off (Monthly)** *(recommended)* — installs a monthly maintenance schedule for
+  the pool: `zpool trim` on the 1st Sunday + `zpool scrub` on the 2nd Sunday
+  (cron at `/etc/cron.d/b2ctl-<pool>`).
+- **on** — continuous trimming (ZFS handles it); no cron.
+
+## Destroying a ZFS pool (`[x]` or `b2ctl destroy <pool>`)
+
+Destroys the pool with `zpool destroy` — **ALL DATA IS LOST**. You must confirm
+and then **type the pool name** to proceed. b2ctl also removes that pool's
+maintenance cron. (If you destroy a pool yourself with `zpool destroy`, b2ctl
+cleans up the leftover cron the next time you open `b2ctl watch`.)
+
+## Replacing a failing disk with NO spare (`[o]ffload`)
+
+raidz1 (and mirrors) keep running with one disk missing. If a disk is failing,
+every bay is full, and there is **no hot spare**, `[o]ffload` it:
+
+1. b2ctl checks the pool is **fully redundant right now** (all other members
+   healthy). If not, it **refuses** — offlining a second disk could fail the pool.
+2. It runs `zpool offline` — the pool goes **DEGRADED but stays online** (no
+   redundancy until you finish), and lights the bay LED.
+3. **Pull that bay and insert the new disk into the SAME bay**, then press Enter.
+4. b2ctl `zpool replace`s the new disk in and shows the resilver progress; when
+   it finishes the pool is back to **ONLINE**.
+
+> ⚠️ While DEGRADED / resilvering there is no redundancy — a second disk failure
+> in that window loses data. b2ctl won't let you offline a second disk meanwhile.
+
+## Bay labels — `bay_map.json`
+
+`/etc/b2ctl/bay_map.json` is a list of **panels** describing your chassis:
+
+- **front** (`type: sas`) — the backplane behind the PERC (RAID) or the
+  PERC-flashed `sas2ircu` HBA. Bays are `enc:slot`. If the controller reports
+  scrambled slots, set `reverse_slots`+`slots_per_enclosure`, or an explicit
+  `map` (`{"32:0": "32:7"}`). Calibrate with `b2ctl locate <serial>`.
+- **back** (`type: nvme`) — a PCIe/M.2 SSD enclosure (one or more). NVMe has no
+  enclosure:slot, so its BAY shows the **PCIe address** (e.g. `d8:00.0`) until you
+  relabel it. Each map entry can key on any of three identifiers (**precedence
+  by-id > serial > bdf**):
+
+```json
+{ "panel": "back", "type": "nvme",
+  "map": [ {"by-id":  "nvme-Samsung_SSD_990_EVO_Plus_4TB_S7..", "bay": "PCIe2:0"},
+           {"serial": "S7XXNS0W123", "bay": "PCIe2:1"},
+           {"bdf":    "d8:00.0",     "bay": "PCIe2:2"} ] }
+```
+
+- **`serial`** is the easiest — copy it straight from the **SERIAL** column of
+  `b2ctl status`.
+- **`by-id`** is a substring of the drive's `/dev/disk/by-id/nvme-<model>_<serial>`
+  link (run `ls /dev/disk/by-id/ | grep nvme`); it survives the card moving slots.
+- **`bdf`** still works — find it in `b2ctl status` (the BAY) or `cat
+  /sys/class/nvme/nvme0/address`.
+
+> NVMe drives appear in the table and in `[a]ssign` / `[b]urnin` like any other
+> disk — only the BAY column differs (no enclosure:slot). The bay label is
+> display-only; getting it wrong is cosmetic, never dangerous.
+
+### Make your bay labels apply from every directory
+
+Edit the bay_map in the **`/etc/b2ctl/` copy** — not the one in the source
+checkout. To create/refresh it, run **`b2ctl update`** as root:
+
+```bash
+sudo b2ctl update          # creates /etc/b2ctl/bay_map.json + ssd_spec.json, binds them in config
+sudo nano /etc/b2ctl/bay_map.json   # add your NVMe serial -> bay entries
+b2ctl watch                # now maps correctly from ANY directory
+```
+
+`b2ctl update` copies the bundled `bay_map.json` and `ssd_spec.json` (the SSD
+TBW table) into `/etc/b2ctl/` and records their paths in the config, so b2ctl
+always loads the same files no matter which directory you run it from. It **will
+not overwrite files you edited** — a customized file shows `customized-kept`
+(use `sudo b2ctl update --force` to overwrite, which first saves a `.bak`).
+
+> **Why this matters:** before v0.8.5, running `b2ctl` from inside the source
+> checkout could load that copy's `bay_map.json` instead of the installed one, so
+> the mapping seemed to change with the current directory. The installer now runs
+> the installed copy regardless of directory (`PYTHONSAFEPATH`), and `b2ctl
+> update` puts the editable files in one fixed place (`/etc/b2ctl/`).

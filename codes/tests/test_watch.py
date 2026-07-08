@@ -328,24 +328,27 @@ class TestWatchCreate:
         mock_zfs.DEFAULT_FS_OPTS = real_zfs.DEFAULT_FS_OPTS
         mock_zfs.has_zfs_label.return_value = False
         mock_zfs.create_pool.return_value = (True, "")
-        mock_zfs.install_pool_cron.return_value = (True, "/etc/cron.d/b2ctl-tank")
+        mock_zfs.install_pool_timers.return_value = (True, "enabled …")
         # pick "1 2", name, raid type, then Enter for ashift + autotrim choice + 6 fs
         mock_ask.side_effect = ["1 2", "tank", "mirror"] + [""] * 8
         _cmd_create({})
         kwargs = mock_zfs.create_pool.call_args.kwargs
-        # autotrim default choice = off (Monthly) -> cron installed
+        # autotrim default choice = off -> scrub + trim timers enabled
         assert kwargs["pool_opts"]["ashift"] == "12"
         assert kwargs["pool_opts"]["autotrim"] == "off"
         assert kwargs["fs_opts"] == real_zfs.DEFAULT_FS_OPTS
-        mock_zfs.install_pool_cron.assert_called_once_with("tank", dry_run=False)
+        mock_zfs.install_pool_timers.assert_called_once_with(
+            "tank", include_trim=True, dry_run=False)
 
     @patch("b2ctl.watch.ui")
     @patch("b2ctl.watch.zfs")
     @patch("b2ctl.watch.core")
     @patch("b2ctl.watch._confirm", return_value=True)
     @patch("b2ctl.watch._ask")
-    def test_create_pool_autotrim_on_skips_cron(self, mock_ask, _mc, mock_core,
-                                                mock_zfs, mock_ui):
+    def test_create_pool_autotrim_on_still_installs_scrub_only_timer(
+            self, mock_ask, _mc, mock_core, mock_zfs, mock_ui):
+        # Scrub must run monthly regardless of the autotrim choice — only the trim
+        # timer is skipped when autotrim=on (ZFS already trims continuously).
         from b2ctl.watch import _cmd_create
         import b2ctl.zfs as real_zfs
         d1 = _disk(pool=None, vdev=None, vdev_state=None, dev="/dev/sda", by_id="/d/a")
@@ -357,11 +360,13 @@ class TestWatchCreate:
         mock_zfs.DEFAULT_FS_OPTS = real_zfs.DEFAULT_FS_OPTS
         mock_zfs.has_zfs_label.return_value = False
         mock_zfs.create_pool.return_value = (True, "")
+        mock_zfs.install_pool_timers.return_value = (True, "enabled …")
         # ashift blank, autotrim choice "2" (on), 6 fs blank
         mock_ask.side_effect = ["1 2", "tank", "mirror", "", "2"] + [""] * 6
         _cmd_create({})
         assert mock_zfs.create_pool.call_args.kwargs["pool_opts"]["autotrim"] == "on"
-        mock_zfs.install_pool_cron.assert_not_called()
+        mock_zfs.install_pool_timers.assert_called_once_with(
+            "tank", include_trim=False, dry_run=False)
 
     @patch("b2ctl.watch.zfs")
     @patch("b2ctl.watch.core")
@@ -786,16 +791,16 @@ class TestWatchDestroy(unittest.TestCase):
     @patch("b2ctl.watch.core")
     @patch("b2ctl.watch._confirm", return_value=True)
     @patch("b2ctl.watch._ask", return_value="tank")   # type the pool name
-    def test_destroy_confirmed_destroys_and_removes_cron(self, _ask, _mc, mock_core,
-                                                         mock_zfs, _safety, mock_ui):
+    def test_destroy_confirmed_destroys_and_disables_timers(self, _ask, _mc, mock_core,
+                                                            mock_zfs, _safety, mock_ui):
         from b2ctl.watch import _cmd_destroy
         mock_zfs.list_pools.return_value = [{"name": "tank", "size": "1T", "health": "ONLINE"}]
         mock_core.scan.return_value = []
         mock_zfs.destroy_pool.return_value = (True, "")
-        mock_zfs.remove_pool_cron.return_value = (True, "/etc/cron.d/b2ctl-tank")
+        mock_zfs.remove_pool_timers.return_value = (True, "disabled …")
         _cmd_destroy({}, target="tank")
         mock_zfs.destroy_pool.assert_called_once_with("tank", dry_run=False)
-        mock_zfs.remove_pool_cron.assert_called_once_with("tank", dry_run=False)
+        mock_zfs.remove_pool_timers.assert_called_once_with("tank", dry_run=False)
 
     @patch("b2ctl.watch.ui")
     @patch("b2ctl.watch.zfs")
@@ -808,7 +813,7 @@ class TestWatchDestroy(unittest.TestCase):
         mock_core.scan.return_value = []
         _cmd_destroy({}, target="tank")
         mock_zfs.destroy_pool.assert_not_called()
-        mock_zfs.remove_pool_cron.assert_not_called()
+        mock_zfs.remove_pool_timers.assert_not_called()
 
 
 class TestRefreshStorageSummary(unittest.TestCase):
@@ -1000,7 +1005,7 @@ class TestOfflineReplaceNewDiskDetection(unittest.TestCase):
 
 
 class TestStartupPruneDryRun(unittest.TestCase):
-    """F-058: `b2ctl --dry-run watch` must not delete cron files at startup."""
+    """F-058: `b2ctl --dry-run watch` must not disable timers at startup."""
 
     def test_prune_receives_dry_run_flag(self):
         import b2ctl.watch as watch
@@ -1011,10 +1016,10 @@ class TestStartupPruneDryRun(unittest.TestCase):
                  patch("b2ctl.watch._block_devs", return_value=set()), \
                  patch("b2ctl.watch.select.select", return_value=([sys.stdin], [], [])), \
                  patch("b2ctl.watch.sys.stdin") as mstdin:
-                mz.prune_orphan_crons.return_value = []
+                mz.prune_orphan_timers.return_value = []
                 mstdin.readline.return_value = "q\n"
                 watch.run()
-            mz.prune_orphan_crons.assert_called_once_with(dry_run=True)
+            mz.prune_orphan_timers.assert_called_once_with(dry_run=True)
         finally:
             watch._DRY_RUN = False
 

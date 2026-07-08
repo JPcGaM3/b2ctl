@@ -18,7 +18,8 @@ LOG_FILE = "/var/log/b2ctl/ops.jsonl"
 # are threaded through run_check with dry_run=, so they MUST be listed here or a
 # --dry-run preview executes them for real (RAID-mode replace/destroy, burn-in).
 WRITE_CMDS = {"zpool", "wipefs", "sgdisk", "dd",
-              "perccli", "perccli64", "smartctl", "badblocks"}
+              "perccli", "perccli64", "smartctl", "badblocks",
+              "systemctl"}      # enable/disable maintenance timers (read subcmds use run())
 
 # Rollback hint table: op -> lambda(entry) -> hint_str or None.
 # The 'replace' hint prefers the named old_dev/new_dev fields recorded at

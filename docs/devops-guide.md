@@ -882,28 +882,49 @@ writer of `/etc/b2ctl/config.json`.
 
 ---
 
-## ZFS pool lifecycle + maintenance cron
+## ZFS pool lifecycle + maintenance timers
 
 `create` (`[n]ew-pool` / `b2ctl create`) prompts each pool property with an
 SSD-optimal default (`ashift=12`, `compression=lz4`, `atime=off`, `xattr=sa`,
 `dnodesize=auto`, `acltype=posixacl`, `recordsize=128K`) and an **autotrim
-choice**:
+choice**.
 
-- **off (Monthly)** — `autotrim=off` + writes a per-pool cron
-  `/etc/cron.d/b2ctl-<pool>` (root, absolute zpool path):
-  ```
-  24 0 1-7  * * root [ "$(date +\%w)" -eq 0 ] && /usr/sbin/zpool trim <pool>    # 1st Sunday
-  24 0 8-14 * * root [ "$(date +\%w)" -eq 0 ] && /usr/sbin/zpool scrub <pool>   # 2nd Sunday
-  ```
-- **on** — `autotrim=on` (continuous); no cron written.
+Maintenance is scheduled via the **distro systemd timer templates** shipped
+(disabled) by `zfsutils-linux` — b2ctl enables one instance per pool (v0.16.0;
+replaces the previous `/etc/cron.d/b2ctl-<pool>` writer). TRIM and SCRUB are
+unrelated tasks (TRIM tells the SSD which blocks are free; SCRUB reads every
+allocated block, verifies checksums, self-heals — the actual bad-sector/bitrot
+defense), so **the SCRUB timer always enables, regardless of the autotrim choice**.
+Only TRIM is conditional (`autotrim=on` already trims continuously via ZFS itself,
+so a trim timer would be redundant):
+
+- **off** — `autotrim=off` → `systemctl enable --now zfs-scrub-monthly@<pool>.timer`
+  **and** `zfs-trim-monthly@<pool>.timer`.
+- **on** — `autotrim=on` (continuous trim) → `zfs-scrub-monthly@<pool>.timer` only.
+
+`enable --now` starts the *timer* (schedules the next `OnCalendar` run — appears in
+`systemctl list-timers`); it does NOT kick off an immediate scrub. `zfs.install_pool_timers(pool, *,
+include_trim=True, dry_run=False)` implements the split; watch passes
+`include_trim = pool_opts["autotrim"] == "off"`.
+
+**Template-missing → warn, no fallback.** A read-only probe
+(`_timer_template_exists` → `systemctl list-unit-files zfs-<kind>-monthly@.timer`,
+via `run()` so it's never dry-run-gated) checks the template exists first. If it
+doesn't (non-standard ZFS build), b2ctl **warns and enables nothing** — the operator
+must install `zfsutils-linux` or schedule manually; b2ctl does not fall back to cron.
+`systemctl` is in `safety.WRITE_CMDS`, so `enable`/`disable` (through `run_check`) are
+suppressed under `--dry-run`; the read probes use `run()` and still execute.
 
 `destroy` (`[x]` / `b2ctl destroy <pool>`) runs `zpool destroy <pool>` behind a
 double-confirm (must type the pool name; ALL-DATA-LOST warning; audited via
-`safety.begin_op/end_op`) and then removes `/etc/cron.d/b2ctl-<pool>`.
+`safety.begin_op/end_op`) and then `zfs.remove_pool_timers` best-effort
+`systemctl disable --now` for the pool's scrub + trim timers.
 
-Pools destroyed **outside** b2ctl (manual `zpool destroy`) leave a stale cron;
-`b2ctl watch` **prunes orphan crons** at startup (`prune_orphan_crons` deletes
-`b2ctl-*` files whose pool is absent from `zpool list`).
+Pools destroyed **outside** b2ctl (manual `zpool destroy`) leave stale enabled
+timers; `b2ctl watch` **prunes orphan timers** at startup
+(`prune_orphan_timers` enumerates active `zfs-{scrub,trim}-monthly@*.timer`
+instances via `systemctl list-units` and `disable --now`s those whose pool is absent
+from `zpool list`; guarded so a transient `zpool list` failure disables nothing).
 
 ### bay_map.json (panel schema) + NVMe PCIe bay
 

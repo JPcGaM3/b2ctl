@@ -33,6 +33,7 @@ _DEFAULTS: dict = {
         "sgdisk": "",
         "udevadm": "",
         "dd": "",
+        "systemctl": "",
     },
     "controller": {
         "mode": "auto",    # "auto" | "it" | "raid"

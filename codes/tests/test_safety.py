@@ -373,5 +373,23 @@ class TestAuxRepairAudit(unittest.TestCase):
         self.assertNotIn("Post-op check FAILED", out.getvalue())
 
 
+class TestWriteCmdsGate(unittest.TestCase):
+    """systemctl enable/disable (maintenance timers) must be dry-run-gated."""
+
+    def test_systemctl_in_write_cmds(self):
+        import b2ctl.safety as safety
+        self.assertIn("systemctl", safety.WRITE_CMDS)
+
+    def test_dry_run_suppresses_systemctl_enable(self):
+        # run_check keys the dry-run gate on basename in WRITE_CMDS
+        import b2ctl.common as common
+        with patch("b2ctl.common.subprocess.run") as sp:
+            ok, out = common.run_check(
+                ["/usr/bin/systemctl", "enable", "--now", "zfs-scrub-monthly@tank.timer"],
+                dry_run=True)
+        self.assertTrue(ok)
+        sp.assert_not_called()          # never executed under dry-run
+
+
 if __name__ == "__main__":
     unittest.main()

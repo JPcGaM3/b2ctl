@@ -20,6 +20,16 @@ class TestConfig:
         }
         assert cfg_mod.tool("sas2ircu") == "/custom/sas2ircu"
 
+    def test_tool_systemctl_override_and_default(self):
+        # systemctl is a first-class tool (maintenance timers); override + default
+        import b2ctl.config as cfg_mod
+        cfg_mod._cache = {
+            "tool_paths": {"systemctl": "/bin/systemctl"},
+            "controller": {"mode": "auto", "index": "all"}, "bay_map_path": "",
+        }
+        assert cfg_mod.tool("systemctl") == "/bin/systemctl"
+        assert "systemctl" in cfg_mod._DEFAULTS["tool_paths"]
+
     def test_tool_fallback_to_which_when_empty(self):
         import b2ctl.config as cfg_mod
         cfg_mod._cache = {

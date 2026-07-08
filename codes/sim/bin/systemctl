@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""Fake `systemctl` for the b2ctl simulation harness.
+
+Models just the subset b2ctl issues for ZFS maintenance timers:
+  list-unit-files zfs-<kind>-monthly@.timer   (template presence probe — read)
+  enable  --now  zfs-<kind>-monthly@<pool>.timer
+  disable --now  zfs-<kind>-monthly@<pool>.timer
+  list-units --type=timer ... zfs-scrub-monthly@* zfs-trim-monthly@*
+
+Enabled instances persist in state.json under `state["timers"]` (a list of unit
+names), mirroring how bin/zpool mutates state. Set SIM_NO_ZFS_TIMERS=1 to make the
+templates report as ABSENT (exercises b2ctl's "no schedule installed" warn path).
+"""
+import os
+import re
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _simstate as S  # noqa: E402
+
+_TEMPLATES_PRESENT = os.environ.get("SIM_NO_ZFS_TIMERS") != "1"
+_TMPL_RE = re.compile(r"^zfs-(?:scrub|trim)-monthly@\.timer$")
+_INST_RE = re.compile(r"^zfs-(?:scrub|trim)-monthly@.+\.timer$")
+
+
+def _timers(state):
+    return state.setdefault("timers", [])
+
+
+def main(argv):
+    if "--version" in argv:
+        print("systemd 252 (sim)")
+        return 0
+    if not argv:
+        return 0
+    sub = argv[0]
+    rest = [a for a in argv[1:] if not a.startswith("-")]      # drop --now/--type=... flags
+
+    if sub == "list-unit-files":
+        # template presence probe: echo the template line only if "installed"
+        if _TEMPLATES_PRESENT:
+            for tmpl in rest:
+                if _TMPL_RE.match(tmpl):
+                    print(f"{tmpl}   disabled")
+        return 0
+
+    if sub == "list-units":
+        state = S.load()
+        for unit in _timers(state):
+            if _INST_RE.match(unit):
+                print(f"{unit} loaded active waiting ZFS monthly maintenance")
+        return 0
+
+    if sub in ("enable", "disable"):
+        state = S.load()
+        timers = _timers(state)
+        changed = False
+        for unit in rest:
+            if not _INST_RE.match(unit):
+                continue
+            if sub == "enable" and unit not in timers:
+                # a real box would fail here if the template is absent
+                if not _TEMPLATES_PRESENT:
+                    sys.stderr.write(f"Failed to enable {unit}: unit not found\n")
+                    return 1
+                timers.append(unit)
+                changed = True
+                print(f"Created symlink /etc/systemd/system/timers.target.wants/{unit}.")
+            elif sub == "disable" and unit in timers:
+                timers.remove(unit)
+                changed = True
+                print(f"Removed /etc/systemd/system/timers.target.wants/{unit}.")
+        if changed:
+            S.save(state)
+        return 0
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -943,10 +943,15 @@ default ที่เหมาะกับ SSD อยู่แล้ว — **ก
 `recordsize` ปรับตาม workload ได้ (ทั่วไป 128K, DB 16K, media 1M, VM 64–128K) และ
 เปลี่ยนภายหลังราย dataset ได้
 
-**autotrim** เป็นตัวเลือก:
-- **off (Monthly)** *(แนะนำ)* — ติดตั้ง schedule รายเดือนให้ pool: `zpool trim`
-  อาทิตย์แรก + `zpool scrub` อาทิตย์ที่สอง (cron ที่ `/etc/cron.d/b2ctl-<pool>`)
-- **on** — trim ต่อเนื่องโดย ZFS เอง; ไม่สร้าง cron
+**autotrim** เป็นตัวเลือก — **scrub รายเดือนจะรันเสมอไม่ว่าเลือกอะไร** (scrub คือตัว
+เช็ค checksum + self-heal ข้อมูล ไม่เกี่ยวกับ trim เลย). b2ctl ตั้ง maintenance ผ่าน
+**systemd timer ของ distro** (มากับ `zfsutils-linux`) ราย pool (v0.16.0 แทน cron เดิม):
+- **off** *(แนะนำ)* — เปิด `zfs-scrub-monthly@<pool>.timer` **และ**
+  `zfs-trim-monthly@<pool>.timer`
+- **on** — trim ต่อเนื่องโดย ZFS เอง; เปิดแค่ scrub timer
+
+เช็คได้: `systemctl list-timers | grep zfs`. ถ้า distro ไม่มี timer unit b2ctl จะเตือน
+"scrub timer NOT scheduled" แล้วไม่ติดตั้งอะไร (ลง `zfsutils-linux` หรือเปิด timer เอง)
 
 **raid10** = stripe ของ mirror (เร็ว/ resilver ไว / random IOPS ดีสุด): เลือกดิสก์
 **จำนวนคู่ (even, ≥4)** b2ctl จะจับคู่ให้เอง (`mirror d1 d2 mirror d3 d4 …`) และโชว์คู่
@@ -1006,8 +1011,8 @@ b2ctl> b
 ## ลบ ZFS pool (`[x]` หรือ `b2ctl destroy <pool>`)
 
 ลบ pool ด้วย `zpool destroy` — **ข้อมูลหายทั้งหมด** ต้องยืนยันและ**พิมพ์ชื่อ pool**
-เพื่อดำเนินการ b2ctl จะลบ cron ของ pool นั้นให้ด้วย (ถ้าลบ pool เองด้วย `zpool destroy`
-b2ctl จะเก็บกวาด cron ที่ค้างให้ตอนเปิด `b2ctl watch` ครั้งถัดไป)
+เพื่อดำเนินการ b2ctl จะปิด maintenance timer ของ pool นั้นให้ด้วย (ถ้าลบ pool เองด้วย
+`zpool destroy` b2ctl จะปิด timer ที่ค้างให้ตอนเปิด `b2ctl watch` ครั้งถัดไป)
 
 ## เปลี่ยนดิสก์ที่กำลังจะเสีย ตอนไม่มี spare (`[o]ffload`)
 

@@ -606,60 +606,105 @@ class TestZfsOffline(unittest.TestCase):
             assert zfs.can_offline("tank", "a") is False
 
 
-class TestZfsPoolCron(unittest.TestCase):
+class TestZfsPoolTimers(unittest.TestCase):
+    """Per-pool maintenance via distro systemd timers (v0.16.0, replaces cron)."""
 
-    def test_install_pool_cron_content(self):
-        from unittest.mock import patch, mock_open
-        m = mock_open()
-        with patch("b2ctl.config.tool", return_value="/usr/sbin/zpool"), \
-             patch("b2ctl.zfs.os.makedirs"), patch("b2ctl.zfs.os.chmod"), \
-             patch("builtins.open", m):
-            ok, path = zfs.install_pool_cron("tank")
-        assert ok and path == "/etc/cron.d/b2ctl-tank"
-        written = "".join(c.args[0] for c in m().write.call_args_list)
-        assert "/usr/sbin/zpool trim tank" in written
-        assert "/usr/sbin/zpool scrub tank" in written
-        assert "24 0 1-7 * *" in written and "24 0 8-14 * *" in written
-        assert "\\%w" in written           # cron-escaped date format
+    def _cmds(self, rc):
+        return [c.args[0] for c in rc.call_args_list]
 
-    def test_install_pool_cron_dry_run(self):
+    def test_install_enables_scrub_and_trim(self):
         from unittest.mock import patch
-        with patch("b2ctl.config.tool", return_value="/usr/sbin/zpool"), \
-             patch("builtins.open") as o:
-            ok, msg = zfs.install_pool_cron("tank", dry_run=True)
-        assert ok and "dry-run" in msg
-        o.assert_not_called()
+        with patch("b2ctl.zfs._timer_template_exists", return_value=True), \
+             patch("b2ctl.zfs.run_check", return_value=(True, "")) as rc, \
+             patch("b2ctl.config.tool", return_value="/usr/bin/systemctl"):
+            ok, msg = zfs.install_pool_timers("tank")
+        assert ok
+        units = [c[3] for c in self._cmds(rc)]
+        assert "zfs-scrub-monthly@tank.timer" in units
+        assert "zfs-trim-monthly@tank.timer" in units
+        assert all(c[:3] == ["/usr/bin/systemctl", "enable", "--now"]
+                   for c in self._cmds(rc))
 
-    def test_remove_pool_cron(self):
+    def test_install_scrub_only_when_no_trim(self):
+        # include_trim=False (autotrim=on): scrub timer still enabled, no trim timer
         from unittest.mock import patch
-        with patch("b2ctl.zfs.os.path.exists", return_value=True), \
-             patch("b2ctl.zfs.os.remove") as rm:
-            ok, path = zfs.remove_pool_cron("tank")
-        assert ok and path == "/etc/cron.d/b2ctl-tank"
-        rm.assert_called_once_with("/etc/cron.d/b2ctl-tank")
+        with patch("b2ctl.zfs._timer_template_exists", return_value=True), \
+             patch("b2ctl.zfs.run_check", return_value=(True, "")) as rc, \
+             patch("b2ctl.config.tool", return_value="systemctl"):
+            ok, msg = zfs.install_pool_timers("tank", include_trim=False)
+        assert ok
+        units = [c[3] for c in self._cmds(rc)]
+        assert units == ["zfs-scrub-monthly@tank.timer"]
 
-    def test_prune_orphan_crons(self):
+    def test_install_template_missing_warns_and_enables_nothing(self):
+        # no zfs-scrub-monthly@.timer on the box -> ok=False, nothing enabled (the
+        # silent-scrub-gap the fix guards against)
         from unittest.mock import patch
-        files = ["/etc/cron.d/b2ctl-tank", "/etc/cron.d/b2ctl-ghost"]
-        with patch("b2ctl.zfs.run_check", return_value=(True, "tank")), \
+        with patch("b2ctl.zfs._timer_template_exists", return_value=False), \
+             patch("b2ctl.zfs.run_check") as rc:
+            ok, msg = zfs.install_pool_timers("tank")
+        assert ok is False
+        rc.assert_not_called()
+        assert "template not found" in msg
+
+    def test_install_threads_dry_run(self):
+        from unittest.mock import patch
+        with patch("b2ctl.zfs._timer_template_exists", return_value=True), \
+             patch("b2ctl.zfs.run_check", return_value=(True, "")) as rc, \
+             patch("b2ctl.config.tool", return_value="systemctl"):
+            zfs.install_pool_timers("tank", dry_run=True)
+        assert rc.call_args_list and all(
+            c.kwargs.get("dry_run") is True for c in rc.call_args_list)
+
+    def test_template_exists_probe_reads_list_unit_files(self):
+        # probe goes through run() (read-only, never dry-run-gated)
+        from unittest.mock import patch
+        with patch("b2ctl.zfs.run", return_value="zfs-scrub-monthly@.timer disabled"), \
+             patch("b2ctl.config.tool", return_value="systemctl"):
+            assert zfs._timer_template_exists("scrub") is True
+        with patch("b2ctl.zfs.run", return_value=""), \
+             patch("b2ctl.config.tool", return_value="systemctl"):
+            assert zfs._timer_template_exists("trim") is False
+
+    def test_remove_disables_both_timers(self):
+        from unittest.mock import patch
+        with patch("b2ctl.zfs.run_check", return_value=(True, "")) as rc, \
+             patch("b2ctl.config.tool", return_value="systemctl"):
+            ok, msg = zfs.remove_pool_timers("tank")
+        assert ok
+        units = [c[3] for c in self._cmds(rc)]
+        assert "zfs-scrub-monthly@tank.timer" in units
+        assert "zfs-trim-monthly@tank.timer" in units
+        assert all(c[:3] == ["systemctl", "disable", "--now"] for c in self._cmds(rc))
+
+    def test_prune_disables_orphans_keeps_live(self):
+        from unittest.mock import patch
+        listing = ("zfs-scrub-monthly@tank.timer loaded active waiting X\n"
+                   "zfs-scrub-monthly@ghost.timer loaded active waiting X\n"
+                   "zfs-trim-monthly@ghost.timer loaded active waiting X\n")
+        with patch("b2ctl.zfs.run", return_value=listing), \
+             patch("b2ctl.zfs.run_check", return_value=(True, "tank")), \
              patch("b2ctl.zfs.list_pools", return_value=[{"name": "tank"}]), \
-             patch("b2ctl.zfs.glob.glob", return_value=files), \
-             patch("b2ctl.zfs.os.remove") as rm:
-            removed = zfs.prune_orphan_crons()
-        assert removed == ["/etc/cron.d/b2ctl-ghost"]
-        rm.assert_called_once_with("/etc/cron.d/b2ctl-ghost")
+             patch("b2ctl.config.tool", return_value="systemctl"):
+            disabled = zfs.prune_orphan_timers()
+        assert set(disabled) == {"zfs-scrub-monthly@ghost.timer",
+                                 "zfs-trim-monthly@ghost.timer"}
+        assert "zfs-scrub-monthly@tank.timer" not in disabled
 
-    def test_prune_orphan_crons_skips_when_zpool_list_fails(self):
-        # F-063: a transient `zpool list` failure must NOT delete every cron.
+    def test_prune_skips_when_zpool_list_fails(self):
+        # F-063: a transient `zpool list` failure must NOT disable every timer.
         from unittest.mock import patch
-        files = ["/etc/cron.d/b2ctl-tank", "/etc/cron.d/b2ctl-ghost"]
-        with patch("b2ctl.zfs.run_check", return_value=(False, "error")), \
+        with patch("b2ctl.zfs.run", return_value="zfs-scrub-monthly@ghost.timer loaded active waiting X"), \
+             patch("b2ctl.zfs.run_check", return_value=(False, "error")), \
              patch("b2ctl.zfs.list_pools", return_value=[]), \
-             patch("b2ctl.zfs.glob.glob", return_value=files), \
-             patch("b2ctl.zfs.os.remove") as rm:
-            removed = zfs.prune_orphan_crons()
-        assert removed == []
-        rm.assert_not_called()
+             patch("b2ctl.config.tool", return_value="systemctl"):
+            assert zfs.prune_orphan_timers() == []
+
+    def test_prune_no_units_returns_empty(self):
+        from unittest.mock import patch
+        with patch("b2ctl.zfs.run", return_value=""), \
+             patch("b2ctl.config.tool", return_value="systemctl"):
+            assert zfs.prune_orphan_timers() == []
 
 
 # ========================================================================== #

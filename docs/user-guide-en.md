@@ -1017,18 +1017,24 @@ with an SSD-optimal default — **press Enter to accept**, or type to override
 `recordsize`). `recordsize` is workload-tunable (128K general, DB 16K, media 1M,
 VM 64–128K) and can be changed per-dataset later.
 
-**autotrim** is a choice:
-- **off (Monthly)** *(recommended)* — installs a monthly maintenance schedule for
-  the pool: `zpool trim` on the 1st Sunday + `zpool scrub` on the 2nd Sunday
-  (cron at `/etc/cron.d/b2ctl-<pool>`).
-- **on** — continuous trimming (ZFS handles it); no cron.
+**autotrim** is a choice — note that **the monthly SCRUB always runs either way**
+(scrub is what checks data integrity and self-heals; it doesn't depend on trim).
+b2ctl schedules maintenance with the distro's own **systemd timers** (from
+`zfsutils-linux`), one per pool:
+- **off** *(recommended)* — enables `zfs-scrub-monthly@<pool>.timer` **and**
+  `zfs-trim-monthly@<pool>.timer`.
+- **on** — continuous trimming (ZFS handles it); enables the scrub timer only.
+
+Check what's scheduled: `systemctl list-timers | grep zfs`. If the distro doesn't
+ship the timer units, b2ctl warns "scrub timer NOT scheduled" and installs nothing —
+install `zfsutils-linux` or enable a timer yourself.
 
 ## Destroying a ZFS pool (`[x]` or `b2ctl destroy <pool>`)
 
 Destroys the pool with `zpool destroy` — **ALL DATA IS LOST**. You must confirm
-and then **type the pool name** to proceed. b2ctl also removes that pool's
-maintenance cron. (If you destroy a pool yourself with `zpool destroy`, b2ctl
-cleans up the leftover cron the next time you open `b2ctl watch`.)
+and then **type the pool name** to proceed. b2ctl also disables that pool's
+maintenance timers. (If you destroy a pool yourself with `zpool destroy`, b2ctl
+disables the leftover timers the next time you open `b2ctl watch`.)
 
 ## Replacing a failing disk with NO spare (`[o]ffload`)
 

@@ -806,10 +806,11 @@ def _cmd_create(tbw, raid_type=None) -> bool:
     fs_opts = dict(zfs.DEFAULT_FS_OPTS)
     # ashift (generic), then autotrim as an explicit choice.
     pool_opts["ashift"] = _ask(f"    ashift [{pool_opts['ashift']}]> ") or pool_opts["ashift"]
-    print("    autotrim: [1] off — monthly TRIM+SCRUB via cron (recommended)")
-    print("              [2] on  — continuous (ZFS handles trim; no cron)")
-    want_cron = (_ask("    choose [1]> ") or "1") != "2"
-    pool_opts["autotrim"] = "off" if want_cron else "on"
+    print("    autotrim: [1] off — scrub + trim monthly systemd timers (recommended)")
+    print("              [2] on  — continuous (ZFS handles trim); scrub-monthly "
+          "timer only")
+    autotrim_on = (_ask("    choose [1]> ") or "1") == "2"
+    pool_opts["autotrim"] = "on" if autotrim_on else "off"
     for k in fs_opts:
         if k in _HINTS:
             print(f"      ({_HINTS[k]})")
@@ -832,10 +833,14 @@ def _cmd_create(tbw, raid_type=None) -> bool:
     ok, out = zfs.create_pool(name, raid_type, devs, pool_opts=pool_opts,
                               fs_opts=fs_opts, dry_run=_DRY_RUN)
     print((G + "  ✔ pool created" if ok else R + f"  ✗ failed: {out}") + N)
-    if ok and want_cron:
-        okc, outc = zfs.install_pool_cron(name, dry_run=_DRY_RUN)
-        print((G + f"  ✔ monthly trim+scrub cron -> {outc}" if okc
-               else Y + f"  [!] cron not installed: {outc}") + N)
+    if ok:
+        # Scrub is independent of autotrim — it's the only thing that verifies
+        # checksums / self-heals, so the scrub timer always enables. The trim timer
+        # enables only when autotrim is off (autotrim=on already trims continuously).
+        include_trim = not autotrim_on
+        okc, outc = zfs.install_pool_timers(name, include_trim=include_trim, dry_run=_DRY_RUN)
+        print((G + f"  ✔ maintenance timers: {outc}" if okc
+               else Y + f"  [!] scrub timer NOT scheduled: {outc}") + N)
     return ok
 
 
@@ -872,9 +877,9 @@ def _cmd_destroy(tbw, target=None) -> bool:
                             [["zpool", "destroy", pool]], dry_run=_DRY_RUN)
     ok, out = zfs.destroy_pool(pool, dry_run=_DRY_RUN)
     if ok:
-        okc, outc = zfs.remove_pool_cron(pool, dry_run=_DRY_RUN)
-        print((G + f"  ✔ pool '{pool}' destroyed; cron removed" if okc
-               else G + f"  ✔ pool '{pool}' destroyed" + Y + f" (cron: {outc})") + N)
+        okc, outc = zfs.remove_pool_timers(pool, dry_run=_DRY_RUN)
+        print((G + f"  ✔ pool '{pool}' destroyed; timers disabled" if okc
+               else G + f"  ✔ pool '{pool}' destroyed" + Y + f" (timers: {outc})") + N)
     else:
         print(f"{R}  ✗ failed: {out}{N}")
     safety.end_op(op_id, ok, out, "" if ok else out, 0 if ok else 1, dry_run=_DRY_RUN)
@@ -1233,12 +1238,12 @@ _MENU = (f"{C}[r]{N}efresh  {C}[a]{N}ssign  {C}[o]{N}ffload  {C}[s]{N}wap  {C}[d
 
 def run() -> int:
     tbw = spec.load()
-    # Clean up cron files for pools destroyed outside b2ctl (manual zpool destroy).
-    # Honor --dry-run: the documented `b2ctl --dry-run watch` preview must not
-    # delete a real /etc/cron.d file at startup (F-058).
-    for p in zfs.prune_orphan_crons(dry_run=_DRY_RUN):
-        verb = "would remove" if _DRY_RUN else "removed"
-        print(f"{Y}  {verb} stale cron {p} (pool no longer exists){N}")
+    # Disable maintenance timers for pools destroyed outside b2ctl (manual zpool
+    # destroy). Honor --dry-run: the documented `b2ctl --dry-run watch` preview must
+    # not disable a real timer at startup (F-058).
+    for u in zfs.prune_orphan_timers(dry_run=_DRY_RUN):
+        verb = "would disable" if _DRY_RUN else "disabled"
+        print(f"{Y}  {verb} stale timer {u} (pool no longer exists){N}")
     _cmd_refresh(tbw)
     print("\n" + _MENU)
     baseline = _block_devs() or set()

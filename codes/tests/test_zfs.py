@@ -677,14 +677,30 @@ class TestZfsPoolTimers(unittest.TestCase):
         assert "zfs-trim-monthly@tank.timer" in units
         assert all(c[:3] == ["systemctl", "disable", "--now"] for c in self._cmds(rc))
 
+    def test_remove_reports_failure(self):
+        # a genuine disable failure must surface ok=False (not a green success)
+        from unittest.mock import patch
+        with patch("b2ctl.zfs.run_check", return_value=(False, "D-Bus down")), \
+             patch("b2ctl.config.tool", return_value="systemctl"):
+            ok, msg = zfs.remove_pool_timers("tank")
+        assert ok is False
+        assert "disable failed" in msg
+
     def test_prune_disables_orphans_keeps_live(self):
+        # `live` must come from the guarded `zpool list` output (out2), NOT a second
+        # list_pools() call — patch list_pools to blow up to prove it's unused.
         from unittest.mock import patch
         listing = ("zfs-scrub-monthly@tank.timer loaded active waiting X\n"
                    "zfs-scrub-monthly@ghost.timer loaded active waiting X\n"
                    "zfs-trim-monthly@ghost.timer loaded active waiting X\n")
+
+        def fake_rc(args, *a, **k):
+            if args[1] == "list":                 # zpool list -H -o name
+                return True, "rpool\ntank\n"
+            return True, ""                       # systemctl disable
         with patch("b2ctl.zfs.run", return_value=listing), \
-             patch("b2ctl.zfs.run_check", return_value=(True, "tank")), \
-             patch("b2ctl.zfs.list_pools", return_value=[{"name": "tank"}]), \
+             patch("b2ctl.zfs.run_check", side_effect=fake_rc), \
+             patch("b2ctl.zfs.list_pools", side_effect=AssertionError("must not call list_pools")), \
              patch("b2ctl.config.tool", return_value="systemctl"):
             disabled = zfs.prune_orphan_timers()
         assert set(disabled) == {"zfs-scrub-monthly@ghost.timer",
@@ -696,7 +712,6 @@ class TestZfsPoolTimers(unittest.TestCase):
         from unittest.mock import patch
         with patch("b2ctl.zfs.run", return_value="zfs-scrub-monthly@ghost.timer loaded active waiting X"), \
              patch("b2ctl.zfs.run_check", return_value=(False, "error")), \
-             patch("b2ctl.zfs.list_pools", return_value=[]), \
              patch("b2ctl.config.tool", return_value="systemctl"):
             assert zfs.prune_orphan_timers() == []
 

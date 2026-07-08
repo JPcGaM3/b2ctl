@@ -617,15 +617,17 @@ def install_pool_timers(pool: str, *, include_trim: bool = True,
 
 
 def remove_pool_timers(pool: str, *, dry_run: bool = False) -> tuple[bool, str]:
-    """Disable a pool's maintenance timers (best-effort; disabling a not-enabled
-    instance is a harmless no-op)."""
-    disabled = []
+    """Disable a pool's maintenance timers. `ok` is False only when a disable
+    genuinely FAILS — disabling a never-enabled instance is a systemd no-op that
+    exits 0, so a scrub-only pool (autotrim=on) still reports success."""
+    disabled, failed = [], []
     for kind in _TIMER_KINDS:
         unit = _timer_unit(kind, pool)
         ok, _ = run_check([_tool("systemctl"), "disable", "--now", unit],
                           dry_run=dry_run)
-        if ok:
-            disabled.append(unit)
+        (disabled if ok else failed).append(unit)
+    if failed:
+        return False, "disable failed: " + ", ".join(failed)
     return True, ("disabled " + ", ".join(disabled) if disabled
                   else "no timers to disable")
 
@@ -651,10 +653,14 @@ def prune_orphan_timers(*, dry_run: bool = False) -> list[str]:
             units[tok[0]] = m.group(1)
     if not units:
         return []
-    ok, _ = run_check([_tool("zpool"), "list", "-H", "-o", "name"])
+    # Build `live` from the SAME guarded query — never a second, unguarded
+    # list_pools() call: if that one transiently timed out/failed it would return
+    # an empty set and we'd disable EVERY live pool's timers (F-063). `zpool list
+    # -H -o name` is one pool name per line.
+    ok, out2 = run_check([_tool("zpool"), "list", "-H", "-o", "name"])
     if not ok:
         return []
-    live = {p["name"] for p in list_pools()}
+    live = {ln.strip() for ln in out2.splitlines() if ln.strip()}
     disabled: list[str] = []
     for unit, pool in units.items():
         if pool in live:

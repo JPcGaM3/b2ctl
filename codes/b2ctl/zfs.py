@@ -573,6 +573,18 @@ def _timer_unit(kind: str, pool: str) -> str:
     return f"zfs-{kind}-monthly@{pool}.timer"
 
 
+# Debian/Proxmox `zfsutils-linux` ALSO ships /etc/cron.d/zfsutils-linux, which
+# scrubs/trims EVERY online pool monthly, gated by these per-pool user properties
+# (default `auto` = enabled). Left alone, that cron + our per-pool timer would
+# DOUBLE-schedule. When a timer enables we set the matching property to `disable`
+# so the distro all-pools cron skips this pool → the timer is the single schedule.
+# `org.debian:*` is a plain user property, settable/harmless on any box even where
+# the Debian scripts aren't installed. Only suppressed AFTER a timer enables (never
+# leaving a pool with neither), and it dies with the pool on destroy (no restore).
+_PERIODIC_PROP = {"scrub": "org.debian:periodic-scrub",
+                  "trim": "org.debian:periodic-trim"}
+
+
 def _timer_template_exists(kind: str) -> bool:
     """Read-only probe (via run(), never dry-run-gated) — is the distro timer
     TEMPLATE installed? A box without zfsutils' timer units can't be scheduled."""
@@ -606,6 +618,14 @@ def install_pool_timers(pool: str, *, include_trim: bool = True,
             enabled.append(unit)
             if kind == "scrub":
                 scrub_ok = True
+            # suppress the distro all-pools cron for THIS kind to avoid a double
+            # schedule (best-effort — a failure just means a possible extra run,
+            # never a gap, so it doesn't flip `ok`).
+            prop = _PERIODIC_PROP[kind]
+            okp, outp = run_check([_tool("zpool"), "set", f"{prop}=disable", pool],
+                                  dry_run=dry_run)
+            if not okp:
+                warns.append(f"{prop}: {outp}")
         else:
             warns.append(f"{unit}: {out}")
     parts = []

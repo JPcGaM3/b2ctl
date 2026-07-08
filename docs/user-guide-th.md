@@ -953,6 +953,11 @@ default ที่เหมาะกับ SSD อยู่แล้ว — **ก
 เช็คได้: `systemctl list-timers | grep zfs`. ถ้า distro ไม่มี timer unit b2ctl จะเตือน
 "scrub timer NOT scheduled" แล้วไม่ติดตั้งอะไร (ลง `zfsutils-linux` หรือเปิด timer เอง)
 
+Debian/Proxmox มี cron ในตัวที่ scrub *ทุก* pool รายเดือนอยู่แล้ว (property
+`org.debian:periodic-scrub`). กัน scrub ซ้ำ: ตอน b2ctl เปิด timer ของ pool มันจะ set
+`org.debian:periodic-scrub=disable` (และ `…periodic-trim` สำหรับ trim timer) ให้ pool นั้น
+→ per-pool timer เป็น schedule เดียว ไม่ซ้ำกับ cron ของ distro
+
 **raid10** = stripe ของ mirror (เร็ว/ resilver ไว / random IOPS ดีสุด): เลือกดิสก์
 **จำนวนคู่ (even, ≥4)** b2ctl จะจับคู่ให้เอง (`mirror d1 d2 mirror d3 d4 …`) และโชว์คู่
 ก่อนยืนยัน — จาก CLI ใช้ `b2ctl create --raid10`

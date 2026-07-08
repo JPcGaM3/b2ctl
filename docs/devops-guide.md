@@ -907,6 +907,20 @@ so a trim timer would be redundant):
 include_trim=True, dry_run=False)` implements the split; watch passes
 `include_trim = pool_opts["autotrim"] == "off"`.
 
+**No double-scrub with the Debian cron.** `zfsutils-linux` also ships
+`/etc/cron.d/zfsutils-linux`, which scrubs/trims **every** online pool monthly,
+gated by the per-pool user properties `org.debian:periodic-scrub` /
+`org.debian:periodic-trim` (default `auto` = enabled). Left alone, that cron plus our
+per-pool timer would schedule each pool twice. So immediately **after** a timer
+enables, `install_pool_timers` runs `zpool set org.debian:periodic-<kind>=disable
+<pool>` — the distro all-pools cron then skips this pool and the per-pool timer is the
+single schedule. This is done only for a kind whose timer actually enabled (never
+leaving a pool with neither scrubber), is best-effort (a failed `zpool set` warns but
+does not flip `ok` — worst case is one extra scrub, never a gap), and needs no
+restore on destroy (the property dies with the pool). `org.debian:*` is a plain user
+property — settable and harmless even on a box where the Debian scripts aren't
+installed.
+
 **Template-missing → warn, no fallback.** A read-only probe
 (`_timer_template_exists` → `systemctl list-unit-files zfs-<kind>-monthly@.timer`,
 via `run()` so it's never dry-run-gated) checks the template exists first. If it

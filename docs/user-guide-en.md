@@ -1029,6 +1029,11 @@ Check what's scheduled: `systemctl list-timers | grep zfs`. If the distro doesn'
 ship the timer units, b2ctl warns "scrub timer NOT scheduled" and installs nothing —
 install `zfsutils-linux` or enable a timer yourself.
 
+Debian/Proxmox also has a built-in cron that scrubs *all* pools monthly (property
+`org.debian:periodic-scrub`). To avoid scrubbing twice, when b2ctl enables a pool's
+timer it sets that pool's `org.debian:periodic-scrub=disable` (and `…periodic-trim`
+for the trim timer) — so your per-pool timer becomes the single schedule.
+
 ## Destroying a ZFS pool (`[x]` or `b2ctl destroy <pool>`)
 
 Destroys the pool with `zpool destroy` — **ALL DATA IS LOST**. You must confirm

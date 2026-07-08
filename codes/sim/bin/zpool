@@ -397,7 +397,7 @@ def main():
     }
     if sub == "version":
         print("zfs-2.4.2-sim"); return 0
-    if sub in ("clear", "trim", "scrub"):     # genuinely no-ops for the sim
+    if sub in ("clear", "trim", "scrub", "set"):   # genuinely no-ops for the sim
         return 0
     fn = table.get(sub)
     if fn is None:

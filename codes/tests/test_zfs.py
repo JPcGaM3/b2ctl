@@ -616,25 +616,59 @@ class TestZfsPoolTimers(unittest.TestCase):
         from unittest.mock import patch
         with patch("b2ctl.zfs._timer_template_exists", return_value=True), \
              patch("b2ctl.zfs.run_check", return_value=(True, "")) as rc, \
-             patch("b2ctl.config.tool", return_value="/usr/bin/systemctl"):
+             patch("b2ctl.config.tool", side_effect=lambda n: n):
             ok, msg = zfs.install_pool_timers("tank")
         assert ok
-        units = [c[3] for c in self._cmds(rc)]
-        assert "zfs-scrub-monthly@tank.timer" in units
-        assert "zfs-trim-monthly@tank.timer" in units
-        assert all(c[:3] == ["/usr/bin/systemctl", "enable", "--now"]
-                   for c in self._cmds(rc))
+        cmds = self._cmds(rc)
+        enables = [c[3] for c in cmds if c[1] == "enable"]
+        assert "zfs-scrub-monthly@tank.timer" in enables
+        assert "zfs-trim-monthly@tank.timer" in enables
+        # each enabled kind suppresses the distro all-pools cron (no double-scrub)
+        props = [c[2] for c in cmds if c[:2] == ["zpool", "set"]]
+        assert "org.debian:periodic-scrub=disable" in props
+        assert "org.debian:periodic-trim=disable" in props
 
     def test_install_scrub_only_when_no_trim(self):
-        # include_trim=False (autotrim=on): scrub timer still enabled, no trim timer
+        # include_trim=False (autotrim=on): scrub timer + scrub property only
         from unittest.mock import patch
         with patch("b2ctl.zfs._timer_template_exists", return_value=True), \
              patch("b2ctl.zfs.run_check", return_value=(True, "")) as rc, \
-             patch("b2ctl.config.tool", return_value="systemctl"):
+             patch("b2ctl.config.tool", side_effect=lambda n: n):
             ok, msg = zfs.install_pool_timers("tank", include_trim=False)
         assert ok
-        units = [c[3] for c in self._cmds(rc)]
-        assert units == ["zfs-scrub-monthly@tank.timer"]
+        cmds = self._cmds(rc)
+        assert [c[3] for c in cmds if c[1] == "enable"] == ["zfs-scrub-monthly@tank.timer"]
+        props = [c[2] for c in cmds if c[:2] == ["zpool", "set"]]
+        assert props == ["org.debian:periodic-scrub=disable"]     # no trim property
+
+    def test_install_missing_trim_template_still_enables_scrub(self):
+        # scrub template present, trim absent (autotrim=off): scrub enables + its
+        # property disabled; trim warns; ok stays True (scrub IS scheduled).
+        from unittest.mock import patch
+        with patch("b2ctl.zfs._timer_template_exists", side_effect=lambda k: k == "scrub"), \
+             patch("b2ctl.zfs.run_check", return_value=(True, "")) as rc, \
+             patch("b2ctl.config.tool", side_effect=lambda n: n):
+            ok, msg = zfs.install_pool_timers("tank", include_trim=True)
+        assert ok is True
+        cmds = self._cmds(rc)
+        assert [c[3] for c in cmds if c[1] == "enable"] == ["zfs-scrub-monthly@tank.timer"]
+        assert [c[2] for c in cmds if c[:2] == ["zpool", "set"]] == \
+               ["org.debian:periodic-scrub=disable"]     # no trim property when no trim timer
+        assert "trim" in msg.lower()
+
+    def test_install_property_set_failure_keeps_ok(self):
+        # a failed `zpool set` is best-effort (worst case: an extra scrub, never a
+        # gap) — it must NOT flip ok to False.
+        from unittest.mock import patch
+
+        def rc(args, *a, **k):
+            return (False, "permission denied") if args[1] == "set" else (True, "")
+        with patch("b2ctl.zfs._timer_template_exists", return_value=True), \
+             patch("b2ctl.zfs.run_check", side_effect=rc), \
+             patch("b2ctl.config.tool", side_effect=lambda n: n):
+            ok, msg = zfs.install_pool_timers("tank", include_trim=False)
+        assert ok is True
+        assert "periodic-scrub" in msg
 
     def test_install_template_missing_warns_and_enables_nothing(self):
         # no zfs-scrub-monthly@.timer on the box -> ok=False, nothing enabled (the

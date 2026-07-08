@@ -1002,6 +1002,7 @@ def _cmd_extend(tbw) -> None:
     print("  [1] add L2ARC cache (read cache; loss = harmless)")
     print("  [2] add SLOG log   (sync-write accel; mirror + PLP recommended)")
     print("  [3] remove a cache/log device")
+    print("  [4] replace/repair a degraded cache/log device")
     choice = _ask("  action> ")
 
     if choice in ("1", "2"):
@@ -1060,7 +1061,97 @@ def _cmd_extend(tbw) -> None:
             ok, out = zfs.remove_vdev(pool, tok, dry_run=_DRY_RUN)
             print((G + "  ✔ removed" if ok else R + f"  ✗ failed: {out}") + N)
         return
+
+    if choice == "4":
+        _repair_aux_interactive(tbw, pool)
+        return
     print(f"{Y}  cancelled{N}")
+
+
+def _repair_aux_interactive(tbw, pool: str) -> None:
+    """Pick a degraded cache/log leaf + a free disk, then _repair_aux()."""
+    bad = [l for l in zfs.aux_leaves(pool) if l["degraded"]]
+    if not bad:
+        print(f"{Y}  no degraded cache/log device on '{pool}'{N}"); return
+    for i, l in enumerate(bad, 1):
+        kind = "SLOG mirror-leg" if l["mirror_leg"] else l["klass"]
+        print(f"    [{i}] {kind:14} {l['token']}  {R}{l['state']}{N}")
+    try:
+        leaf = bad[_one_based(_ask("  repair which #> "))]
+    except (ValueError, IndexError):
+        print(f"{Y}  cancelled{N}"); return
+    avail = _avail_for_aux(tbw)
+    if not avail:
+        print(f"{Y}  no free disks available{N}"); return
+    for i, d in enumerate(avail, 1):
+        print(f"    [{i}] {d.dev} (bay {d.bay or '?'})")
+    try:
+        new = avail[_one_based(_ask("  replacement disk #> "))]
+    except (ValueError, IndexError):
+        print(f"{Y}  cancelled{N}"); return
+    _repair_aux(pool, leaf, new)
+
+
+def _repair_aux(pool: str, leaf: dict, new=None, *, new_token: str | None = None) -> bool:
+    """Repair a degraded aux (cache/log) leaf with a fresh disk. Branch by class:
+
+      cache             -> zpool remove <old> ; zpool add cache <new>  (no resilver)
+      SLOG mirror-leg   -> zpool replace <old> <new>                   (brief resilver)
+      SLOG single, gone -> zpool remove <old> ; zpool add log <new>    (REMOVED/UNAVAIL)
+      SLOG single, here -> zpool replace <old> <new>
+
+    L2ARC can't be `zpool replace`d, so cache is always remove+add. `replace` is
+    chosen over attach+detach for a mirror leg — it never exposes a hand-picked
+    destroy target, so a mistyped detach can't kill the surviving leg (safer).
+
+    `new` is an optional Disk (interactive path); `new_token` a resolved by-id
+    string (CLI path). At least one must supply a device.
+    """
+    new_token = new_token or ((new.by_id or new.dev) if new else None)
+    if not new_token:
+        print(f"{R}  ✗ no replacement device{N}"); return False
+    old, klass = leaf["token"], leaf["klass"]
+
+    if klass == "cache":
+        cmds = [["zpool", "remove", pool, old],
+                ["zpool", "add", "-f", pool, "cache", new_token]]
+    elif leaf.get("mirror_leg"):
+        cmds = [["zpool", "replace", "-f", pool, old, new_token]]
+    elif leaf["state"] in ("REMOVED", "UNAVAIL"):
+        # single SLOG fully gone: `replace` of a vanished device is unreliable.
+        cmds = [["zpool", "remove", pool, old],
+                ["zpool", "add", "-f", pool, "log", new_token]]
+    else:
+        cmds = [["zpool", "replace", "-f", pool, old, new_token]]
+    resilver = any(c[1] == "replace" for c in cmds)
+
+    verb = "replace" if resilver else "remove+add"
+    if not _confirm(f"repair {klass} on '{pool}': {verb} {old} -> {new_token}?"):
+        print(f"{Y}  cancelled{N}"); return False
+
+    op_id = safety.begin_op(
+        "aux-repair", getattr(new, "serial", "") or "", getattr(new, "bay", "") or "",
+        new_token, pool, leaf["vdev"], cmds,
+        details={"old_dev": old, "new_dev": new_token}, dry_run=_DRY_RUN)
+    out = ""
+    for c in cmds:
+        ok, out = run_check(c, dry_run=_DRY_RUN)
+        if not ok:
+            print(R + f"  ✗ failed: {out}" + N)
+            safety.end_op(op_id, False, "", out, 1, dry_run=_DRY_RUN)
+            return False
+    if resilver:
+        print(G + "  ✔ replace started — resilvering" + N)
+        ok_res = True if _DRY_RUN else _wait_resilver(pool)
+        if not ok_res:
+            print(f"{Y}  resilver did not complete cleanly — check: zpool status {pool}{N}")
+            safety.end_op(op_id, False, out, "resilver incomplete or had errors", 1,
+                          dry_run=_DRY_RUN)
+            return False
+    else:
+        print(G + f"  ✔ {klass} repaired" + N)
+    safety.end_op(op_id, True, out, "", 0, dry_run=_DRY_RUN)
+    return True
 
 
 def _cmd_burnin(tbw) -> None:

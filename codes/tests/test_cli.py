@@ -179,9 +179,43 @@ class TestAuxAndBurninCommands(unittest.TestCase):
         p = cli.build_parser()
         for cmd, extra in (("cache-add", ["tank", "sde"]), ("cache-rm", ["tank", "sde"]),
                            ("log-add", ["tank", "sde"]), ("log-rm", ["tank", "sde"]),
+                           ("cache-replace", ["tank", "old", "sde"]),
+                           ("log-replace", ["tank", "old", "sde"]),
                            ("burnin", ["sde"])):
             ns = p.parse_args([cmd] + extra)
             assert hasattr(ns, "func")
+
+    def test_aux_replace_dispatches_resolved_tokens(self):
+        # old resolves permissively, new resolves strictly; both flow to the action
+        import b2ctl.cli as cli
+
+        def _resolve(tokens, *, strict=False):
+            return ["/dev/disk/by-id/NEW"] if strict else ["/dev/disk/by-id/OLD"]
+
+        for verb, action in (("cache-replace", "cache_replace"),
+                             ("log-replace", "log_replace")):
+            with self.subTest(verb=verb):
+                with patch("b2ctl.cli._resolve_devs", side_effect=_resolve), \
+                     patch(f"b2ctl.zfs_actions.{action}", return_value=0) as mock_act:
+                    args = cli.build_parser().parse_args([verb, "tank", "old", "sde"])
+                    rc = args.func(args)
+                mock_act.assert_called_once_with(
+                    "tank", "/dev/disk/by-id/OLD", "/dev/disk/by-id/NEW")
+                self.assertEqual(rc, 0)
+
+    def test_aux_replace_aborts_when_new_unresolved(self):
+        # strict resolution of the NEW disk fails -> return 1, never dispatch
+        import b2ctl.cli as cli
+
+        def _resolve(tokens, *, strict=False):
+            return None if strict else ["/dev/disk/by-id/OLD"]
+
+        with patch("b2ctl.cli._resolve_devs", side_effect=_resolve), \
+             patch("b2ctl.zfs_actions.log_replace") as mock_act:
+            args = cli.build_parser().parse_args(["log-replace", "tank", "old", "sdX"])
+            rc = args.func(args)
+        mock_act.assert_not_called()
+        self.assertEqual(rc, 1)
 
     def test_create_raid10_flag_parses(self):
         import b2ctl.cli as cli

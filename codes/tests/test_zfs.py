@@ -8,7 +8,7 @@ import pytest
 
 from helpers import (_disk, _MIRROR_STATUS, _RAIDZ_STATUS, _DEGRADED_STATUS,
                      _RESILVER_DONE, _RESILVER_PROGRESS, _RESILVER_DONE_WITH_ERRORS,
-                     _SPARE_N_STATUS)
+                     _SPARE_N_STATUS, _AUX_STATUS, _AUX_SINGLE_LOG_STATUS)
 from b2ctl import zfs, watch, core
 from b2ctl.common import Disk
 
@@ -505,6 +505,75 @@ class TestZfsAuxVdevs(unittest.TestCase):
         mock_run_check.return_value = (True, "")
         zfs.destroy_pool("tank")
         mock_run_check.assert_called_once_with(["zpool", "destroy", "tank"], dry_run=False)
+
+
+class TestZfsAuxLeaves(unittest.TestCase):
+    """aux_leaves() tags cache/log leaves for the repair flow (F-aux-repair)."""
+
+    def _leaves(self, status, pool=None):
+        topo = {}
+        zfs._parse("tank", status, topo)
+        with patch("b2ctl.zfs.topology", return_value=topo):
+            return zfs.aux_leaves(pool)
+
+    def test_classifies_cache_and_mirrored_log(self):
+        leaves = self._leaves(_AUX_STATUS)
+        by_tok = {l["token"]: l for l in leaves}
+        # only cache/log leaves — the 3 raidz data disks are excluded
+        self.assertEqual(len(leaves), 3)
+        self.assertNotIn("/dev/disk/by-id/wwn-0xCCC", by_tok)
+
+        cache = by_tok["/dev/disk/by-id/ata-CACHE"]
+        self.assertEqual(cache["klass"], "cache")
+        self.assertFalse(cache["mirror_leg"])
+        self.assertTrue(cache["degraded"])          # UNAVAIL
+
+        good_leg = by_tok["/dev/disk/by-id/ata-LOGA"]
+        self.assertEqual(good_leg["klass"], "log")
+        self.assertTrue(good_leg["mirror_leg"])     # vdev='mirror-1' under logs
+        self.assertFalse(good_leg["degraded"])      # ONLINE
+
+        dead_leg = by_tok["/dev/disk/by-id/ata-LOGB"]
+        self.assertTrue(dead_leg["mirror_leg"])
+        self.assertTrue(dead_leg["degraded"])       # FAULTED
+        self.assertEqual(dead_leg["vdev"], "mirror-1")
+
+    def test_single_log_is_not_a_mirror_leg(self):
+        leaves = self._leaves(_AUX_SINGLE_LOG_STATUS)
+        self.assertEqual(len(leaves), 1)
+        leaf = leaves[0]
+        self.assertEqual(leaf["klass"], "log")
+        self.assertFalse(leaf["mirror_leg"])        # vdev='logs', not 'mirror-*'
+        self.assertTrue(leaf["degraded"])           # UNAVAIL
+
+    def test_pool_filter(self):
+        # a leaf on another pool is filtered out when pool= is given
+        topo = {}
+        zfs._parse("tank", _AUX_STATUS, topo)
+        with patch("b2ctl.zfs.topology", return_value=topo):
+            self.assertEqual(zfs.aux_leaves("rpool"), [])
+            self.assertEqual(len(zfs.aux_leaves("tank")), 3)
+
+    def test_dedupes_by_pool_token(self):
+        # _parse indexes /dev paths under both token and realpath; aux_leaves
+        # must not emit the same (pool, token) twice.
+        leaves = self._leaves(_AUX_STATUS)
+        toks = [l["token"] for l in leaves]
+        self.assertEqual(len(toks), len(set(toks)))
+
+    def test_stripe_pool_named_like_aux_is_not_misclassified(self):
+        # a single-disk/stripe pool's data leaf has top_vdev == pool name; a pool
+        # NAMED with a 'cache'/'log' substring must NOT have its data disk read as
+        # an aux vdev (top == pool guard).
+        status = ("  pool: cachebox\n state: ONLINE\nconfig:\n\n"
+                  "\tNAME        STATE\n"
+                  "\tcachebox    ONLINE\n"
+                  "\t  /dev/disk/by-id/ata-ONLY   ONLINE\n\n"
+                  "errors: No known data errors\n")
+        topo = {}
+        zfs._parse("cachebox", status, topo)
+        with patch("b2ctl.zfs.topology", return_value=topo):
+            self.assertEqual(zfs.aux_leaves("cachebox"), [])
 
 
 class TestZfsOffline(unittest.TestCase):

@@ -198,6 +198,22 @@ def _log_rm(args) -> int:
     return 0 if ok else 1
 
 
+def _cache_replace(args) -> int:
+    old = _resolve_devs([args.old])[0]            # permissive: raw leaf token OK
+    new = _resolve_devs([args.new], strict=True)  # strict: new must be a real by-id disk
+    if new is None:
+        return 1
+    return zfs_actions.cache_replace(args.pool, old, new[0])
+
+
+def _log_replace(args) -> int:
+    old = _resolve_devs([args.old])[0]
+    new = _resolve_devs([args.new], strict=True)
+    if new is None:
+        return 1
+    return zfs_actions.log_replace(args.pool, old, new[0])
+
+
 def _burnin(args) -> int:
     from . import burnin
     if args.cancel_all:
@@ -614,6 +630,20 @@ def build_parser() -> argparse.ArgumentParser:
     lrm.add_argument("pool")
     lrm.add_argument("dev", help="log leaf token / bay / serial / dev")
     lrm.set_defaults(func=_log_rm)
+
+    crp = sub.add_parser("cache-replace",
+                         help="repair a degraded L2ARC cache device (remove old + add new)")
+    crp.add_argument("pool")
+    crp.add_argument("old", help="degraded cache leaf token / bay / serial / dev")
+    crp.add_argument("new", help="replacement disk: bay / serial / dev / by-id")
+    crp.set_defaults(func=_cache_replace)
+
+    lrp = sub.add_parser("log-replace",
+                         help="repair a degraded SLOG log device (replace, or remove+add)")
+    lrp.add_argument("pool")
+    lrp.add_argument("old", help="degraded log leaf token / bay / serial / dev")
+    lrp.add_argument("new", help="replacement disk: bay / serial / dev / by-id")
+    lrp.set_defaults(func=_log_replace)
 
     bi = sub.add_parser("burnin",
                         help="vet spare/new disk(s) — SMART long self-test (+ scan)")

@@ -196,6 +196,30 @@ single (non-mirrored) log and always reminds the operator to use a **PLP** SSD
 honor `--dry-run`. CLI: `b2ctl cache-add|cache-rm|log-add|log-rm <pool> <dev…>`;
 watch: `[e]xtend`.
 
+**Aux-vdev repair (v0.14.0).** When an L2ARC cache disk or one leg of a mirrored
+SLOG dies, pull it, insert a new disk, and repair through the tool. Enumerated by
+`zfs.aux_leaves(pool)` (cache/log leaves tagged `klass`/`mirror_leg`/`degraded`);
+the shared core is `watch._repair_aux(pool, leaf, new, new_token=…)`, which
+branches by class + leaf state:
+
+| case | commands (list-form, all through `run_check`) | resilver |
+|------|-----------------------------------------------|----------|
+| **cache** (any state) | `zpool remove <pool> <old>` → `zpool add -f <pool> cache <new>` | no (L2ARC is volatile; it cannot be `zpool replace`d) |
+| **SLOG mirror leg** (`vdev=mirror-*`) | `zpool replace -f <pool> <old-leg> <new>` | yes — `_wait_resilver()` polls `poll_resilver_status()` |
+| **SLOG single, gone** (state `REMOVED`/`UNAVAIL`) | `zpool remove <pool> <old>` → `zpool add -f <pool> log <new>` | no |
+| **SLOG single, present** (FAULTED/DEGRADED) | `zpool replace -f <pool> <old> <new>` | yes |
+
+`replace` is chosen over `attach`+`detach` for a mirror leg deliberately: it is
+atomic and never exposes a hand-picked *detach* target, so a mistyped device can't
+destroy the surviving good leg (the operator only ever names the disk to *add*).
+The op is audited as `"aux-repair"` (`safety.begin_op`/`end_op`, `details=
+{old_dev,new_dev}`); `_post_op_verify` passes if `zpool status` shows a resilver
+marker **or** the new device token; the `_ROLLBACK["aux-repair"]` hint is advisory
+(cache loss is harmless, a SLOG mirror keeps redundancy — no auto-rollback). Honors
+`--dry-run`. CLI: `b2ctl cache-replace|log-replace <pool> <old> <new>` (the `new`
+disk resolves strictly to a by-id, §9; `old` is permissive so a raw leaf token
+passes through). watch: `[e]xtend → [4]`.
+
 ### 3.6a Disk burn-in — `burnin.py` (runbook STEP 02, read-only vetting)
 
 **Multi-disk & non-blocking (v0.10.0).** `run_multi(targets, …)` vets several disks

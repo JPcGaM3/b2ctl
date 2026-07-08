@@ -1343,5 +1343,100 @@ class TestAssignMultiSelect(unittest.TestCase):
         self.assertEqual(perc_b.call_args[0][0], [p1, p2])
 
 
+class TestRepairAux(unittest.TestCase):
+    """_repair_aux branches by leaf class/state and honors dry-run."""
+
+    NEW = "/dev/disk/by-id/ata-NEW"
+
+    def _new_disk(self):
+        return _disk(dev="/dev/sdz", by_id=self.NEW, serial="NEW1", bay="1:9",
+                     pool=None, vdev=None, vdev_state=None, pool_token=None)
+
+    @staticmethod
+    def _leaf(klass, *, vdev, state, mirror_leg):
+        return {"token": "/dev/disk/by-id/ata-OLD", "klass": klass, "vdev": vdev,
+                "top_vdev": "logs" if klass == "log" else "cache", "state": state,
+                "mirror_leg": mirror_leg, "degraded": True}
+
+    def _run(self, leaf, *, dry=False, rc_ok=True, resilver=True):
+        import b2ctl.watch as watch
+        with patch("b2ctl.watch._confirm", return_value=True), \
+             patch("b2ctl.watch.run_check", return_value=(rc_ok, "" if rc_ok else "err")) as mrc, \
+             patch("b2ctl.watch._wait_resilver", return_value=resilver) as mwait, \
+             patch("b2ctl.safety.begin_op", return_value="op1"), \
+             patch("b2ctl.safety.end_op") as mend, \
+             patch.object(watch, "_DRY_RUN", dry):
+            ok = watch._repair_aux("tank", leaf, self._new_disk())
+        cmds = [c.args[0] for c in mrc.call_args_list]
+        return ok, cmds, mrc, mwait, mend
+
+    def test_cache_is_remove_then_add_no_resilver(self):
+        leaf = self._leaf("cache", vdev="cache", state="UNAVAIL", mirror_leg=False)
+        ok, cmds, _mrc, mwait, mend = self._run(leaf)
+        self.assertTrue(ok)
+        self.assertEqual(cmds, [
+            ["zpool", "remove", "tank", "/dev/disk/by-id/ata-OLD"],
+            ["zpool", "add", "-f", "tank", "cache", self.NEW]])
+        mwait.assert_not_called()                       # cache never resilvers
+        self.assertIs(mend.call_args.args[1], True)     # audited success
+
+    def test_log_mirror_leg_is_replace_and_waits(self):
+        leaf = self._leaf("log", vdev="mirror-1", state="FAULTED", mirror_leg=True)
+        ok, cmds, _mrc, mwait, _mend = self._run(leaf)
+        self.assertTrue(ok)
+        self.assertEqual(cmds, [
+            ["zpool", "replace", "-f", "tank", "/dev/disk/by-id/ata-OLD", self.NEW]])
+        mwait.assert_called_once_with("tank")
+
+    def test_single_log_gone_is_remove_then_add_log(self):
+        leaf = self._leaf("log", vdev="logs", state="REMOVED", mirror_leg=False)
+        ok, cmds, _mrc, mwait, _mend = self._run(leaf)
+        self.assertTrue(ok)
+        self.assertEqual(cmds, [
+            ["zpool", "remove", "tank", "/dev/disk/by-id/ata-OLD"],
+            ["zpool", "add", "-f", "tank", "log", self.NEW]])
+        mwait.assert_not_called()
+
+    def test_single_log_present_is_replace(self):
+        leaf = self._leaf("log", vdev="logs", state="FAULTED", mirror_leg=False)
+        ok, cmds, _mrc, mwait, _mend = self._run(leaf)
+        self.assertTrue(ok)
+        self.assertEqual(cmds, [
+            ["zpool", "replace", "-f", "tank", "/dev/disk/by-id/ata-OLD", self.NEW]])
+        mwait.assert_called_once_with("tank")
+
+    def test_dry_run_gates_writes_and_skips_resilver(self):
+        leaf = self._leaf("log", vdev="mirror-1", state="FAULTED", mirror_leg=True)
+        ok, _cmds, mrc, mwait, _mend = self._run(leaf, dry=True)
+        self.assertTrue(ok)
+        # every write threaded dry_run=True; resilver wait skipped under dry-run
+        for call in mrc.call_args_list:
+            self.assertTrue(call.kwargs.get("dry_run"))
+        mwait.assert_not_called()
+
+    def test_failed_command_aborts_and_audits_failure(self):
+        leaf = self._leaf("cache", vdev="cache", state="UNAVAIL", mirror_leg=False)
+        ok, cmds, _mrc, _mwait, mend = self._run(leaf, rc_ok=False)
+        self.assertFalse(ok)
+        self.assertEqual(len(cmds), 1)                  # stops at first failure
+        self.assertIs(mend.call_args.args[1], False)
+
+    def test_errored_resilver_returns_false(self):
+        leaf = self._leaf("log", vdev="mirror-1", state="FAULTED", mirror_leg=True)
+        ok, _cmds, _mrc, _mwait, mend = self._run(leaf, resilver=False)
+        self.assertFalse(ok)
+        self.assertIs(mend.call_args.args[1], False)
+
+    def test_decline_confirm_does_not_begin_op(self):
+        import b2ctl.watch as watch
+        leaf = self._leaf("cache", vdev="cache", state="UNAVAIL", mirror_leg=False)
+        with patch("b2ctl.watch._confirm", return_value=False), \
+             patch("b2ctl.watch.run_check") as mrc, \
+             patch("b2ctl.safety.begin_op") as mbegin:
+            self.assertFalse(watch._repair_aux("tank", leaf, self._new_disk()))
+        mbegin.assert_not_called()
+        mrc.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

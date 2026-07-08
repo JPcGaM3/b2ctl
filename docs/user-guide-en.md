@@ -473,6 +473,7 @@ b2ctl> e
   [1] add L2ARC cache (read cache; loss = harmless)
   [2] add SLOG log   (sync-write accel; mirror + PLP recommended)
   [3] remove a cache/log device
+  [4] replace/repair a degraded cache/log device
   action> 2
     [1] /dev/sdg (bay 1:8)
     [2] /dev/sdh (bay 1:9)
@@ -488,6 +489,30 @@ b2ctl> e
   disks for a mirror (a lone log device can lose in-flight writes), and use SSDs
   with **Power-Loss Protection (PLP)**. b2ctl warns if you choose a single device.
 - CLI: `b2ctl cache-add|cache-rm|log-add|log-rm <pool> <dev…>`.
+
+**`[4]` replace/repair a degraded cache/log device (v0.14.0).** When a cache disk
+or one leg of a mirrored SLOG dies, pull it, insert a new disk, then run `[e] → [4]`.
+b2ctl lists the degraded cache/log leaves; pick the dead one and the replacement
+disk, and it repairs by type:
+
+```
+b2ctl> e
+  action> 4
+    [1] SLOG mirror-leg  /dev/disk/by-id/ata-LOGB  FAULTED
+  repair which #> 1
+    [1] /dev/sdh (bay 1:9)
+  replacement disk #> 1
+  repair log on 'tank': replace ata-LOGB -> ata-NEW? [y/N]> y
+  ✔ replace started — resilvering
+  ✔ resilver completed
+```
+
+- **Cache** is repaired by **remove + add** (L2ARC can't be replaced; loss is harmless).
+- A **SLOG mirror leg** is repaired with **`zpool replace`** (a brief resilver, live
+  progress bar). This is safer than detaching-and-reattaching: `replace` never asks
+  you to hand-pick a device to *destroy*, so a mistake can't kill the surviving leg.
+- A **single (non-mirrored) SLOG** that is fully gone is repaired by remove + add.
+- CLI: `b2ctl cache-replace <pool> <old> <new>` · `b2ctl log-replace <pool> <old> <new>`.
 
 ---
 
@@ -883,7 +908,7 @@ or fully dark.
 | `d` | demote a mirror member to a spare |
 | `t` | toggle dry-run mode on/off |
 | `n` | create a new pool |
-| `e` | extend a pool — add/remove L2ARC cache or SLOG log |
+| `e` | extend a pool — add/remove/**repair** L2ARC cache or SLOG log |
 | `b` | burn-in disk(s) — multi-select self-test (+ optional badblocks) |
 | `u` | udev-rescue an OS-rejected (GHOST) disk |
 | `x` | destroy a pool (double-confirm + type the pool name) |

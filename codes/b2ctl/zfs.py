@@ -153,6 +153,47 @@ def degraded_leaves() -> list[dict]:
     return bad
 
 
+_AUX_DEGRADED = ("FAULTED", "UNAVAIL", "REMOVED", "OFFLINE", "DEGRADED")
+
+
+def aux_leaves(pool: str | None = None) -> list[dict]:
+    """Cache (L2ARC) + log (SLOG) leaves, tagged for the repair flow.
+
+    Returns one dict per (pool, token) leaf whose TOP vdev is cache/log:
+      {pool, token, vdev, top_vdev, state, klass, mirror_leg, degraded}
+      klass      : "cache" | "log"
+      mirror_leg : True for a leg of a MIRRORED SLOG (vdev='mirror-N' under logs)
+      degraded   : state in FAULTED/UNAVAIL/REMOVED/OFFLINE/DEGRADED
+    Dedupe by (pool, token) — _parse indexes every leaf twice (path + realpath),
+    same as degraded_leaves(). `pool` filters to one pool when given.
+    """
+    out: list[dict] = []
+    seen: set = set()
+    for e in topology().values():
+        if pool is not None and e["pool"] != pool:
+            continue
+        top = e.get("top_vdev", e["vdev"])
+        # A top-level data leaf of a stripe/single-disk pool has top_vdev == the
+        # pool name; guard it so a pool NAMED e.g. 'logbackup'/'cache-pool' isn't
+        # misread as an aux vdev (mirrors pool_level()'s `top == pool` guard).
+        if top == e["pool"]:
+            continue
+        klass = "cache" if "cache" in top else "log" if "log" in top else None
+        if klass is None:
+            continue
+        key = (e["pool"], e["token"])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({
+            "pool": e["pool"], "token": e["token"], "vdev": e["vdev"],
+            "top_vdev": top, "state": e["state"], "klass": klass,
+            "mirror_leg": klass == "log" and e["vdev"].startswith("mirror"),
+            "degraded": e["state"] in _AUX_DEGRADED,
+        })
+    return out
+
+
 def pool_level(pool: str) -> str:
     """Data-vdev redundancy type for a pool: 'mirror' / 'raidz1' / ...,
     'mixed' if several differ, 'stripe' if there is no redundant data vdev.

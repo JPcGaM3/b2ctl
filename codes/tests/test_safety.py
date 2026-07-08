@@ -303,5 +303,75 @@ class TestPostOpVerify(unittest.TestCase):
         self.assertNotIn("Post-op check FAILED", text)
 
 
+class TestAuxRepairAudit(unittest.TestCase):
+    """aux-repair op: rollback hint (no auto-rollback) + _post_op_verify branch."""
+
+    def test_rollback_hint_mentions_pool_and_no_auto_rollback(self):
+        import b2ctl.safety as safety
+        hint = safety._ROLLBACK["aux-repair"](
+            {"pool": "tank", "old_dev": "/x/OLD", "new_dev": "/x/NEW"})
+        self.assertIn("tank", hint)
+        self.assertIn("no auto-rollback", hint)
+
+    def _entry(self, **over):
+        e = {"op_id": "20260706-000000-000000-aux-repair", "op": "aux-repair",
+             "pool": "tank", "disk_serial": "NEW1",
+             "new_dev": "/dev/disk/by-id/ata-NEW", "snapshot_path": ""}
+        e.update(over)
+        return e
+
+    def test_verify_passes_when_new_dev_present(self):
+        import io
+        import b2ctl.safety as safety
+        # cache remove+add leaves no 'resilver' marker — verify falls back to the
+        # new device token appearing in `zpool status`.
+        status = "  pool: tank\n  logs\n    /dev/disk/by-id/ata-NEW  ONLINE\n"
+        with patch.object(safety, "run_check", return_value=(True, status)), \
+             patch("sys.stdout", new_callable=io.StringIO) as out:
+            safety._post_op_verify(self._entry())
+        self.assertNotIn("Post-op check FAILED", out.getvalue())
+
+    def test_verify_passes_on_resilver_output(self):
+        import io
+        import b2ctl.safety as safety
+        status = "  scan: resilver in progress\n"
+        with patch.object(safety, "run_check", return_value=(True, status)), \
+             patch("sys.stdout", new_callable=io.StringIO) as out:
+            safety._post_op_verify(self._entry(new_dev=""))
+        self.assertNotIn("Post-op check FAILED", out.getvalue())
+
+    def test_verify_fails_when_neither_present(self):
+        import io
+        import b2ctl.safety as safety
+        status = "  pool: tank\n  logs\n    /dev/disk/by-id/ata-OTHER  ONLINE\n"
+        with patch.object(safety, "run_check", return_value=(True, status)), \
+             patch("sys.stdout", new_callable=io.StringIO) as out:
+            safety._post_op_verify(self._entry())
+        self.assertIn("Post-op check FAILED", out.getvalue())
+
+    def test_verify_runs_on_cli_path_with_empty_serial(self):
+        # review #3/#7: CLI verbs pass no Disk, so disk_serial is "" — the
+        # aux-repair check must STILL run (keyed on new_dev), not early-return.
+        import io
+        import b2ctl.safety as safety
+        entry = self._entry(disk_serial="")            # CLI path
+        status = "  pool: tank\n  logs\n    /dev/disk/by-id/ata-OTHER  ONLINE\n"
+        with patch.object(safety, "run_check", return_value=(True, status)), \
+             patch("sys.stdout", new_callable=io.StringIO) as out:
+            safety._post_op_verify(entry)              # new_dev=ata-NEW absent -> FAIL
+        self.assertIn("Post-op check FAILED", out.getvalue())
+
+    def test_non_aux_op_still_requires_serial(self):
+        # the serial-gated ops (offline/add_spare) must NOT run when serial is ""
+        import io
+        import b2ctl.safety as safety
+        entry = self._entry(op="offline", disk_serial="", new_dev="")
+        with patch.object(safety, "run_check", return_value=(True, "anything")) as rc, \
+             patch("sys.stdout", new_callable=io.StringIO) as out:
+            safety._post_op_verify(entry)
+        rc.assert_not_called()                          # early-returned before zpool status
+        self.assertNotIn("Post-op check FAILED", out.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

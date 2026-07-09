@@ -216,6 +216,22 @@ def _grade_low(value, warn, crit):
     return None
 
 
+def selftest_passed(result: str) -> bool:
+    """True if a SMART self-test result string means SUCCESS.
+
+    Handles both dialects: ATA success is 'Completed without error', SAS success
+    is bare 'Completed' (no 'without error' suffix — the v0.17.0 bug that graded
+    every healthy SAS disk as ERR/FAIL). Any fail/abort/interrupt/fatal/unknown
+    token is a failure; an empty string is NOT a pass (callers treat '' as 'no
+    test on record' before calling)."""
+    low = (result or "").lower()
+    if "without error" in low:           # ATA success (contains 'error', still a pass)
+        return True
+    if any(w in low for w in ("fail", "abort", "interrupt", "fatal", "unknown", "unable")):
+        return False
+    return "completed" in low            # SAS success = 'Completed'
+
+
 def assess(d: Disk) -> None:
     """Set d.level and d.reasons from its SMART + ZFS state."""
     level = "NORMAL"

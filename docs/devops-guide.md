@@ -49,7 +49,7 @@ those only work behind a RAID controller and are removed in this build.
 
 | module | responsibility | external commands |
 |--------|-----------------|-------------------|
-| `common.py` | colours, `run()`/`run_check()`, `Disk` model, `assess()` | none |
+| `common.py` | colours, `run()`/`run_check()`, `Disk` model, `assess()`, `selftest_passed()` (v0.18.0 shared ATA/SAS/NVMe self-test grader) | none |
 | `spec.py` | load/lookup TBW ratings (`ssd_spec.json`) | none |
 | `hba.py` | enumerate disks, by-id index, bay map + **remap** | `lsblk`, `sas2ircu` |
 | `locate.py` | LED locate: perccli (PERC PD) / ledctl → dd (raw), timed | `perccli`, `ledctl`, `dd` |
@@ -152,8 +152,20 @@ smartctl -a -d scsi /dev/sdX  # fallback
   subprocess**. Short/conveyance rows are ignored. `ui._health_chk_cell` renders
   `OK`/`ERR` + ` <poh - selftest_last_poh>hPOH` (power-on-hours-relative, NOT
   wall-clock — the drive logs the test against lifetime hours). This is passive:
-  it reflects the last long test whoever fired it (burn-in, `[m]` health-check, or
-  a manual `smartctl`).
+  it reflects the last long test whoever fired it (`[m]` health-check, or a manual
+  `smartctl`). **All three dialects — ATA / SAS / NVMe — are handled; NVMe was
+  never unsupported.**
+- **Pass/fail classifier — `common.selftest_passed(result)` (v0.18.0).** The single
+  authority both `ui._health_chk_cell` (HEALTH_CHK) and `burnin.assess` (burn-in
+  verdict) call. Dialect-tolerant: `"without error"` → pass (ATA success);
+  `fail`/`abort`/`interrupt`/`fatal`/`unknown`/`unable` → fail; else `"completed"` →
+  pass. That last clause is the **fix**: SAS reports self-test success as the bare
+  word **`Completed`** (no `without error` suffix), so the old
+  `"without error" in result` check graded every healthy SAS disk `ERR`/`FAIL`.
+  `burnin._sas_selftest_result` was also fixed to split the SAS log row on 2+-space
+  columns and return the clean status token (`Completed`) instead of the greedy old
+  capture that swallowed the trailing `-  41724  -`. An empty result string is NOT a
+  pass (callers treat `''` as "no test on record" before calling).
 
 **Scan concurrency (v0.11.1).** `core.scan` reads SMART on **two** thread pools:
 direct/IT-mode targets (`smart_dtype` empty) one-thread-per-disk up to 16 (F-077);
@@ -201,7 +213,7 @@ resilvering pool, which is rare). Finds `replacing-N` vdev blocks; returns
 | attach | `zpool attach <pool> <existing> <new>` |
 | create pool | `zpool create ...` (checks `wipefs -n` for existing labels first) |
 | create RAID10 | `zpool create ... <name> mirror a b mirror c d ...` (repeated `mirror` from disk pairs, shared `zfs._mirror_pairs`) |
-| over-provision partition (v0.17.0) | `sgdisk -n 1:0:+<size> -t 1:bf01 <dev>` → **mandatory** `udevadm settle` (`zfs.partition`; returns the `-part1` token) |
+| over-provision partition | **wipe first** (`zfs.wipe`) then `sgdisk -n 1:0:+<size> -t 1:bf01 <dev>` → **mandatory** `udevadm settle` (`zfs.partition`; returns the `-part1` token). Wipe-before is the v0.18.0 fix (F-132) |
 | manual scrub | `zpool scrub <pool>` (`zfs.start_scrub`; kernel runs it in the background) |
 | manual trim | `zpool trim <pool>` (`zfs.start_trim`) |
 | wipe | `zpool labelclear -f <dev>` → `wipefs -a <dev>` → `sgdisk --zap-all <dev>` |
@@ -227,11 +239,33 @@ fails. It returns the first-partition token from `zfs._part1_path` (by-id →
 `-part1`, nvme/mmcblk/loop → `p1`, else `1`; string convention only, never
 `os.path.exists`, so it resolves under dry-run). `zfs.parse_size` turns
 `32G`/`512M`/`1.5T` into bytes. **Blank size = whole disk** (idiomatic
-`wholedisk=on`, unchanged). On create the partition step runs **after** the
-dirty-disk wipe (whose `sgdisk --zap-all` would destroy an earlier partition) and
-**before** `create_pool`. `sgdisk` is already in `safety.WRITE_CMDS` → dry-run
+`wholedisk=on`, unchanged). `sgdisk` is already in `safety.WRITE_CMDS` → dry-run
 gated. No perf difference vs whole disk when aligned (sgdisk's 1 MiB default) with
 `ashift=12`; the reserve buys SSD endurance/consistency, costs capacity (ADR-003).
+
+**Wipe-before-partition (v0.18.0 fix, F-132).** `sgdisk -n 1:0:+<size>` places
+partition 1 at the first free aligned sector, so a **stale GPT** on a used disk
+pushed it past the old partition — `Could not create partition 1 from <big sector>`
+(overlap, or past end-of-disk on a small drive). Both over-provision sites now
+**warn + confirm the wipe up front (§9), then wipe each disk before
+`zfs.partition`**, reusing `zfs.wipe` (`zpool labelclear` + `wipefs -a` + `sgdisk
+--zap-all`). **Declining the confirm aborts and touches NOTHING** — the wipe never
+runs:
+- `watch._maybe_partition(disks, indices, size)` — validates sizes, prints a §9
+  WIPE warning naming each disk, asks **one** confirm, then (if accepted) wipe →
+  partition per disk, aborting on any wipe/partition failure.
+- `cli._partition_devs(devs, size)` — prints `[!] over-provision will WIPE then
+  partition: <devs>` and asks `confirm("wipe and partition these disk(s)?")`
+  **before touching any disk** (matching the watch flow); on accept, wipe → partition
+  each resolved by-id device. This is the up-front confirm — it is NOT deferred to
+  the later `add-cache`/`add-log` prompt.
+- In `watch._cmd_create`, when a size is given the over-provision path **replaces**
+  the old whole-disk dirty-wipe block (`zfs.has_zfs_label` → confirm → `zfs.wipe`),
+  so there is no double wipe/confirm; a blank size keeps that whole-disk path.
+
+So over-provisioning on **both** `b2ctl create --size` and `cache-add`/`log-add
+--size` (as well as the watch prompts) warns + confirms the wipe first, then wipes →
+partitions → hands ZFS the `-part1` token; a declined confirm wipes nothing.
 
 **Aux-vdev repair (v0.14.0).** When an L2ARC cache disk or one leg of a mirrored
 SLOG dies, pull it, insert a new disk, and repair through the tool. Enumerated by
@@ -257,7 +291,13 @@ marker **or** the new device token; the `_ROLLBACK["aux-repair"]` hint is adviso
 disk resolves strictly to a by-id, §9; `old` is permissive so a raw leaf token
 passes through). watch: `[e]xtend → [4]`.
 
-### 3.6a Disk burn-in — `burnin.py` (runbook STEP 02, read-only vetting)
+### 3.6a Disk health-check (burn-in engine) — `burnin.py` (runbook STEP 02, read-only vetting)
+
+> **v0.18.0:** the burn-in **engine** (`burnin.py`) is unchanged, but its
+> **surface** merged into `maint`. The standalone `b2ctl burnin` verb and the watch
+> `[b]` key are **gone**; disk vetting is now `b2ctl maint health` /
+> `[m]aint → [3] health-check` (`watch._maint_health`, renamed from `_cmd_burnin`).
+> See §3.6b and **ADR-004** for the merge rationale (both ran `smartctl -t long`).
 
 **Multi-disk & non-blocking (v0.10.0).** `run_multi(targets, …)` vets several disks
 at once and returns to the prompt while they run; a state file makes it
@@ -270,7 +310,7 @@ re-attachable. See **ADR-002** for the background-process/state-file architectur
 | self-test progress | `smartctl -a <dev>` → `parse_selftest()` reads `% of test remaining` (ATA) / `% complete` (SAS); ETA = `Extended self-test routine recommended polling time: (N) minutes` × remaining% (`_selftest_eta_min`, ATA only) |
 | scan progress | tail the badblocks logfile for the last `NN% done` (`_parse_badblocks_log`); liveness via `os.kill(pid,0)` + `waitpid(WNOHANG)` reaping (`_pid_alive`); ETA computed from our own elapsed time (`scan_progress`) |
 | live view | `live_view()` redraws `ui.render_burnin_view()` every ~2.5 s (ANSI cursor-up + clear). **Ctrl-C detaches** (saves state, keeps running); it does NOT abort |
-| verdict | on completion `_finish()` re-reads SMART (`core.scan_one`) + `assess(disk)` → FAIL (uncorrected>0 / self-test error), WARN (grown defects / surface-scan bad blocks / power-on hours **if** `health.<type>.poh_warn` is set — off by default, v0.13.0), else PASS |
+| verdict | on completion `_finish()` re-reads SMART (`core.scan_one`) + `assess(disk)` → FAIL (uncorrected>0 / self-test error via `common.selftest_passed`, v0.18.0), WARN (grown defects / surface-scan bad blocks / power-on hours **if** `health.<type>.poh_warn` is set — off by default, v0.13.0), else PASS |
 | cancel (v0.12.0) | `cancel(targets)` / `cancel_all()` — per record: **abort self-test** `smartctl -X [-d <dtype>] <dev>` (`_cancel_records`) + **stop scan** `os.kill(scan_pid, SIGTERM)`, but only after `_is_our_badblocks(pid,dev)` confirms `/proc/<pid>/cmdline` is our `badblocks <dev>` (PID-reuse guard) — then drop the record from state. Honors `--dry-run`. Both are read-only/abort ops; nothing is written |
 
 - **State file:** `os.path.join(safety.LOG_DIR, "burnin.json")` (records keyed by
@@ -279,17 +319,27 @@ re-attachable. See **ADR-002** for the background-process/state-file architectur
   monkeypatch redirects it to `sim/var/` (`save_state`/`load_state`).
 - **Re-entrancy:** `run_multi` polls `selftest_status` first and **never restarts**
   a disk already under a self-test; `_finish` prunes completed records from state.
-- **Exit code note:** because the run is backgrounded, `b2ctl burnin <disk>` exits
-  `0` once the tests are *started* — the PASS/WARN/FAIL verdict is shown later in
-  the live view / `--status`, not encoded in the exit code (the old single-disk
+- **Exit code note:** because the run is backgrounded, `b2ctl maint health <disk>`
+  exits `0` once the tests are *started* — the PASS/WARN/FAIL verdict is shown later
+  in the live view / `--status`, not encoded in the exit code (the old single-disk
   synchronous FAIL→exit-1 is gone).
 
-CLI `b2ctl burnin <bay\|dev> [<bay\|dev> …] [--scan] [--short]`,
-`b2ctl burnin --status` (re-attach), and `b2ctl burnin --cancel <bay\|dev …>` /
-`--cancel-all` (v0.12.0); watch `[b]urnin` opens a menu when a burn-in is in flight
-(`[v]`iew / `[c]`ancel-one / cancel-`[a]`ll / `[n]`ew). Only spare/new disks
-(`in_pool` is refused). The only writes are the self-test trigger and a read-only
-`badblocks`; nothing on the disk is modified.
+CLI (v0.18.0, was `b2ctl burnin`) `b2ctl maint health <bay\|dev> [<bay\|dev> …]
+[--scan] [--short]`, `b2ctl maint health --status` (re-attach), and `b2ctl maint
+health --cancel <bay\|dev …>` / `--cancel-all`; watch `[m]aint → [3]` opens a menu
+when a health-check is in flight (`[v]`iew / `[c]`ancel-one / cancel-`[a]`ll /
+`[n]`ew). **Both paths vet FREE/SPARE disks only:** the watch selection lists free
+disks (`_avail_for_aux`), and the CLI `maint health <dev…>` also **refuses** an
+in-pool member — both go through `run_multi` → `_poolable_target`, which prints
+`maint health vets free/spare disks; <dev> is in pool '<pool>' — self-test it with
+\`smartctl -t long\` directly`. (To self-test an active member, run `smartctl -t
+long <by-id>` in a shell; the member's HEALTH_CHK still updates passively from
+`smartctl -a`.) Starting a health-check writes a `"health"`/`"started"` event to
+`maint.jsonl` on **both** paths (`watch._maint_health` and CLI `_burnin`),
+**skipped under `--dry-run`**. The only writes are the self-test trigger and a
+read-only `badblocks`; nothing on the disk is modified. *(Known cosmetic bug:
+`burnin.live_view` still prints the now-dead `b2ctl burnin --status` on Ctrl-C —
+use `b2ctl maint health --status`.)*
 
 ### 3.6b Manual maintenance — scrub / trim / health-check + history (v0.17.0)
 
@@ -339,11 +389,26 @@ Writing a completion record for a background/timer scrub happens **only** in
 mutates via `prune_orphan_timers`), deduped on the ISO date embedded in `detail`,
 and honoring `--dry-run`. **`status`/`top` never write.**
 
-**Surfaces.** watch `[m]aint` → `_cmd_maint(tbw, *, action=None, pool=None)`
-(branches on action first: scrub/trim per-pool, health per-disk).
-`zfs_actions.scrub(pool)`/`trim(pool)` → `_cmd_maint(action=…, pool=…)`. CLI
-`b2ctl scrub|trim [<pool>]` (mutate → **root required**) and `b2ctl maint --log
-[--last N]` (read-only history view → **root-exempt**, like `log`).
+**Surfaces (v0.18.0 — `maint` is the single surface).** watch `[m]aint` →
+`_cmd_maint(tbw, *, action=None, pool=None)` prompts `[1] scrub [2] trim
+[3] health-check` and branches on action first: scrub/trim per-pool,
+`health` → `_maint_health` (the burn-in engine, §3.6a). CLI has one `maint` verb
+with subcommands plus the bare history view:
+
+| CLI | handler | mutates? | root? |
+|-----|---------|----------|-------|
+| `b2ctl maint` / `b2ctl maint --log [--last N]` | `_maint` (reads `maint.jsonl`) | no | exempt |
+| `b2ctl maint scrub [<pool>]` | `_scrub` → `zfs_actions.scrub` | yes | **root** |
+| `b2ctl maint trim [<pool>]` | `_trim` → `zfs_actions.trim` | yes | **root** |
+| `b2ctl maint health <dev…> [--scan] [--short] [--cancel …] [--cancel-all]` | `_burnin` → `burnin.run_multi/cancel` | yes | **root** |
+| `b2ctl maint health --status` | `_burnin` → `burnin.status_view` | no (re-attach) | exempt |
+| `b2ctl scrub\|trim [<pool>]` | back-compat aliases of `maint scrub/trim` | yes | **root** |
+
+Root gating is `cli._needs_root(args)`: `maint` is in `_ROOT_EXEMPT`, but the
+function special-cases it — bare `maint`/`--log` (`args.maint_cmd is None`) and
+`maint health --status` are exempt; `maint scrub|trim|health <dev>` return True
+(need root). `zfs_actions.scrub(pool)`/`trim(pool)` still delegate to
+`_cmd_maint(action=…, pool=…)`.
 
 ### 3.7 LED locate — `locate.py`
 `sas2ircu ... LOCATE <slot>` is **not used** — on this backplane it lights a
@@ -431,7 +496,7 @@ console.
 **`[a]ssign` multi-select (v0.11.0).** `_cmd_assign` parses space-separated
 indices via the shared `watch._pick_indices(sel, n)` helper (built on
 `_one_based`): rejects `0`/negatives (F-052) and out-of-range, dedupes, order
-preserved — reused by assign / `[n]ew-pool` / `[e]xtend` / `[b]urnin`, which
+preserved — reused by assign / `[n]ew-pool` / `[e]xtend` / `[m]aint` health-check, which
 closed a pre-existing F-052 gap where `[n]ew-pool`/`[e]xtend` let `0` select the
 LAST disk (`list[-1]`) and wipe it. A single pick keeps the existing per-disk
 menu; 2+ picks open a **homogeneous** batch menu (candidates are tagged by
@@ -1019,35 +1084,46 @@ ADR-003).** SCRUB reads every allocated block, verifies checksums, and self-heal
 the actual bad-sector/bitrot defense — but the scrub timer now enables **only** when
 the operator says yes at the create prompt (default off; seeded from
 `config.pool_defaults()`, no in-code `AUTOSCRUB_DEFAULT`). When off, b2ctl prints a
-`[!] autoscrub OFF …` warning and manual `b2ctl scrub`/`[m]aint` (§3.6b) is the
-primary self-heal path. TRIM is a separate, unrelated task (tells the SSD which
-blocks are free) and its timer enables only on `autotrim=off` (`autotrim=on` trims
-continuously via ZFS itself, so a trim timer would be redundant):
+`[!] autoscrub OFF …` warning and manual `b2ctl maint scrub`/`[m]aint` (§3.6b) is the
+primary self-heal path.
+
+**TRIM timer DROPPED — `autotrim off` is now MANUAL-ONLY (v0.18.0, ADR-004,
+REVERSES v0.16.0/v0.17.0).** TRIM (tells the SSD which blocks are free) is now
+symmetric with scrub: `autotrim off` installs **no timer** — the operator TRIMs via
+`[m]aint` / `b2ctl maint trim <pool>`; `autotrim on` sets `zpool autotrim=on` (ZFS
+trims inline). `create` therefore calls `install_pool_timers(name,
+include_scrub=autoscrub_on, include_trim=False)` — **always `include_trim=False`**.
+On create with autotrim off you see `[!] autotrim OFF — TRIM manually via
+\`b2ctl maint trim <pool>\``.
 
 - **autoscrub on** → `systemctl enable --now zfs-scrub-monthly@<pool>.timer`.
-- **autotrim off** → `systemctl enable --now zfs-trim-monthly@<pool>.timer`.
-- **autoscrub off + autotrim on** → **no timers enabled** for that pool.
+- **autoscrub off** → **no scrub timer** (manual scrub is primary).
+- **autotrim on/off** → **never a trim timer** (`autotrim=on` = inline; `off` =
+  manual). The only pool timer b2ctl installs on create is the scrub timer.
 
 `enable --now` starts the *timer* (schedules the next `OnCalendar` run — appears in
 `systemctl list-timers`); it does NOT kick off an immediate scrub.
 `zfs.install_pool_timers(pool, *, include_scrub=True, include_trim=True,
-dry_run=False)` implements the split; watch passes `include_scrub = autoscrub_on`
-and `include_trim = pool_opts["autotrim"] == "off"`. `ok` reflects the **scrub**
-timer specifically, but when scrub was NOT requested there is nothing to fail on, so
-`ok=True` (v0.17.0) — unlike v0.16.0 where a missing scrub timer was the failure.
+dry_run=False)` still takes `include_trim=` for API completeness (and
+`remove_pool_timers` still disables both kinds, so a pool created by an older b2ctl
+with a trim timer is cleaned up on destroy), but **create never requests trim**. `ok`
+reflects the **scrub** timer specifically, but when scrub was NOT requested there is
+nothing to fail on, so `ok=True` — unlike v0.16.0 where a missing scrub timer was the
+failure.
 
 **No double-scrub with the Debian cron.** `zfsutils-linux` also ships
 `/etc/cron.d/zfsutils-linux`, which scrubs/trims **every** online pool monthly,
 gated by the per-pool user properties `org.debian:periodic-scrub` /
 `org.debian:periodic-trim` (default `auto` = enabled). Left alone, that cron plus our
-per-pool timer would schedule each pool twice. So immediately **after** a timer
-enables, `install_pool_timers` runs `zpool set org.debian:periodic-<kind>=disable
-<pool>` — the distro all-pools cron then skips this pool and the per-pool timer is the
-single schedule. This is done only for a kind whose timer actually enabled (never
-leaving a pool with neither scrubber), is best-effort (a failed `zpool set` warns but
-does not flip `ok` — worst case is one extra scrub, never a gap), and needs no
-restore on destroy (the property dies with the pool). `org.debian:*` is a plain user
-property — settable and harmless even on a box where the Debian scripts aren't
+per-pool scrub timer would schedule the pool twice. So immediately **after** the
+scrub timer enables, `install_pool_timers` runs `zpool set
+org.debian:periodic-scrub=disable <pool>` — the distro all-pools cron then skips this
+pool and the per-pool timer is the single schedule. (Since create no longer installs a
+trim timer, the `periodic-trim` disable is not triggered on create — the Debian trim
+cron, if enabled, still covers the pool.) This is best-effort (a failed `zpool set`
+warns but does not flip `ok` — worst case is one extra scrub, never a gap), and needs
+no restore on destroy (the property dies with the pool). `org.debian:*` is a plain
+user property — settable and harmless even on a box where the Debian scripts aren't
 installed.
 
 **Template-missing → warn, no fallback.** A read-only probe

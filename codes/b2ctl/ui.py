@@ -7,7 +7,7 @@ their reasons. Colour follows the level (green/cyan/yellow/red).
 
 from __future__ import annotations
 
-from .common import Disk, R, Y, G, C, N, LEVEL_COLOR
+from .common import Disk, R, Y, G, C, N, LEVEL_COLOR, selftest_passed
 
 # Total rule width of the per-disk table. Bumped from 184 -> 196 when the
 # HEALTH_CHK column (12 wide) was added (v0.17.0); keep the rules/sub-headers in
@@ -79,7 +79,7 @@ def _health_chk_cell(d: Disk) -> str:
     logs power-on hours, not a date. '-' when none recorded."""
     if not d.selftest_last_result:
         return f"{'-':<12}"
-    ok = "without error" in d.selftest_last_result.lower()
+    ok = selftest_passed(d.selftest_last_result)   # ATA + SAS dialects (v0.18.0)
     tag = "OK" if ok else "ERR"
     age = ""
     if (d.selftest_last_poh is not None and d.poh is not None

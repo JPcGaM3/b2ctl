@@ -149,7 +149,7 @@ Storage summary:
   SW   tank            raidz1   ONLINE    2.72T     1.72G     2.72T
 [OK] all disks healthy and assigned
 
-[r]efresh  [a]ssign  [o]ffload  [s]wap  [d]emote  [t]oggle-dryrun  [n]ew-pool  [e]xtend  [b]urnin  [u]dev-rescue  [x]destroy-pool  [l]ocate  [q]uit   (or hot-plug)
+[r]efresh  [a]ssign  [o]ffload  [s]wap  [d]emote  [t]oggle-dryrun  [n]ew-pool  [e]xtend  [m]aint  [u]dev-rescue  [x]destroy-pool  [l]ocate  [q]uit   (or hot-plug)
 b2ctl&gt;
 </pre>
 </details>
@@ -246,13 +246,14 @@ measured in **power-on hours** (`hPOH`) — because the drive logs each self-tes
 against its lifetime hours, not a calendar date. `OK 120hPOH` means "the last long
 self-test passed, and the drive has run 120 more hours since". A `-` means no long
 self-test is on record. The value reflects the last long test whoever fired it —
-burn-in (`[b]`), the `[m]aint` health-check, or a manual `smartctl -t long`. To
-run one, see `[m]aint` below.
+the `[m]aint` health-check, or a manual `smartctl -t long` — and it is parsed for
+**SATA, SAS and NVMe** alike (v0.18.0 fixed the SAS `Completed` grading). To run
+one, see `[m]aint` below.
 
 **The pool summary also gains a `SCRUB` and `TRIM` column (v0.17.0)** showing each
 pool's last scrub (read live from `zpool status`) and last trim (from b2ctl's
 maintenance history), e.g. `2d ago`. A blank/`-` means none on record — run one
-with `[m]aint` or `b2ctl scrub|trim <pool>`.
+with `[m]aint` or `b2ctl maint scrub|trim <pool>`.
 
 **LEVEL meanings:**
 
@@ -310,7 +311,7 @@ The list gathers **three** kinds of unassigned disk:
   (set JBOD for ZFS, create a volume, or add as a hot spare).
 
 **Multi-select / batch (v0.11.0).** Pick **several** disks at once,
-space-separated — the same way as `[n]ew-pool` and `[b]urnin`:
+space-separated — the same way as `[n]ew-pool` and `[m]aint` health-check:
 
 ```
   assign which #> (space-separated for batch) 3 4 5
@@ -458,20 +459,21 @@ b2ctl> n
   pool name> backup
   raid type (stripe, mirror, raid10, raidz1, raidz2) [mirror]> raidz1
   ...
-  autotrim: [1] off — batched TRIM (monthly timer / manual [m]aint) (recommended)
-            [2] on  — continuous (ZFS trims inline)
+  autotrim: [1] off — manual TRIM via [m]aint / `b2ctl maint trim` (recommended)
+            [2] on  — zpool autotrim=on (ZFS trims inline)
     choose [1]>
-  autoscrub: [1] on  — monthly zfs-scrub timer (self-heals silent corruption)
-             [2] off — NO scheduled scrub; run it via [m]aint / `b2ctl scrub` (default)
-    choose [2]>
+  autoscrub: [1] off — manual scrub via [m]aint / `b2ctl maint scrub` (recommended)
+             [2] on  — monthly zfs-scrub timer (self-heals silent bitrot)
+    choose [1]>
   ...
   create pool 'backup' (raidz1) with 3 disks (full disk)? [y/N]> y
   ✔ pool created
   ✔ maintenance timers: ...
-  [!] autoscrub OFF — no monthly self-heal scheduled for 'backup'; run `b2ctl scrub backup` (or [m]aint) periodically
+  [!] autoscrub OFF — no monthly self-heal scheduled for 'backup'; run `b2ctl maint scrub backup` (or [m]aint) periodically
+  [!] autotrim OFF — TRIM manually via `b2ctl maint trim backup` (or [m]aint)
 ```
 
-**`size to use per disk` (over-provision, v0.17.0).** Press Enter for the default —
+**`size to use per disk` (over-provision).** Press Enter for the default —
 b2ctl hands ZFS the **whole disk** (the idiomatic ZFS layout). Enter a size (e.g.
 `32G`, `512G`) and b2ctl instead creates a partition of that size on each disk and
 gives ZFS the partition, leaving the rest as SSD spare area. This does **not** make
@@ -480,13 +482,29 @@ Linux ZFS with `ashift=12`); the spare area improves **SSD endurance and
 sustained-write consistency**, at the cost of usable capacity. Over-provisioning is
 mainly worth it for a dedicated SLOG / L2ARC SSD — see `[e]xtend`.
 
-**`autoscrub` (v0.17.0, default OFF).** A scrub reads every allocated block, verifies
-checksums, and self-heals corruption on a redundant pool. **Choose `[1] on`** to
-enable a monthly `zfs-scrub-monthly@<pool>.timer`. The default is **`[2] off`** —
-b2ctl now treats **manual scrub as the primary path** (`[m]aint` / `b2ctl scrub`),
-so a new pool has *no scheduled scrub* unless you opt in. With autoscrub off, b2ctl
-prints a reminder and the pool's `SCRUB` column will show how stale the last scrub
-is — run one periodically. (`autotrim` is a separate choice and also defaults off.)
+> ⚠️ **Over-provisioning WIPES each selected disk first (v0.18.0).** `sgdisk`
+> places partition 1 at the first free aligned sector, so a stale partition table
+> on a used disk would push it past the old partition (or off the end of a small
+> drive) — the v0.17.0 `partition failed` bug. b2ctl now clears each disk's GPT
+> before it partitions. It prints a WIPE warning naming every disk and asks **one**
+> confirm **up front — decline it and nothing is wiped**; then it wipes →
+> partitions → hands ZFS the `-part1`. A blank size skips all of this (whole-disk
+> path). Same for `b2ctl create --size` and `cache-add`/`log-add --size` from the CLI.
+
+**`autotrim` / `autoscrub` (both default OFF).** Both questions now read
+`[1] off` (default) `/ [2] on`, and **OFF means manual-only — no timer is
+installed** (v0.18.0):
+
+- **`autotrim off`** (default): TRIM the SSDs by hand with `[m]aint` / `b2ctl maint
+  trim <pool>`. **`autotrim on`** sets `zpool autotrim=on` so ZFS trims inline.
+  *(This reverses the old behaviour where `autotrim off` scheduled a monthly
+  `zfs-trim` timer — there is no trim timer any more.)*
+- **`autoscrub off`** (default): a scrub reads every block, verifies checksums, and
+  self-heals a redundant pool. With autoscrub off, **manual scrub is the primary
+  path** (`[m]aint` / `b2ctl maint scrub <pool>`) — a new pool has *no scheduled
+  scrub* unless you pick `[2] on` (a monthly `zfs-scrub-monthly@<pool>.timer`).
+  b2ctl prints a reminder and the pool's `SCRUB` column shows how stale the last
+  scrub is, so run one periodically.
 
 **RAID types:**
 
@@ -541,10 +559,14 @@ b2ctl> e
   redundancy). A log vdev **cannot** be raidz — that is a hard ZFS rule, so it is
   never offered. A lone log device can lose in-flight writes, so b2ctl warns before
   adding one. Always use SSDs with **Power-Loss Protection (PLP)**.
-- **`size to use per device` (over-provision, v0.17.0)** — press Enter for the whole
+- **`size to use per device` (over-provision)** — press Enter for the whole
   device, or enter a size (e.g. `32G`) to partition each device and hand ZFS the
   partition, leaving spare area. Over-provisioning a SLOG/L2ARC SSD improves its
   endurance and write consistency (no throughput change if aligned) — see `[n]ew-pool`.
+  **Entering a size WIPES each device first (v0.18.0)** — b2ctl clears the GPT
+  before it partitions (so a stale partition table can't collide), behind a WIPE
+  warning + one **up-front** confirm (decline it and nothing is wiped). Same on
+  `b2ctl cache-add`/`log-add --size`.
 - CLI: `b2ctl cache-add|cache-rm|log-add|log-rm <pool> <dev…>`; force a SLOG
   topology with `b2ctl log-add <pool> <dev…> --mirror|--raid10`; over-provision with
   `--size 32G` on `cache-add`/`log-add`.
@@ -578,14 +600,18 @@ b2ctl> e
 ### 6.8 `m` — Manual maintenance (scrub · trim · health-check)
 
 **When to use:** run a scrub or TRIM on a pool by hand (the primary maintenance
-path in v0.17.0, now that scheduled scrubs are opt-in), or fire a long self-test to
-refresh a disk's HEALTH_CHK.
+path — scheduled scrubs are opt-in and there is no trim timer), or health-check a
+disk (long self-test + optional surface scan) before you pool it.
+
+> **v0.18.0:** the old `[b]urnin` key is **gone** — disk vetting is now `[m]aint →
+> [3] health-check`, one maintenance surface instead of two verbs that both ran
+> `smartctl -t long`.
 
 ```
 b2ctl> m
   [1] scrub  (verify checksums + self-heal)
   [2] trim   (release unused SSD blocks)
-  [3] health-check (smartctl -t long — records the drive's verdict)
+  [3] health-check (smartctl -t long + optional badblocks + verdict)
   action> 1
     [1] tank (ONLINE)
     [2] rpool (ONLINE)
@@ -600,42 +626,42 @@ b2ctl> m
 - **scrub** — reads every allocated block, verifies checksums, and self-heals a
   redundant pool. This is the real defense against silent bitrot; run it regularly
   if you left autoscrub off. Live progress shows `% done` + the ZFS ETA.
-- **trim** — tells the SSDs which blocks are free (skip it if the pool has
-  `autotrim=on`, which trims continuously). Progress is coarse (ZFS exposes limited
-  trim status).
-- **health-check** — fires `smartctl -t long` on the disk(s) you pick (any readable
-  disk). It runs on the drive for **minutes to hours** and does **not** block b2ctl;
-  the verdict lands in the drive's self-test log and appears in the **HEALTH_CHK**
-  column on the next refresh. This is the same long test burn-in uses.
+- **trim** — tells the SSDs which blocks are free. There is **no trim timer** any
+  more (v0.18.0), so unless the pool has `autotrim=on` (inline), this is how blocks
+  get released. Progress is coarse (ZFS exposes limited trim status).
+- **health-check** — the disk-vetting engine (the former burn-in). See below.
 - **Ctrl-C detaches, it does not cancel.** During a live scrub/trim, Ctrl-C returns
   you to the prompt while the **kernel keeps running** the operation — re-check with
   `zpool status <pool>` or the pool's SCRUB column.
-- Every scrub/trim/health-check is written to a **maintenance history**
-  (`maint.jsonl`); review it with `b2ctl maint --log`.
-- CLI: `b2ctl scrub <pool>` · `b2ctl trim <pool>` (pool optional — prompts if
-  omitted) · `b2ctl maint --log [--last N]`.
+- Every scrub / trim / health-check is written to a **maintenance history**
+  (`maint.jsonl`); review it with `b2ctl maint --log [--last N]`.
+- CLI: `b2ctl maint scrub [<pool>]` · `b2ctl maint trim [<pool>]` (pool optional —
+  prompts if omitted) · `b2ctl maint --log`. The top-level `b2ctl scrub <pool>` /
+  `b2ctl trim <pool>` still work as aliases.
 
 ---
 
-### 6.9 `b` — Burn-in disk(s) (vet before pooling)
+### 6.9 `m` → health-check — vet disk(s) before pooling (the former burn-in)
 
 **When to use:** before trusting new or second-hand disks, run a SMART long
 self-test (optionally a full read-surface scan) on **several disks at once** and
-get a PASS/WARN/FAIL verdict per disk.
+get a PASS/WARN/FAIL verdict per disk. This is `[m]aint → [3] health-check` (there
+is no separate `[b]` key in v0.18.0).
 
-**Multi-select + background (v0.10.0).** Pick disks the same way as `[n]ew-pool`
+**Multi-select + background.** Pick disks the same way as `[n]ew-pool`
 (space-separated), confirm, then choose whether to also run a surface scan. The
 self-tests run on the drives' own firmware and the scans run as detached
 processes, so a **live view** shows a progress bar + estimated time remaining for
 each disk — and you can **leave it running** (Ctrl-C) and come back later.
 
 ```
-b2ctl> b
+b2ctl> m
+  action> 3
     [1] /dev/sdb (bay 32:4) Samsung SSD 870 EVO 1TB
     [2] /dev/sda (bay 32:5) Samsung SSD 870 EVO 1TB
     [3] /dev/nvme0n1 (bay PCIe2:0) Samsung 990 EVO Plus
-  burn in which #> (space-separated) 1 2 3
-  burn-in 3 disk(s) (long self-test)? [y/N]> y
+  health-check which #> (space-separated) 1 2 3
+  health-check 3 disk(s) (long self-test)? [y/N]> y
   also run a full read-surface scan (badblocks, read-only, hours)? [y/N]> y
   live burn-in — Ctrl-C to leave running in background
 
@@ -645,23 +671,34 @@ b2ctl> b
  PCIe2:0 nvme0     [#############-]  90%  ~8m     n/a
 ```
 
+- **Which disks — free/spare only, both ways.** health-check vets **free or spare**
+  disks; in watch it only lists those, and `b2ctl maint health <dev…>` **refuses**
+  an in-pool member (`… is in pool '<pool>' — self-test it with \`smartctl -t long\`
+  directly`). To self-test an **active pool member**, run `smartctl -t long <by-id>`
+  yourself in a shell — b2ctl doesn't trigger it, but the member's HEALTH_CHK column
+  still updates passively from `smartctl -a` on the next refresh.
 - **Leaving & re-attaching:** press **Ctrl-C** to return to the prompt — the tests
-  and scans keep running. Press `[b]` again for a menu — **[v]** view the live view,
-  **[c]** cancel one disk, **[a]** cancel all, **[n]** start a new burn-in — or run
-  `b2ctl burnin --status`; when a disk finishes you'll see its verdict there.
-- **Cancelling:** to stop a disk mid-burn-in (e.g. a dying disk holding up the
-  batch), use `[b]` → `[c]`/`[a]`, or `b2ctl burnin --cancel <bay|dev …>` /
-  `b2ctl burnin --cancel-all`. It aborts the self-test and stops the read-only
-  scan — nothing is written, and the disk can be re-burned later.
+  and scans keep running. Press `[m]` → `[3]` again for a menu — **[v]** view the
+  live view, **[c]** cancel one disk, **[a]** cancel all, **[n]** start a new
+  health-check — or run `b2ctl maint health --status`; when a disk finishes you'll
+  see its verdict there.
+- **Cancelling:** to stop a disk mid-check (e.g. a dying disk holding up the batch),
+  use the menu's `[c]`/`[a]`, or `b2ctl maint health --cancel <bay|dev …>` /
+  `b2ctl maint health --cancel-all`. It aborts the self-test and stops the read-only
+  scan — nothing is written, and the disk can be re-checked later.
 - While a self-test runs, `b2ctl status` shows `TEST xx%` in that disk's STATUS
-  column (and the details block adds a `self-test running: …%` line).
+  column, and the **HEALTH_CHK** column shows the last completed long test as
+  `OK`/`ERR` + its age in power-on hours (e.g. `OK 120hPOH`) — for **SATA, SAS and
+  NVMe** alike. (v0.18.0 fixes a bug where healthy **SAS** disks — whose self-test
+  success is the bare word `Completed`, not ATA's `Completed without error` — were
+  mis-graded `ERR`/`FAIL`.)
 - **PASS** — clean. **WARN** — usable but aged (power-on hours > 40000, grown
   defects, or the surface scan found bad blocks): use as lower-priority. **FAIL** —
   uncorrected errors or a failed self-test: do not pool it.
 - Read-only: the only actions are the self-test trigger and (optionally) a
   read-only `badblocks` scan — your data/disk is never written.
-- CLI: `b2ctl burnin <bay|dev> [<bay|dev> …] [--scan] [--short]`;
-  re-attach with `b2ctl burnin --status`.
+- CLI: `b2ctl maint health <bay|dev> [<bay|dev> …] [--scan] [--short]`;
+  re-attach with `b2ctl maint health --status`.
 
 ---
 
@@ -983,10 +1020,12 @@ or fully dark.
 | `b2ctl replace` | guided: replace a disk onto a spare |
 | `b2ctl swap` | guided: swap a worn disk onto an existing spare |
 | `b2ctl demote` | guided: demote a mirror leg to a spare |
-| `b2ctl create` | guided: create a new ZFS pool (prompts size/over-provision + autoscrub) |
-| `b2ctl scrub [<pool>]` | start a manual scrub (verify checksums + self-heal); prompts if pool omitted |
-| `b2ctl trim [<pool>]` | start a manual TRIM (release unused SSD blocks) |
+| `b2ctl create` | guided: create a new ZFS pool (prompts size/over-provision + autotrim/autoscrub, both default off = manual) |
+| `b2ctl maint scrub [<pool>]` | start a manual scrub (verify checksums + self-heal); prompts if pool omitted |
+| `b2ctl maint trim [<pool>]` | start a manual TRIM (release unused SSD blocks) |
+| `b2ctl maint health <dev…> [--scan] [--short] [--status] [--cancel …\|--cancel-all]` | vet disk(s): long self-test (+ optional read-only badblocks) + PASS/WARN/FAIL (was `b2ctl burnin`) |
 | `b2ctl maint --log [--last N]` | show the maintenance history (scrub/trim/health, default last 30) |
+| `b2ctl scrub [<pool>]` / `b2ctl trim [<pool>]` | back-compat aliases of `b2ctl maint scrub` / `maint trim` |
 | `b2ctl log-add <pool> <dev…> [--mirror\|--raid10] [--size 32G]` | add a SLOG; force topology + over-provision |
 | `b2ctl cache-add <pool> <dev…> [--size 512G]` | add L2ARC cache; over-provision with `--size` |
 | `b2ctl log [--last N]` | show last N ops from audit trail (default 20) |
@@ -1013,10 +1052,9 @@ or fully dark.
 | `s` | swap a worn in-pool disk onto a spare |
 | `d` | demote a mirror member to a spare |
 | `t` | toggle dry-run mode on/off |
-| `n` | create a new pool (prompts over-provision size + autoscrub) |
+| `n` | create a new pool (prompts over-provision size + autotrim/autoscrub) |
 | `e` | extend a pool — add/remove/**repair** L2ARC cache or SLOG log (SLOG topology + size prompts) |
-| `m` | manual maintenance — scrub / trim (per-pool) / health-check (long self-test) |
-| `b` | burn-in disk(s) — multi-select self-test (+ optional badblocks) |
+| `m` | manual maintenance — `[1]` scrub / `[2]` trim (per-pool) / `[3]` health-check = multi-select disk vetting (long self-test + optional badblocks + verdict; was `[b]urnin`) |
 | `u` | udev-rescue an OS-rejected (GHOST) disk |
 | `x` | destroy a pool (double-confirm + type the pool name) |
 | `l` | blink one disk's LED (~5s) by bay/serial/device |
@@ -1198,8 +1236,8 @@ every bay is full, and there is **no hot spare**, `[o]ffload` it:
 - **`bdf`** still works — find it in `b2ctl status` (the BAY) or `cat
   /sys/class/nvme/nvme0/address`.
 
-> NVMe drives appear in the table and in `[a]ssign` / `[b]urnin` like any other
-> disk — only the BAY column differs (no enclosure:slot). The bay label is
+> NVMe drives appear in the table and in `[a]ssign` / `[m]aint` health-check like
+> any other disk — only the BAY column differs (no enclosure:slot). The bay label is
 > display-only; getting it wrong is cosmetic, never dangerous.
 
 ### Make your bay labels apply from every directory

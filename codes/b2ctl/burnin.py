@@ -22,7 +22,7 @@ import sys
 import time
 
 from . import config as _cfg
-from .common import R, Y, G, C, N, run as _run, run_check
+from .common import R, Y, G, C, N, run as _run, run_check, selftest_passed
 
 
 # Thresholds (from the hosting-platform runbook).
@@ -131,15 +131,21 @@ def _ata_exec_status(out: str):
 
 
 def _sas_selftest_result(out: str) -> str:
-    """Newest SAS self-test log row (# 1) status, or '' if none."""
+    """Newest SAS self-test log row (# 1) STATUS column, or '' if none.
+
+    SAS columns are 2+-space separated: '# N  <test-desc>  <status>  <segment>
+    <lifetime> ...'. Take the status column (index 1 after dropping '# N') so the
+    result is a clean 'Completed' / 'Aborted (by user command)' — NOT the greedy
+    old capture that swallowed the trailing '- 41724 -'. selftest_passed() then
+    grades it (SAS success is bare 'Completed')."""
     for line in out.splitlines():
-        if re.match(r"#\s*\d+\s", line):
-            low = line.lower()
-            if "in progress" in low:
-                return ""
-            m = re.search(r"(completed[\w ,:-]*|aborted[\w ,:-]*|failed[\w ,:-]*)"
-                          r"(?:\s{2,}|$)", line, re.I)
-            return m.group(1).strip() if m else line.strip()
+        if not re.match(r"#\s*\d+\s", line):
+            continue
+        if "in progress" in line.lower():
+            return ""
+        body = re.sub(r"^#\s*\d+\s+", "", line.strip())   # drop the '# N' index
+        cols = re.split(r"\s{2,}", body)                  # 2+-space columns
+        return cols[1].strip() if len(cols) >= 2 else body.strip()
     return ""
 
 
@@ -311,8 +317,7 @@ def assess(d) -> tuple[str, list[str]]:
     if d.uncorr and d.uncorr > 0:
         verdict = "FAIL"; reasons.append(f"uncorrected errors = {d.uncorr}")
     st = selftest_status(d.dev, d.smart_dtype)
-    if st["result"] and "without error" not in st["result"].lower() \
-            and "in progress" not in st["result"].lower():
+    if st["result"] and not selftest_passed(st["result"]):
         verdict = "FAIL"; reasons.append(f"self-test: {st['result']}")
     if verdict != "FAIL":
         if d.realloc and d.realloc > 0:
@@ -419,7 +424,7 @@ def live_view(records: list, *, sleep=None) -> None:
     except KeyboardInterrupt:
         save_state(records)
         print(f"\n{Y}  left running in background — "
-              f"`b2ctl burnin --status` to re-attach{N}")
+              f"`b2ctl maint health --status` to re-attach{N}")
 
 
 def _finish(records: list) -> None:
@@ -521,9 +526,12 @@ def status_view() -> int:
 
 
 def _poolable_target(d) -> bool:
-    """A burn-in target must be a free disk, never an in-pool member."""
+    """A health-check target must be a free disk, never an in-pool member (the
+    PASS/WARN/FAIL 'safe to add to a pool' verdict + surface scan are meaningless
+    on an active member). To self-test a member, run `smartctl -t long` directly."""
     if d.in_pool:
-        print(f"{R}[-] {d.dev} is in pool '{d.pool}' — burn-in is for spare/new disks.{N}")
+        print(f"{R}[-] maint health vets free/spare disks; {d.dev} is in pool "
+              f"'{d.pool}' — self-test it with `smartctl -t long` directly.{N}")
         return False
     return True
 

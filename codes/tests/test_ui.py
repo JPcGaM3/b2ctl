@@ -238,6 +238,21 @@ class TestHealthChkColumn:
         d.selftest_last_poh = 12000
         assert "ERR" in ui._health_chk_cell(d)
 
+    def test_cell_ok_on_sas_bare_completed(self):
+        # v0.18.0: SAS success is bare 'Completed' (was wrongly shown ERR).
+        d = _disk(poh=57330)
+        d.selftest_last_result = "Completed"
+        d.selftest_last_poh = 57310
+        cell = ui._health_chk_cell(d)
+        assert "OK" in cell and "ERR" not in cell
+        assert "20hPOH" in cell
+
+    def test_cell_err_on_sas_aborted(self):
+        d = _disk(poh=41724)
+        d.selftest_last_result = "Aborted (by user command)"
+        d.selftest_last_poh = 41722
+        assert "ERR" in ui._health_chk_cell(d)
+
     def test_cell_dash_when_no_selftest(self):
         d = _disk()
         assert ui._health_chk_cell(d).strip() == "-"

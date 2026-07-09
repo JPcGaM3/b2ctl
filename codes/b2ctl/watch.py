@@ -158,17 +158,37 @@ def _maybe_partition(disks, indices, size):
     """Over-provision: replace each selected whole disk with a `size` partition,
     returning the list of `-part1` tokens (ZFS gets less than the whole disk,
     leaving spare area for wear-leveling). Returns None on any invalid size /
-    partition failure so the caller aborts. Only called when a size was entered;
-    a blank size keeps the whole-disk path unchanged."""
-    parts = []
-    for idx in indices:
-        d = disks[idx]
-        req = zfs.parse_size(size)
-        if req is None or (d.size_bytes and req > d.size_bytes):
-            print(f"{R}  invalid size '{size}' for {d.dev} "
-                  f"({d.size_bytes or '?'} bytes){N}")
+    wipe / partition failure so the caller aborts. Only called when a size was
+    entered; a blank size keeps the whole-disk path unchanged.
+
+    Each disk is WIPED before partitioning: `sgdisk -n 1:0:+<size>` places
+    partition 1 at the first free aligned sector, so a stale GPT pushes it past
+    the old partition (overlap, or past end-of-disk on a small drive) — the
+    v0.17.0 `partition failed` bug on used disks (F-132). A clean GPT fixes it."""
+    targets = [disks[i] for i in indices]
+    req = zfs.parse_size(size)
+    if req is None:
+        print(f"{R}  invalid size '{size}'{N}")
+        return None
+    for d in targets:
+        if d.size_bytes and req > d.size_bytes:
+            print(f"{R}  size '{size}' exceeds {d.dev} ({d.size_bytes} bytes){N}")
             return None
-        ok, part = zfs.partition(d.by_id or d.dev, size, dry_run=_DRY_RUN)
+    # §9: over-provisioning WIPES each disk, then creates a `size` partition.
+    print(f"{Y}  [!] over-provision will WIPE these disks, then create a "
+          f"{size} partition:{N}")
+    for d in targets:
+        print(f"      - {ui.disk_label(d)}")
+    if not _confirm("wipe and partition these disks?"):
+        return None
+    parts = []
+    for d in targets:
+        dev = d.by_id or d.dev
+        wok, wout = zfs.wipe(dev, dry_run=_DRY_RUN)
+        if not wok:
+            print(f"{R}  ✗ wipe failed on {d.dev}: {wout}{N}")
+            return None
+        ok, part = zfs.partition(dev, size, dry_run=_DRY_RUN)
         if not ok:
             print(f"{R}  ✗ partition failed on {d.dev}: {part}{N}")
             return None
@@ -836,39 +856,42 @@ def _cmd_create(tbw, raid_type=None) -> bool:
     # from the sticky pool_defaults so a repeat create pre-fills the last answer.
     _pd = _cfg.pool_defaults()
     pool_opts["ashift"] = _ask(f"    ashift [{pool_opts['ashift']}]> ") or pool_opts["ashift"]
+    # autotrim + autoscrub: both default OFF (manual is the primary maintenance
+    # path) and both ordered [1] off / [2] on for consistency. OFF installs NO
+    # timer — you TRIM/scrub manually via [m]aint or `b2ctl maint trim|scrub`.
     _at_def = "2" if _pd.get("autotrim") == "on" else "1"
-    print("    autotrim: [1] off — batched TRIM (monthly timer / manual [m]aint) (recommended)")
-    print("              [2] on  — continuous (ZFS trims inline)")
+    print("    autotrim: [1] off — manual TRIM via [m]aint / `b2ctl maint trim` (recommended)")
+    print("              [2] on  — zpool autotrim=on (ZFS trims inline)")
     autotrim_on = (_ask(f"    choose [{_at_def}]> ") or _at_def) == "2"
     pool_opts["autotrim"] = "on" if autotrim_on else "off"
     # autoscrub is an explicit opt-in (default OFF — reverses v0.16.0, see ADR-003).
-    # Manual `b2ctl scrub` / [m]aint is the primary self-heal path.
-    _as_def = "1" if _pd.get("autoscrub") else "2"
-    print("    autoscrub: [1] on  — monthly zfs-scrub timer (self-heals silent corruption)")
-    print("               [2] off — NO scheduled scrub; run it via [m]aint / `b2ctl scrub` (default)")
-    autoscrub_on = (_ask(f"    choose [{_as_def}]> ") or _as_def) == "1"
+    _as_def = "2" if _pd.get("autoscrub") else "1"
+    print("    autoscrub: [1] off — manual scrub via [m]aint / `b2ctl maint scrub` (recommended)")
+    print("               [2] on  — monthly zfs-scrub timer (self-heals silent bitrot)")
+    autoscrub_on = (_ask(f"    choose [{_as_def}]> ") or _as_def) == "2"
     for k in fs_opts:
         if k in _HINTS:
             print(f"      ({_HINTS[k]})")
         fs_opts[k] = _ask(f"    {k} [{fs_opts[k]}]> ") or fs_opts[k]
 
-    dirty = [available[i] for i in indices if zfs.has_zfs_label(available[i].by_id or available[i].dev)]
-    if dirty:
-        print(f"{Y}  WARNING: The following disks already contain data/labels:{N}")
-        for disk in dirty:
-            print(f"    - {ui.disk_label(disk)}")
-        if not _confirm("these disks already contain data/labels — wipe and continue?"):
-            return False
-        for disk in dirty:
-            zfs.wipe(disk.by_id or disk.dev, dry_run=_DRY_RUN)
-
-    # Partition AFTER wipe (wipe's `sgdisk --zap-all` would destroy an earlier
-    # partition) and BEFORE create_pool; hand ZFS the -part1 tokens.
+    # Over-provision path wipes every selected disk itself (a clean GPT is needed
+    # before `sgdisk -n`), so it replaces — not adds to — the whole-disk dirty
+    # check, avoiding a double wipe/confirm. Blank size keeps the whole-disk path.
     if size:
         parts = _maybe_partition(available, indices, size)
         if parts is None:
             return False
         devs = parts
+    else:
+        dirty = [available[i] for i in indices if zfs.has_zfs_label(available[i].by_id or available[i].dev)]
+        if dirty:
+            print(f"{Y}  WARNING: The following disks already contain data/labels:{N}")
+            for disk in dirty:
+                print(f"    - {ui.disk_label(disk)}")
+            if not _confirm("these disks already contain data/labels — wipe and continue?"):
+                return False
+            for disk in dirty:
+                zfs.wipe(disk.by_id or disk.dev, dry_run=_DRY_RUN)
 
     props = " ".join(f"{k}={v}" for k, v in {**pool_opts, **fs_opts}.items())
     print(f"{C}  -> {props}{N}")
@@ -879,17 +902,20 @@ def _cmd_create(tbw, raid_type=None) -> bool:
                               fs_opts=fs_opts, dry_run=_DRY_RUN)
     print((G + "  ✔ pool created" if ok else R + f"  ✗ failed: {out}") + N)
     if ok:
-        # autotrim=on already trims inline, so the trim timer enables only when
-        # autotrim is off. autoscrub is an explicit opt-in (default off, ADR-003) —
+        # v0.18.0: TRIM is manual-only — autotrim=on trims inline, autotrim=off
+        # means the operator TRIMs via [m]aint, so NO monthly trim timer is ever
+        # installed. autoscrub stays an explicit opt-in (default off, ADR-003/004);
         # manual [m]aint scrub is the primary self-heal path.
-        include_trim = not autotrim_on
         okc, outc = zfs.install_pool_timers(name, include_scrub=autoscrub_on,
-                                            include_trim=include_trim, dry_run=_DRY_RUN)
+                                            include_trim=False, dry_run=_DRY_RUN)
         print((G + f"  ✔ maintenance timers: {outc}" if okc
                else Y + f"  [!] scrub timer NOT scheduled: {outc}") + N)
         if not autoscrub_on:
             print(f"{Y}  [!] autoscrub OFF — no monthly self-heal scheduled for "
-                  f"'{name}'; run `b2ctl scrub {name}` (or [m]aint) periodically{N}")
+                  f"'{name}'; run `b2ctl maint scrub {name}` (or [m]aint) periodically{N}")
+        if not autotrim_on:
+            print(f"{Y}  [!] autotrim OFF — TRIM manually via `b2ctl maint trim "
+                  f"{name}` (or [m]aint){N}")
         # Record the per-pool maintenance intent + make it the sticky default for
         # the next create. Skip under dry-run (no real pool / no config write).
         if not _DRY_RUN:
@@ -1161,13 +1187,13 @@ def _cmd_maint(tbw, *, action=None, pool=None) -> bool:
     if action is None:
         print("  [1] scrub  (verify checksums + self-heal)")
         print("  [2] trim   (release unused SSD blocks)")
-        print("  [3] health-check (smartctl -t long — records the drive's verdict)")
+        print("  [3] health-check (smartctl -t long + optional badblocks + verdict)")
         action = {"1": "scrub", "2": "trim", "3": "health"}.get(_ask("  action> "))
     if action not in ("scrub", "trim", "health"):
         print(f"{Y}  cancelled{N}"); return False
 
     if action == "health":
-        return _maint_health_check(tbw)
+        return _maint_health(tbw)
 
     if pool is None:
         pool = _pick_pool()
@@ -1195,41 +1221,6 @@ def _cmd_maint(tbw, *, action=None, pool=None) -> bool:
             if _wait_trim(pool):
                 maint.log_event("trim", pool, "ok", "completed (observed)")
     return True
-
-
-def _maint_health_check(tbw) -> bool:
-    """Fire `smartctl -t long` on the picked disk(s). Non-blocking — the drive
-    runs the test for minutes-to-hours; the verdict lands in the drive's self-test
-    log and surfaces in the HEALTH_CHK column on the next scan."""
-    from . import burnin
-    disks = [d for d in core.scan(tbw) if d.readable and d.dev != "-"]
-    if not disks:
-        print(f"{Y}  no readable disks to health-check{N}"); return False
-    for i, d in enumerate(disks, 1):
-        print(f"    [{i}] {d.dev} (bay {d.bay or '?'}) {d.model}")
-    sel = _ask("  health-check which #> (space-separated) ")
-    try:
-        picks = [disks[i] for i in _pick_indices(sel, len(disks))]
-    except (ValueError, IndexError):
-        print(f"{Y}  cancelled or invalid selection{N}"); return False
-    if not picks:
-        print(f"{Y}  cancelled{N}"); return False
-    print(f"{Y}  [!] a long self-test runs on the drive for minutes-to-hours and does "
-          f"NOT block b2ctl; the verdict shows in HEALTH_CHK once done.{N}")
-    if not _confirm(f"start smartctl -t long on {len(picks)} disk(s)?"):
-        print(f"{Y}  cancelled{N}"); return False
-    started = 0
-    for d in picks:
-        ok, out = burnin.start_selftest(d.dev, "long", d.smart_dtype, dry_run=_DRY_RUN)
-        maint.log_event("health", d.serial or d.dev,
-                        "started" if ok else "fail",
-                        "smartctl -t long" if ok else out)
-        if ok:
-            started += 1
-            print(G + f"  ✔ long self-test started on {d.dev}" + N)
-        else:
-            print(R + f"  ✗ {d.dev}: {out}" + N)
-    return started > 0
 
 
 def _wait_scrub(pool: str, baseline: str | None) -> bool:
@@ -1400,53 +1391,61 @@ def _repair_aux(pool: str, leaf: dict, new=None, *, new_token: str | None = None
     return True
 
 
-def _cmd_burnin(tbw) -> None:
-    """Vet free disk(s) with SMART long self-tests (+ optional surface scan).
-
-    Multi-select (space-separated, like [n]ew-pool); non-blocking — the live view
-    can be left (Ctrl-C) with everything still running. Re-attaches an in-flight
-    burn-in first if one exists."""
+def _maint_health(tbw) -> bool:
+    """[m]aint health-check — the disk-vetting engine (formerly [b]urnin, v0.18.0):
+    SMART long self-test (+ optional read-only badblocks surface scan) with a
+    PASS/WARN/FAIL verdict. Multi-select (space-separated, like [n]ew-pool);
+    non-blocking — the live view can be left (Ctrl-C) with everything running.
+    Re-attaches an in-flight health-check first if one exists. Targets FREE/spare
+    disks only (both here and `b2ctl maint health <dev…>`): the 'safe to add to a
+    pool' verdict + surface scan don't apply to an active member — self-test one
+    with `smartctl -t long` directly. Returns True once a new run starts."""
     from . import burnin
     state = burnin.load_state()
     if state:
-        print(f"  {len(state)} burn-in(s) in progress.")
+        print(f"  {len(state)} health-check(s) in progress.")
         print("    [v] view live status   [c] cancel one   [a] cancel all   [n] start new")
         ch = _ask("  action> ").lower()
         if ch == "v":
-            burnin.status_view(); return
+            burnin.status_view(); return False
         if ch == "a":
-            if _confirm(f"cancel ALL {len(state)} burn-in(s)?"):
+            if _confirm(f"cancel ALL {len(state)} health-check(s)?"):
                 burnin.cancel_all(dry_run=_DRY_RUN)
-            return
+            return False
         if ch == "c":
             for i, r in enumerate(state, 1):
                 print(f"    [{i}] bay {r.get('bay') or '?'} {r['dev']} ({r.get('serial') or '?'})")
             try:
                 r = state[_one_based(_ask("  cancel which #> "))]
             except (ValueError, IndexError):
-                print(f"{Y}  cancelled{N}"); return
-            if _confirm(f"cancel burn-in on bay {r.get('bay') or '?'} {r['dev']}?"):
+                print(f"{Y}  cancelled{N}"); return False
+            if _confirm(f"cancel health-check on bay {r.get('bay') or '?'} {r['dev']}?"):
                 burnin.cancel([r.get("serial") or r["dev"]], dry_run=_DRY_RUN)
-            return
+            return False
         if ch != "n":
-            return                          # unknown key = do nothing (safe)
-        # [n] falls through to start a new burn-in
+            return False                    # unknown key = do nothing (safe)
+        # [n] falls through to start a new health-check
     avail = _avail_for_aux(tbw)
     if not avail:
-        print(f"{Y}  no free disks to burn in{N}"); return
+        print(f"{Y}  no free disks to health-check{N}"); return False
     for i, d in enumerate(avail, 1):
         print(f"    [{i}] {d.dev} (bay {d.bay or '?'}) {d.model}")
-    sel = _ask("  burn in which #> (space-separated) ")
+    sel = _ask("  health-check which #> (space-separated) ")
     try:
         picks = [avail[i] for i in _pick_indices(sel, len(avail))]
     except (ValueError, IndexError):
-        print(f"{Y}  cancelled or invalid selection{N}"); return
+        print(f"{Y}  cancelled or invalid selection{N}"); return False
     if not picks:
-        print(f"{Y}  cancelled{N}"); return
-    if not _confirm(f"burn-in {len(picks)} disk(s) (long self-test)?"):
-        print(f"{Y}  cancelled{N}"); return
+        print(f"{Y}  cancelled{N}"); return False
+    if not _confirm(f"health-check {len(picks)} disk(s) (long self-test)?"):
+        print(f"{Y}  cancelled{N}"); return False
     do_scan = _confirm("also run a full read-surface scan (badblocks, read-only, hours)?")
+    detail = "smartctl -t long" + (" + badblocks" if do_scan else "")
+    if not _DRY_RUN:                          # dry-run must not pollute the maint log
+        for d in picks:
+            maint.log_event("health", d.serial or d.dev, "started", detail)
     burnin.run_multi(picks, tbw, do_scan=do_scan, dry_run=_DRY_RUN)
+    return True
 
 
 def _cmd_udev_rescue(tbw) -> None:
@@ -1474,7 +1473,7 @@ def _cmd_udev_rescue(tbw) -> None:
 
 
 _MENU = (f"{C}[r]{N}efresh  {C}[a]{N}ssign  {C}[o]{N}ffload  {C}[s]{N}wap  {C}[d]{N}emote  {C}[t]{N}oggle-dryrun  "
-         f"{C}[n]{N}ew-pool  {C}[e]{N}xtend  {C}[m]{N}aint  {C}[b]{N}urnin  {C}[u]{N}dev-rescue  {C}[x]{N}destroy-pool  {C}[l]{N}ocate  {C}[q]{N}uit   (or hot-plug)")
+         f"{C}[n]{N}ew-pool  {C}[e]{N}xtend  {C}[m]{N}aint  {C}[u]{N}dev-rescue  {C}[x]{N}destroy-pool  {C}[l]{N}ocate  {C}[q]{N}uit   (or hot-plug)")
 
 
 def run() -> int:
@@ -1521,8 +1520,6 @@ def run() -> int:
                     _cmd_extend(tbw)
                 elif cmd in ("m", "maint"):
                     _cmd_maint(tbw)
-                elif cmd in ("b", "burnin"):
-                    _cmd_burnin(tbw)
                 elif cmd in ("u", "rescue"):
                     _cmd_udev_rescue(tbw)
                 elif cmd == "x":

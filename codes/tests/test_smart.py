@@ -12,6 +12,50 @@ from b2ctl import smart
 from b2ctl.common import Disk
 
 
+# Real R740xd NETAPP X357 SAS SSD dump the operator reported for v0.18.0 issue #6
+# ('Why it fail? I think, it is passed.'). Healthy: clean error-counter log,
+# 0 grown defects, self-test 'Completed'. The trap is 'Non-medium error count:
+# 1061' sitting right below the counter log — it must NOT feed d.uncorr.
+_SAS_NON_MEDIUM_OUTPUT = """\
+=== START OF INFORMATION SECTION ===
+Vendor:               NETAPP
+Product:              X357_S164A3T8ATE
+Revision:             NA55
+User Capacity:        3,840,755,982,336 bytes [3.84 TB]
+Rotation Rate:        Solid State Device
+Serial number:        S5JFNA0R500833
+Device type:          disk
+Transport protocol:   SAS (SPL-4)
+SMART support is:     Enabled
+
+=== START OF READ SMART DATA SECTION ===
+SMART Health Status: OK
+
+Percentage used endurance indicator: 0%
+Current Drive Temperature:     31 C
+Accumulated power on time, hours:minutes 41724:19
+Elements in grown defect list: 0
+
+Error counter log:
+           Errors Corrected by           Total   Correction     Gigabytes    Total
+               ECC          rereads/    errors   algorithm      processed    uncorrected
+           fast | delayed   rewrites  corrected  invocations   [10^9 bytes]  errors
+read:          0        0         0         0          0      70511.679           0
+write:         0        0         0         0          0       6361.349           0
+verify:        0        0         0         0          0     347664.599           0
+
+Non-medium error count:     1061
+
+SMART Self-test log
+Num  Test              Status                 segment  LifeTime  LBA_first_err [SK ASC ASQ]
+     Description                              number   (hours)
+# 1  Background long   Completed                   -   41724                 - [-   -    -]
+# 2  Background long   Completed                   -   41722                 - [-   -    -]
+
+Long (extended) Self-test duration: 3600 seconds [60.0 minutes]
+"""
+
+
 class TestSmartParsing:
     """Tests for ATA and SAS SMART parsing."""
 
@@ -47,6 +91,36 @@ class TestSmartParsing:
         assess(d)
         assert d.level == "CRITICAL"
         assert any("uncorrectable errors" in r for r in d.reasons)
+
+    def test_parse_sas_non_medium_error_count_not_uncorrected(self):
+        # v0.18.0 regression: the real R740xd X357 dump the operator reported has
+        # a HEALTHY error-counter log (Total uncorrected = 0 in every row) but a
+        # large 'Non-medium error count: 1061' one line below it. That line is
+        # NOT uncorrected media errors — the parser must read column 7 of the
+        # read/write/verify rows (0), not grab 1061, or the disk FAILs spuriously.
+        d = Disk(dev="/dev/sdm")
+        smart._parse_sas(d, _SAS_NON_MEDIUM_OUTPUT)
+        assert d.uncorr == 0            # NOT 1061 (non-medium error count)
+        assert d.realloc == 0           # zero grown defects
+
+    def test_parse_sas_non_medium_full_pipeline_pass(self):
+        # end-to-end: the exact reported input → burnin.assess PASS (issue #6).
+        # read() maps 'SMART Health Status: OK' → PASSED and parses the self-test
+        # log; the newest SAS row is a bare 'Completed' (success), stripped clean.
+        from b2ctl import burnin
+        d = Disk(dev="/dev/sdm", smart_dtype="")
+        with patch("b2ctl.smart._smartctl", return_value=_SAS_NON_MEDIUM_OUTPUT):
+            smart.read(d, {})
+        assert d.health == "PASSED"
+        assert d.uncorr == 0
+        assert d.selftest_last_result == "Completed"
+        assert d.selftest_last_poh == 41724
+        with patch("b2ctl.burnin.selftest_status",
+                   return_value={"running": False, "pct": 100,
+                                 "result": d.selftest_last_result, "eta_min": None}):
+            verdict, reasons = burnin.assess(d)
+        assert verdict == "PASS", reasons
+        assert reasons == []
 
     def test_endurance_calculation(self):
         d = _disk(lba_written=19305985024, is_ssd=True, model="Samsung SSD 870")

@@ -52,6 +52,17 @@ Num  Test              Status                 segment  LifeTime  LBA_first_err
 # 1  Background long   Completed                   -   50450                 -
 """
 
+# Real R740xd SAS output (bug report v0.18.0): newest row is a bare 'Completed'
+# (SAS success has NO 'without error'), older rows are user-aborted. The newest
+# must win and grade PASS, and the parsed status must be clean 'Completed' — not
+# the greedy old capture that swallowed the '- 41722 -' tail.
+_SAS_DONE_REAL = """SMART Self-test log
+Num  Test              Status                 segment  LifeTime  LBA_first_err [SK ASC ASQ]
+     Description                              number   (hours)
+# 1  Background long   Completed                   -   41723                 - [-   -    -]
+# 2  Background long   Aborted (by user command)   8   41722                 - [-   -    -]
+"""
+
 
 class TestParseSelftest(unittest.TestCase):
     """Pure parser shared by selftest_status() and smart.read()."""
@@ -108,6 +119,22 @@ class TestSelftestStatus(unittest.TestCase):
         self.assertFalse(st["running"])
         self.assertIn("completed", st["result"].lower())
 
+    def test_sas_done_result_is_clean(self):
+        # v0.18.0: the status column is parsed cleanly (not the greedy old capture
+        # that trailed '- 41723 -' into the result string).
+        with patch.object(burnin, "_run", return_value=_SAS_DONE_REAL):
+            st = burnin.selftest_status("/dev/sda")
+        self.assertEqual(st["result"], "Completed")   # newest row (# 1), clean
+
+    def test_sas_real_output_assess_pass(self):
+        # The reported bug: a healthy SAS disk whose newest self-test is bare
+        # 'Completed' was graded FAIL. It must be PASS now.
+        d = _disk(health="PASSED", uncorr=0, realloc=0, poh=41723)
+        with patch.object(burnin, "_run", return_value=_SAS_DONE_REAL):
+            verdict, reasons = burnin.assess(d)
+        self.assertEqual(verdict, "PASS")
+        self.assertEqual(reasons, [])
+
     def test_selftest_status_aborted_ignores_history(self):
         # F-030: current abort must not be masked by a stale passing log row.
         with patch.object(burnin, "_run", return_value=_ATA_ABORTED_STALE):
@@ -150,6 +177,14 @@ class TestAssess(unittest.TestCase):
         with self._patch_status(result="Completed: read failure"):
             verdict, _ = burnin.assess(d)
         self.assertEqual(verdict, "FAIL")
+
+    def test_sas_bare_completed_is_pass(self):
+        # SAS success is bare 'Completed' (no 'without error') — must NOT FAIL.
+        d = _disk(health="PASSED", uncorr=0, realloc=0, poh=10000)
+        with self._patch_status(result="Completed"):
+            verdict, reasons = burnin.assess(d)
+        self.assertEqual(verdict, "PASS")
+        self.assertEqual(reasons, [])
 
     def test_poh_no_warn_by_default(self):
         # POH warning is opt-in now (health.<type>.poh_warn defaults to None)

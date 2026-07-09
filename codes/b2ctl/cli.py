@@ -178,13 +178,26 @@ def _confirm_pool_op(op: str, pool: str, devs: list[str]) -> bool:
 
 
 def _partition_devs(devs, size):
-    """Over-provision the CLI aux-add paths: partition each resolved by-id device
-    to `size` and return the -part1 tokens (or None on failure). Validates size
-    against the scanned Disk.size_bytes (defensive max_bytes)."""
+    """Over-provision the CLI aux-add paths: WIPE then partition each resolved
+    by-id device to `size`, returning the -part1 tokens (or None on failure).
+    The wipe is mandatory — `sgdisk -n 1:0:+<size>` needs a clean GPT or it places
+    partition 1 past a stale one (the used-disk `partition failed` bug, F-132).
+    Validates size against the scanned Disk.size_bytes (defensive max_bytes)."""
     from . import zfs
+    from .common import confirm
     sizes = {d.by_id: d.size_bytes for d in core.scan_light() if d.by_id}
+    # §9: the wipe is destructive, so confirm it HERE — before any device is
+    # touched — not at the later add-cache/add-log prompt (which runs post-wipe).
+    print(f"{Y}[!] over-provision will WIPE then partition: {', '.join(devs)}{N}")
+    if not confirm("wipe and partition these disk(s)?"):
+        print(f"{Y}[-] cancelled{N}")
+        return None
     out = []
     for dev in devs:
+        wok, wout = zfs.wipe(dev, dry_run=watch._DRY_RUN)
+        if not wok:
+            print(f"{R}[-] wipe {dev}: {wout}{N}")
+            return None
         ok, part = zfs.partition(dev, size, max_bytes=sizes.get(dev),
                                  dry_run=watch._DRY_RUN)
         if not ok:
@@ -278,12 +291,19 @@ def _burnin(args) -> int:
     if args.status:
         return burnin.status_view()
     if not args.target:
-        print(f"{R}burnin: give one or more target disks, or --status{N}",
+        print(f"{R}maint health: give one or more target disks, or --status{N}",
               file=sys.stderr)
         return 2
+    # Mirror the interactive [m]aint health path: record a 'started' event per
+    # target so `b2ctl maint --log` shows health-checks regardless of entry point.
+    from . import maint
+    kind = "short" if args.short else "long"
+    detail = f"smartctl -t {kind}" + (" + badblocks" if args.scan else "")
+    if not watch._DRY_RUN:                    # dry-run must not pollute the maint log
+        for t in args.target:
+            maint.log_event("health", t, "started", detail)
     return burnin.run_multi(args.target, spec.load(), do_scan=args.scan,
-                            kind="short" if args.short else "long",
-                            dry_run=watch._DRY_RUN)
+                            kind=kind, dry_run=watch._DRY_RUN)
 
 
 def _raid_replace(args) -> int:
@@ -674,12 +694,41 @@ def build_parser() -> argparse.ArgumentParser:
     trm.add_argument("pool", nargs="?", help="pool name (prompts if omitted)")
     trm.set_defaults(func=_trim)
 
-    mnt = sub.add_parser("maint", help="maintenance history (scrub/trim/health)")
+    # `maint` is the single maintenance surface (v0.18.0): history view (no sub /
+    # --log) plus scrub / trim / health subcommands. Top-level `scrub`/`trim` above
+    # remain as back-compat aliases.
+    mnt = sub.add_parser("maint",
+                         help="maintenance: scrub / trim / health-check + history")
     mnt.add_argument("--log", action="store_true",
                      help="show the maintenance history log (maint.jsonl)")
     mnt.add_argument("--last", type=int, default=30, metavar="N",
                      help="show last N events (default 30)")
-    mnt.set_defaults(func=_maint)
+    mnt.set_defaults(func=_maint, maint_cmd=None)
+    msub = mnt.add_subparsers(dest="maint_cmd")
+
+    m_scr = msub.add_parser("scrub", help="start a manual scrub on a pool")
+    m_scr.add_argument("pool", nargs="?", help="pool name (prompts if omitted)")
+    m_scr.set_defaults(func=_scrub)
+
+    m_trm = msub.add_parser("trim", help="start a manual TRIM on a pool")
+    m_trm.add_argument("pool", nargs="?", help="pool name (prompts if omitted)")
+    m_trm.set_defaults(func=_trim)
+
+    m_hl = msub.add_parser("health",
+                           help="health-check disk(s): SMART long self-test (+ scan) + verdict")
+    m_hl.add_argument("target", nargs="*",
+                      help="bay / serial / dev of disk(s) (space-separated)")
+    m_hl.add_argument("--scan", action="store_true",
+                      help="also run a full read-surface scan (badblocks, read-only)")
+    m_hl.add_argument("--short", action="store_true",
+                      help="short self-test instead of long")
+    m_hl.add_argument("--status", action="store_true",
+                      help="show live status of in-flight health-checks (re-attach)")
+    m_hl.add_argument("--cancel", nargs="+", metavar="TARGET",
+                      help="cancel in-flight health-check on the given bay/serial/dev")
+    m_hl.add_argument("--cancel-all", action="store_true",
+                      help="cancel ALL in-flight health-checks")
+    m_hl.set_defaults(func=_burnin)
 
     # aux vdevs: L2ARC cache + SLOG log
     ca = sub.add_parser("cache-add", help="add L2ARC read-cache device(s) to a pool")
@@ -726,21 +775,7 @@ def build_parser() -> argparse.ArgumentParser:
     lrp.add_argument("new", help="replacement disk: bay / serial / dev / by-id")
     lrp.set_defaults(func=_log_replace)
 
-    bi = sub.add_parser("burnin",
-                        help="vet spare/new disk(s) — SMART long self-test (+ scan)")
-    bi.add_argument("target", nargs="*",
-                    help="bay / serial / dev of disk(s) to burn in (space-separated)")
-    bi.add_argument("--scan", action="store_true",
-                    help="also run a full read-surface scan (badblocks, read-only)")
-    bi.add_argument("--short", action="store_true",
-                    help="short self-test instead of long")
-    bi.add_argument("--status", action="store_true",
-                    help="show live status of in-flight burn-ins (re-attach)")
-    bi.add_argument("--cancel", nargs="+", metavar="TARGET",
-                    help="cancel in-flight burn-in on the given bay/serial/dev")
-    bi.add_argument("--cancel-all", action="store_true",
-                    help="cancel ALL in-flight burn-ins")
-    bi.set_defaults(func=_burnin)
+    # NOTE: `burnin` merged into `maint health` (v0.18.0) — see the `maint` parser.
 
     v = sub.add_parser("version", help="print version")
     v.set_defaults(func=lambda _a: (print(f"b2ctl {__version__}") or 0))
@@ -815,6 +850,27 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+_ROOT_EXEMPT = ("version", "check", "config", "log", "rollback",
+                "install", "update", "maint")
+
+
+def _needs_root(args) -> bool:
+    """Read-only commands run without root. `maint` is special: the bare history
+    view (no subcommand / --log) and `maint health --status` are read-only; the
+    mutating subcommands (scrub / trim / health <dev>) need root."""
+    cmd = getattr(args, "cmd", None)
+    if cmd not in _ROOT_EXEMPT:
+        return True
+    if cmd != "maint":
+        return False                          # other exempt cmds never need root
+    mc = getattr(args, "maint_cmd", None)
+    if mc is None:                            # `maint` / `maint --log` = history view
+        return False
+    if mc == "health" and getattr(args, "status", False):
+        return False                          # re-attach view only
+    return True                               # maint scrub|trim|health <dev> mutate
+
+
 def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -824,10 +880,7 @@ def main(argv=None) -> int:
         common.set_dry_run(True)      # bottom-layer owner read by raid_actions/burnin
     if not getattr(args, "cmd", None):
         args = parser.parse_args(["status"])
-    # scrub/trim mutate (need root); `maint` is a read-only history view (exempt,
-    # like `log`).
-    if args.cmd not in ("version", "check", "config", "log", "rollback",
-                        "install", "update", "maint"):
+    if _needs_root(args):
         need_root()
     try:
         return args.func(args)

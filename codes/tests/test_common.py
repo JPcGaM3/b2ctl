@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch, MagicMock
 
 from helpers import _disk
-from b2ctl.common import assess
+from b2ctl.common import assess, selftest_passed
 
 
 # ========================================================================== #
@@ -295,6 +295,33 @@ class TestTypeAwareThresholds:
         with patch("b2ctl.config.health_config", return_value=cfg):
             assess(d)
         assert d.level == "WARNING"
+
+
+class TestSelftestPassed(unittest.TestCase):
+    """selftest_passed(): ATA + SAS self-test dialects (v0.18.0)."""
+
+    def test_ata_completed_without_error(self):
+        assert selftest_passed("Completed without error") is True
+
+    def test_sas_bare_completed(self):
+        assert selftest_passed("Completed") is True          # SAS success
+
+    def test_completed_read_failure(self):
+        assert selftest_passed("Completed: read failure") is False
+
+    def test_aborted(self):
+        assert selftest_passed("Aborted (by user command)") is False
+
+    def test_in_progress_not_a_pass(self):
+        assert selftest_passed("Self test in progress") is False
+
+    def test_empty_not_a_pass(self):
+        assert selftest_passed("") is False
+        assert selftest_passed(None) is False
+
+    def test_case_insensitive(self):
+        assert selftest_passed("COMPLETED") is True
+        assert selftest_passed("failed in segment") is False
 
 
 if __name__ == "__main__":

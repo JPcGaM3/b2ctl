@@ -69,6 +69,14 @@ _DEFAULTS: dict = {
     },
     "bay_map_path": "",
     "ssd_spec_path": "",
+    # Per-pool maintenance intent recorded at create time (v0.17.0). Keyed by pool
+    # name -> {"autotrim": "on"|"off", "autoscrub": bool}. Written by
+    # set_pool_settings(), removed by remove_pool_settings() on destroy.
+    "pools": {},
+    # Sticky defaults that pre-fill the create prompts. autoscrub default OFF is a
+    # DELIBERATE reversal of the v0.16.0 "scrub always-on" stance (see ADR-003) —
+    # manual scrub is the primary path; the timer is opt-in.
+    "pool_defaults": {"autotrim": "off", "autoscrub": False},
 }
 
 _cache: dict | None = None
@@ -123,6 +131,21 @@ def load() -> dict:
             cfg["bay_map_path"] = user["bay_map_path"]
         if isinstance(user.get("ssd_spec_path"), str) and user["ssd_spec_path"]:
             cfg["ssd_spec_path"] = user["ssd_spec_path"]
+        # Per-pool records — shape-guarded: a non-dict "pools", or a per-pool value
+        # that isn't a dict, falls back to {} for that entry (malformed->defaults).
+        pl = user.get("pools")
+        if isinstance(pl, dict):
+            cfg["pools"] = {
+                k: {"autotrim": v.get("autotrim"),
+                    "autoscrub": bool(v.get("autoscrub", False))}
+                for k, v in pl.items() if isinstance(v, dict)
+            }
+        pd = user.get("pool_defaults")
+        if isinstance(pd, dict):
+            if pd.get("autotrim") in ("on", "off"):
+                cfg["pool_defaults"]["autotrim"] = pd["autotrim"]
+            if "autoscrub" in pd:
+                cfg["pool_defaults"]["autoscrub"] = bool(pd["autoscrub"])
     return cfg
 
 
@@ -219,6 +242,40 @@ def controller_index_setting() -> str:
     return str(_get()["controller"].get("index", "all"))
 
 
+def _load_for_write() -> dict:
+    """Read CONFIG_PATH as a mutable dict, PRESERVING every existing key.
+
+    Refuses (raises ValueError) on an unparseable / non-object file rather than
+    overwriting it — silently resetting would erase tool_paths/bay_map_path
+    (F-075). A missing file returns {}. Shared by every single-setting writer.
+    """
+    if not os.path.exists(CONFIG_PATH):
+        return {}
+    try:
+        with open(CONFIG_PATH) as f:
+            data = json.load(f)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{CONFIG_PATH} is not valid JSON ({exc}); fix it "
+                         f"before writing config") from exc
+    except OSError:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{CONFIG_PATH} top-level is not an object; fix it first")
+    return data
+
+
+def _atomic_write(data: dict) -> None:
+    """Write `data` to CONFIG_PATH atomically (tmp in same dir + os.replace) so a
+    crash/ENOSPC can't leave a truncated config that load() reads as all-defaults
+    (F-075). Creates /etc/b2ctl if needed. Callers clear _cache afterwards."""
+    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+    tmp = CONFIG_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, CONFIG_PATH)
+
+
 def set_mode(mode: str) -> None:
     """Persist controller.mode ('it'|'raid'|'auto') to CONFIG_PATH.
 
@@ -228,34 +285,60 @@ def set_mode(mode: str) -> None:
     global _cache
     if mode not in ("it", "raid", "auto"):
         raise ValueError(f"invalid mode: {mode}")
-    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-    data: dict = {}
-    if os.path.exists(CONFIG_PATH):
-        try:
-            with open(CONFIG_PATH) as f:
-                data = json.load(f)
-        except json.JSONDecodeError as exc:
-            # Refuse to overwrite an unparseable file — silently resetting it to
-            # {"controller": {...}} would erase tool_paths/bay_map_path (F-075).
-            raise ValueError(f"{CONFIG_PATH} is not valid JSON ({exc}); fix it "
-                             f"before setting the mode") from exc
-        except OSError:
-            data = {}
-    if not isinstance(data, dict):
-        raise ValueError(f"{CONFIG_PATH} top-level is not an object; fix it first")
+    data = _load_for_write()
     ctrl = data.get("controller")
     if not isinstance(ctrl, dict):
         ctrl = {}
         data["controller"] = ctrl
     ctrl["mode"] = mode
-    # Atomic write: tmp in the same dir + os.replace so a crash/ENOSPC can't leave
-    # a truncated config that load() would silently read as all-defaults (F-075).
-    tmp = CONFIG_PATH + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(data, f, indent=2)
-        f.write("\n")
-    os.replace(tmp, CONFIG_PATH)
+    _atomic_write(data)
     _cache = None
+
+
+def pool_defaults() -> dict:
+    """Sticky create-prompt defaults: {'autotrim': 'on'|'off', 'autoscrub': bool}."""
+    pd = dict(_DEFAULTS["pool_defaults"])
+    pd.update(_get().get("pool_defaults") or {})
+    return pd
+
+
+def set_pool_defaults(*, autotrim: str, autoscrub: bool) -> None:
+    """Remember the last-chosen create options so the next create pre-fills them."""
+    global _cache
+    data = _load_for_write()
+    data["pool_defaults"] = {"autotrim": autotrim, "autoscrub": bool(autoscrub)}
+    _atomic_write(data)
+    _cache = None
+
+
+def pool_settings(name: str) -> dict:
+    """Persisted per-pool maintenance settings {'autotrim','autoscrub'} or {}."""
+    return dict(_get().get("pools", {}).get(name, {}))
+
+
+def set_pool_settings(name: str, *, autotrim: str, autoscrub: bool) -> None:
+    """Persist pools[name]; preserves every other key (read-preserve-mutate-atomic)."""
+    global _cache
+    data = _load_for_write()
+    pools = data.get("pools")
+    if not isinstance(pools, dict):
+        pools = {}
+        data["pools"] = pools
+    pools[name] = {"autotrim": autotrim, "autoscrub": bool(autoscrub)}
+    _atomic_write(data)
+    _cache = None
+
+
+def remove_pool_settings(name: str) -> None:
+    """Drop pools[name] on pool destroy. No-op if absent / file missing."""
+    global _cache
+    if not os.path.exists(CONFIG_PATH):
+        return
+    data = _load_for_write()
+    pools = data.get("pools")
+    if isinstance(pools, dict) and pools.pop(name, None) is not None:
+        _atomic_write(data)
+        _cache = None
 
 
 def as_json() -> str:

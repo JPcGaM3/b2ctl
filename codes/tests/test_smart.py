@@ -376,5 +376,80 @@ class TestNvmeParsing(unittest.TestCase):
         self.assertNotEqual(d.lba_written, units)     # guard a dropped *1000
 
 
+# ATA self-test LOG block (newest first) — an Extended test + a Short test.
+_SELFTEST_LOG_ATA = """\
+SMART Self-test log structure revision number 1
+Num  Test_Description    Status                  Remaining  LifeTime(hours)  LBA_of_first_error
+# 1  Extended offline    Completed without error       00%     18238         -
+# 2  Short offline       Completed without error       00%     18200         -
+"""
+
+_SELFTEST_LOG_ATA_FAIL = """\
+SMART Self-test log structure revision number 1
+Num  Test_Description    Status                  Remaining  LifeTime(hours)  LBA_of_first_error
+# 1  Extended offline    Completed: read failure       90%     12000         0x0badf00d
+"""
+
+_SELFTEST_LOG_SAS = """\
+SMART Self-test log
+Num  Test              Status                 segment  LifeTime  LBA_first_err [SK ASC ASQ]
+     Description                              number   (hours)
+# 1  Background long   Completed                   -   50451                 - [- - -]
+"""
+
+# NVMe uses a distinct 'Self-test Log (NVMe Log 0x06)' block with bare-index
+# rows (no '#') and a Power_on_Hours column instead of LifeTime(hours).
+_SELFTEST_LOG_NVME = """\
+Self-test Log (NVMe Log 0x06)
+Self-test status: No self-test in progress
+Num  Test_Description  Status                       Power_on_Hours  Failing_LBA  NSID Seg SCT Code
+ 0   Extended          Completed without error                 736            -     -   -   -    -
+ 1   Short             Completed without error                 720            -     -   -   -    -
+"""
+
+
+class TestSelftestLog(unittest.TestCase):
+    """Passive read of the drive's self-test LOG -> selftest_last_* (HEALTH_CHK)."""
+
+    def test_parse_extended_ok(self):
+        res, hrs = smart._parse_selftest_log(_SELFTEST_LOG_ATA)
+        assert res == "Completed without error"
+        assert hrs == 18238
+
+    def test_parse_extended_failure(self):
+        res, hrs = smart._parse_selftest_log(_SELFTEST_LOG_ATA_FAIL)
+        assert "read failure" in res
+        assert hrs == 12000
+
+    def test_parse_sas_background_long(self):
+        res, hrs = smart._parse_selftest_log(_SELFTEST_LOG_SAS)
+        assert res == "Completed"
+        assert hrs == 50451
+
+    def test_parse_nvme_extended(self):
+        # bare-index rows under the NVMe block; newest (index 0) Extended wins,
+        # Short (index 1) is skipped, Power_on_Hours is the numeric column.
+        res, hrs = smart._parse_selftest_log(_SELFTEST_LOG_NVME)
+        assert res == "Completed without error"
+        assert hrs == 736
+
+    def test_nvme_block_not_matched_without_header(self):
+        # a bare-index row with no 'Self-test Log (NVMe' header must NOT be parsed
+        # (guards against matching ATA attribute rows that also start with digits).
+        assert smart._parse_selftest_log(
+            " 0   Extended   Completed without error   736\n") == ("", None)
+
+    def test_no_log_returns_empty(self):
+        assert smart._parse_selftest_log(_ATA_OUTPUT) == ("", None)
+
+    @patch("b2ctl.smart._smartctl")
+    def test_read_populates_selftest_last_fields(self, mock_sc):
+        mock_sc.return_value = _ATA_OUTPUT + "\n" + _SELFTEST_LOG_ATA
+        d = _disk(dev="/dev/sdz", smart_dtype="")
+        smart.read(d, {})
+        assert d.selftest_last_result == "Completed without error"
+        assert d.selftest_last_poh == 18238
+
+
 if __name__ == "__main__":
     unittest.main()

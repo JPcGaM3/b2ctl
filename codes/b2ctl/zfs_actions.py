@@ -49,6 +49,16 @@ def demote(tbw=None) -> int:
     return _rc(watch._cmd_demote(_tbw(tbw)))
 
 
+def scrub(pool: str | None = None, tbw=None) -> int:
+    """Manual scrub. `pool` skips the pool prompt (CLI passed it)."""
+    return _rc(watch._cmd_maint(_tbw(tbw), action="scrub", pool=pool))
+
+
+def trim(pool: str | None = None, tbw=None) -> int:
+    """Manual TRIM. `pool` skips the pool prompt (CLI passed it)."""
+    return _rc(watch._cmd_maint(_tbw(tbw), action="trim", pool=pool))
+
+
 def cache_replace(pool: str, old: str, new: str) -> int:
     """Repair a degraded L2ARC cache leaf (remove old + add new)."""
     return _aux_replace(pool, old, new, klass="cache")

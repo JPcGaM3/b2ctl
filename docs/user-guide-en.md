@@ -237,7 +237,22 @@ A disk that stays `NOREAD` after this is likely genuinely failing — check its 
 | **HEALTH** | SMART self-test result | `PASSED`, `FAILED` |
 | **POOL** | pool/vdev membership | `tank/raidz1-0`, `rpool/mirror-0` |
 | **STATUS** | ZFS vdev state — green ONLINE/AVAIL, yellow DEGRADED/INUSE→bay, red FAULTED/REMOVED | `ONLINE`, `AVAIL`, `INUSE→1:4` |
+| **HEALTH_CHK** | last completed **long self-test** result from the drive's own log (v0.17.0) | `OK 120hPOH`, `ERR 30hPOH`, `-` |
 | **LEVEL** | overall status | see table below |
+
+**HEALTH_CHK is power-on-hours-relative, not a wall-clock date.** The cell shows
+`OK` (long self-test passed) or `ERR` (failed) plus how long ago the test ran
+measured in **power-on hours** (`hPOH`) — because the drive logs each self-test
+against its lifetime hours, not a calendar date. `OK 120hPOH` means "the last long
+self-test passed, and the drive has run 120 more hours since". A `-` means no long
+self-test is on record. The value reflects the last long test whoever fired it —
+burn-in (`[b]`), the `[m]aint` health-check, or a manual `smartctl -t long`. To
+run one, see `[m]aint` below.
+
+**The pool summary also gains a `SCRUB` and `TRIM` column (v0.17.0)** showing each
+pool's last scrub (read live from `zpool status`) and last trim (from b2ctl's
+maintenance history), e.g. `2d ago`. A blank/`-` means none on record — run one
+with `[m]aint` or `b2ctl scrub|trim <pool>`.
 
 **LEVEL meanings:**
 
@@ -439,11 +454,39 @@ b2ctl> n
     [2] /dev/sdc (bay 1:5)
     [3] /dev/sdd (bay 1:6)
   pick disks (space-separated #)> 1 2 3
+  size to use per disk (over-provision) [full disk]>
   pool name> backup
   raid type (stripe, mirror, raid10, raidz1, raidz2) [mirror]> raidz1
-  create pool 'backup' (raidz1) with 3 disks? [y/N]> y
+  ...
+  autotrim: [1] off — batched TRIM (monthly timer / manual [m]aint) (recommended)
+            [2] on  — continuous (ZFS trims inline)
+    choose [1]>
+  autoscrub: [1] on  — monthly zfs-scrub timer (self-heals silent corruption)
+             [2] off — NO scheduled scrub; run it via [m]aint / `b2ctl scrub` (default)
+    choose [2]>
+  ...
+  create pool 'backup' (raidz1) with 3 disks (full disk)? [y/N]> y
   ✔ pool created
+  ✔ maintenance timers: ...
+  [!] autoscrub OFF — no monthly self-heal scheduled for 'backup'; run `b2ctl scrub backup` (or [m]aint) periodically
 ```
+
+**`size to use per disk` (over-provision, v0.17.0).** Press Enter for the default —
+b2ctl hands ZFS the **whole disk** (the idiomatic ZFS layout). Enter a size (e.g.
+`32G`, `512G`) and b2ctl instead creates a partition of that size on each disk and
+gives ZFS the partition, leaving the rest as SSD spare area. This does **not** make
+the pool faster (a correctly-aligned partition performs the same as a whole disk on
+Linux ZFS with `ashift=12`); the spare area improves **SSD endurance and
+sustained-write consistency**, at the cost of usable capacity. Over-provisioning is
+mainly worth it for a dedicated SLOG / L2ARC SSD — see `[e]xtend`.
+
+**`autoscrub` (v0.17.0, default OFF).** A scrub reads every allocated block, verifies
+checksums, and self-heals corruption on a redundant pool. **Choose `[1] on`** to
+enable a monthly `zfs-scrub-monthly@<pool>.timer`. The default is **`[2] off`** —
+b2ctl now treats **manual scrub as the primary path** (`[m]aint` / `b2ctl scrub`),
+so a new pool has *no scheduled scrub* unless you opt in. With autoscrub off, b2ctl
+prints a reminder and the pool's `SCRUB` column will show how stale the last scrub
+is — run one periodically. (`autotrim` is a separate choice and also defaults off.)
 
 **RAID types:**
 
@@ -478,17 +521,33 @@ b2ctl> e
     [1] /dev/sdg (bay 1:8)
     [2] /dev/sdh (bay 1:9)
   pick disk(s) (space-separated #)> 1 2
+  size to use per device (over-provision) [full disk]> 32G
+  SLOG topology:
+    [1] mirror  — redundant log (recommended)
+    [2] raid10  — stripe of mirrors (even # of disks >= 4)
+    [3] single/striped — NO redundancy (log loss can lose sync writes)
+    choose [1]> 1
   [!] ensure the SSD(s) have Power-Loss Protection (PLP).
   add SLOG (mirror) to 'tank'? [y/N]> y
   ✔ SLOG added
 ```
 
 - **L2ARC cache** — a read cache on a fast SSD/NVMe. Losing it only costs a cache
-  miss, so it is never mirrored. Helps only when your working set is larger than RAM.
-- **SLOG log** — accelerates **synchronous** writes (e.g. NFS `sync`). Pick **two**
-  disks for a mirror (a lone log device can lose in-flight writes), and use SSDs
-  with **Power-Loss Protection (PLP)**. b2ctl warns if you choose a single device.
-- CLI: `b2ctl cache-add|cache-rm|log-add|log-rm <pool> <dev…>`.
+  miss, so it is **never** mirrored and has no topology prompt. Helps only when your
+  working set is larger than RAM.
+- **SLOG log** — accelerates **synchronous** writes (e.g. NFS `sync`). With **two or
+  more** disks b2ctl asks the **topology (v0.17.0)**: `mirror` (redundant —
+  recommended), `raid10` (stripe of mirrors, even # ≥ 4), or `single/striped` (no
+  redundancy). A log vdev **cannot** be raidz — that is a hard ZFS rule, so it is
+  never offered. A lone log device can lose in-flight writes, so b2ctl warns before
+  adding one. Always use SSDs with **Power-Loss Protection (PLP)**.
+- **`size to use per device` (over-provision, v0.17.0)** — press Enter for the whole
+  device, or enter a size (e.g. `32G`) to partition each device and hand ZFS the
+  partition, leaving spare area. Over-provisioning a SLOG/L2ARC SSD improves its
+  endurance and write consistency (no throughput change if aligned) — see `[n]ew-pool`.
+- CLI: `b2ctl cache-add|cache-rm|log-add|log-rm <pool> <dev…>`; force a SLOG
+  topology with `b2ctl log-add <pool> <dev…> --mirror|--raid10`; over-provision with
+  `--size 32G` on `cache-add`/`log-add`.
 
 **`[4]` replace/repair a degraded cache/log device (v0.14.0).** When a cache disk
 or one leg of a mirrored SLOG dies, pull it, insert a new disk, then run `[e] → [4]`.
@@ -516,7 +575,49 @@ b2ctl> e
 
 ---
 
-### 6.8 `b` — Burn-in disk(s) (vet before pooling)
+### 6.8 `m` — Manual maintenance (scrub · trim · health-check)
+
+**When to use:** run a scrub or TRIM on a pool by hand (the primary maintenance
+path in v0.17.0, now that scheduled scrubs are opt-in), or fire a long self-test to
+refresh a disk's HEALTH_CHK.
+
+```
+b2ctl> m
+  [1] scrub  (verify checksums + self-heal)
+  [2] trim   (release unused SSD blocks)
+  [3] health-check (smartctl -t long — records the drive's verdict)
+  action> 1
+    [1] tank (ONLINE)
+    [2] rpool (ONLINE)
+  pool #> 1
+  start scrub on 'tank'? [y/N]> y
+  ✔ scrub started
+  watch live progress (Ctrl-C detaches; kernel keeps running)? [y/N]> y
+  scrubbing... 42.0% done, ETA 00:03:11
+  ✔ scrub completed
+```
+
+- **scrub** — reads every allocated block, verifies checksums, and self-heals a
+  redundant pool. This is the real defense against silent bitrot; run it regularly
+  if you left autoscrub off. Live progress shows `% done` + the ZFS ETA.
+- **trim** — tells the SSDs which blocks are free (skip it if the pool has
+  `autotrim=on`, which trims continuously). Progress is coarse (ZFS exposes limited
+  trim status).
+- **health-check** — fires `smartctl -t long` on the disk(s) you pick (any readable
+  disk). It runs on the drive for **minutes to hours** and does **not** block b2ctl;
+  the verdict lands in the drive's self-test log and appears in the **HEALTH_CHK**
+  column on the next refresh. This is the same long test burn-in uses.
+- **Ctrl-C detaches, it does not cancel.** During a live scrub/trim, Ctrl-C returns
+  you to the prompt while the **kernel keeps running** the operation — re-check with
+  `zpool status <pool>` or the pool's SCRUB column.
+- Every scrub/trim/health-check is written to a **maintenance history**
+  (`maint.jsonl`); review it with `b2ctl maint --log`.
+- CLI: `b2ctl scrub <pool>` · `b2ctl trim <pool>` (pool optional — prompts if
+  omitted) · `b2ctl maint --log [--last N]`.
+
+---
+
+### 6.9 `b` — Burn-in disk(s) (vet before pooling)
 
 **When to use:** before trusting new or second-hand disks, run a SMART long
 self-test (optionally a full read-surface scan) on **several disks at once** and
@@ -564,7 +665,7 @@ b2ctl> b
 
 ---
 
-### 6.9 `u` — Udev-rescue (recover an OS-rejected disk)
+### 6.10 `u` — Udev-rescue (recover an OS-rejected disk)
 
 **When to use:** a disk is physically present but the OS rejected it — it shows as
 a **GHOST** (no `/dev` node). `u` fires `udevadm trigger`/`settle` to try to make
@@ -583,7 +684,7 @@ If nothing recovers: `no disks recovered — reseat physically or wipe via
 
 ---
 
-### 6.10 `x` — Destroy a pool
+### 6.11 `x` — Destroy a pool
 
 **When to use:** permanently delete a ZFS pool. **All data is lost** — guarded by a
 double confirm plus typing the pool name. (Deep-dive: the **Destroying a ZFS pool**
@@ -609,7 +710,7 @@ b2ctl> x
 
 ---
 
-### 6.11 `t` — Toggle dry-run mode
+### 6.12 `t` — Toggle dry-run mode
 
 **When to use:** want to see exactly what commands would run without making any changes — for learning, rehearsing, or verifying before a real operation.
 
@@ -633,7 +734,7 @@ Also available as a startup flag: `sudo b2ctl --dry-run watch`
 
 ---
 
-### 6.12 `l` — Locate (blink LED)
+### 6.13 `l` — Locate (blink LED)
 
 **When to use:** need to confirm which physical bay a disk occupies before pulling it.
 
@@ -655,7 +756,7 @@ The bay's activity LED blinks for ~5 seconds then stops automatically.
 
 ---
 
-### 6.13 `q` — Quit
+### 6.14 `q` — Quit
 
 ```
 b2ctl> q
@@ -664,7 +765,7 @@ bye
 
 ---
 
-### 6.14 Hot-plug (automatic detection)
+### 6.15 Hot-plug (automatic detection)
 
 **Inserting a disk:**
 
@@ -882,7 +983,12 @@ or fully dark.
 | `b2ctl replace` | guided: replace a disk onto a spare |
 | `b2ctl swap` | guided: swap a worn disk onto an existing spare |
 | `b2ctl demote` | guided: demote a mirror leg to a spare |
-| `b2ctl create` | guided: create a new ZFS pool |
+| `b2ctl create` | guided: create a new ZFS pool (prompts size/over-provision + autoscrub) |
+| `b2ctl scrub [<pool>]` | start a manual scrub (verify checksums + self-heal); prompts if pool omitted |
+| `b2ctl trim [<pool>]` | start a manual TRIM (release unused SSD blocks) |
+| `b2ctl maint --log [--last N]` | show the maintenance history (scrub/trim/health, default last 30) |
+| `b2ctl log-add <pool> <dev…> [--mirror\|--raid10] [--size 32G]` | add a SLOG; force topology + over-provision |
+| `b2ctl cache-add <pool> <dev…> [--size 512G]` | add L2ARC cache; over-provision with `--size` |
 | `b2ctl log [--last N]` | show last N ops from audit trail (default 20) |
 | `b2ctl rollback <op_id>` | roll back a previous operation (with confirmation) |
 | `b2ctl check` | verify tools, show backend detected, config file status |
@@ -907,8 +1013,9 @@ or fully dark.
 | `s` | swap a worn in-pool disk onto a spare |
 | `d` | demote a mirror member to a spare |
 | `t` | toggle dry-run mode on/off |
-| `n` | create a new pool |
-| `e` | extend a pool — add/remove/**repair** L2ARC cache or SLOG log |
+| `n` | create a new pool (prompts over-provision size + autoscrub) |
+| `e` | extend a pool — add/remove/**repair** L2ARC cache or SLOG log (SLOG topology + size prompts) |
+| `m` | manual maintenance — scrub / trim (per-pool) / health-check (long self-test) |
 | `b` | burn-in disk(s) — multi-select self-test (+ optional badblocks) |
 | `u` | udev-rescue an OS-rejected (GHOST) disk |
 | `x` | destroy a pool (double-confirm + type the pool name) |
@@ -1011,23 +1118,30 @@ turned back off; there is no latched `on`/`off` form, by design), and
 
 ## Creating a ZFS pool (`[n]ew-pool`)
 
-After you pick disks, name, and raid level, b2ctl asks for each pool property
-with an SSD-optimal default — **press Enter to accept**, or type to override
-(`ashift`, `compression`, `atime`, `xattr`, `dnodesize`, `acltype`,
-`recordsize`). `recordsize` is workload-tunable (128K general, DB 16K, media 1M,
-VM 64–128K) and can be changed per-dataset later.
+After you pick disks, b2ctl asks for an over-provision **size** (Enter = whole
+disk; a size such as `32G` partitions each disk and leaves SSD spare area — see
+`[n]` in §6). Then, after name and raid level, it asks each pool property with an
+SSD-optimal default — **press Enter to accept**, or type to override (`ashift`,
+`compression`, `atime`, `xattr`, `dnodesize`, `acltype`, `recordsize`).
+`recordsize` is workload-tunable (128K general, DB 16K, media 1M, VM 64–128K) and
+can be changed per-dataset later.
 
-**autotrim** is a choice — note that **the monthly SCRUB always runs either way**
-(scrub is what checks data integrity and self-heals; it doesn't depend on trim).
-b2ctl schedules maintenance with the distro's own **systemd timers** (from
+**autotrim** and **autoscrub** are two independent choices (v0.17.0). b2ctl
+schedules maintenance with the distro's own **systemd timers** (from
 `zfsutils-linux`), one per pool:
-- **off** *(recommended)* — enables `zfs-scrub-monthly@<pool>.timer` **and**
-  `zfs-trim-monthly@<pool>.timer`.
-- **on** — continuous trimming (ZFS handles it); enables the scrub timer only.
+- **autoscrub** — *default **off***. `[1] on` enables `zfs-scrub-monthly@<pool>.timer`.
+  With **off**, the pool has **no scheduled scrub** — manual scrub is now the primary
+  path (`[m]aint` / `b2ctl scrub`), and b2ctl prints a reminder + the pool's SCRUB
+  column shows how stale the last scrub is. *(This reverses the older always-on scrub;
+  see ADR-003 — a pool you never scrub can accumulate undetected bitrot, so scrub it
+  regularly or turn autoscrub on.)*
+- **autotrim** — *default off* — enables `zfs-trim-monthly@<pool>.timer`. Choosing
+  `on` trims continuously (ZFS handles it), so no trim timer is scheduled.
 
 Check what's scheduled: `systemctl list-timers | grep zfs`. If the distro doesn't
 ship the timer units, b2ctl warns "scrub timer NOT scheduled" and installs nothing —
-install `zfsutils-linux` or enable a timer yourself.
+install `zfsutils-linux` or enable a timer yourself. Your last autotrim/autoscrub
+answers are remembered and pre-fill the next `create`.
 
 Debian/Proxmox also has a built-in cron that scrubs *all* pools monthly (property
 `org.debian:periodic-scrub`). To avoid scrubbing twice, when b2ctl enables a pool's

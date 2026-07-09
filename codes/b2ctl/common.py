@@ -158,6 +158,11 @@ class Disk:
     selftest_running: bool = False
     selftest_pct: int | None = None    # percent COMPLETE (0..100) of the running test
     selftest_eta: str = ""             # formatted time remaining, e.g. "~1h10m" or ""
+    # Last COMPLETED extended (long) self-test, read passively from the SAME
+    # `smartctl -a` self-test LOG (no extra subprocess). Indexed by power-on hours,
+    # NOT wall-clock — the HEALTH_CHK column renders it POH-relative (v0.17.0).
+    selftest_last_result: str = ""     # e.g. "Completed without error" or ""
+    selftest_last_poh: int | None = None  # lifetime hours at which that test ran
 
     @property
     def in_pool(self) -> bool:

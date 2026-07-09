@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+from datetime import datetime
 
 from .common import run, run_check
 
@@ -302,9 +303,30 @@ def add_cache(pool: str, devs: list[str], *, dry_run: bool = False):
     return run_check([_tool("zpool"), "add", "-f", pool, "cache", *devs], dry_run=dry_run)
 
 
-def add_log(pool: str, devs: list[str], *, dry_run: bool = False):
-    """Add a SLOG (separate ZIL). 2+ devs -> mirrored log; caller warns on PLP."""
-    spec = (["mirror", *devs] if len(devs) > 1 else list(devs))
+def add_log(pool: str, devs: list[str], *, raid_type: str | None = None,
+            dry_run: bool = False):
+    """Add a SLOG (separate ZIL). Topology (v0.17.0):
+       None     -> legacy auto: mirror if >1 dev else single (back-compat)
+       "single" -> plain log vdev(s), no redundancy
+       "mirror" -> mirrored log
+       "raid10" -> stripe of mirrors (log mirror a b mirror c d)
+    HARD ZFS CONSTRAINT: a log vdev is single / mirror / stripe-of-mirrors only.
+    raidz (raid5) is INVALID for a log vdev — rejected here, never runs a command.
+    Caller warns on PLP / non-mirror."""
+    if raid_type in ("raidz1", "raidz2", "raidz3", "raid5"):
+        return False, f"raidz is invalid for a SLOG vdev ({raid_type})"
+    if raid_type == "raid10":
+        if len(devs) < 4 or len(devs) % 2:
+            return False, "raid10 SLOG needs an even number of disks (>= 4)"
+        spec = _mirror_pairs(devs)
+    elif raid_type == "mirror":
+        if len(devs) < 2:
+            return False, "mirror SLOG needs >= 2 disks"
+        spec = ["mirror", *devs]
+    elif raid_type == "single":
+        spec = list(devs)
+    else:                                        # None -> legacy auto
+        spec = (["mirror", *devs] if len(devs) > 1 else list(devs))
     return run_check([_tool("zpool"), "add", "-f", pool, "log", *spec], dry_run=dry_run)
 
 
@@ -452,6 +474,99 @@ def poll_resilver_status(pool: str) -> dict:
     return res
 
 
+# --------------------------------------------------------------------------- #
+# Manual maintenance — scrub / trim (kernel owns the op; these return at once)
+# --------------------------------------------------------------------------- #
+def start_scrub(pool: str, *, dry_run: bool = False):
+    """`zpool scrub <pool>` — the kernel runs it in the background."""
+    return run_check([_tool("zpool"), "scrub", pool], dry_run=dry_run)
+
+
+def start_trim(pool: str, *, dry_run: bool = False):
+    """`zpool trim <pool>` — the kernel runs it in the background."""
+    return run_check([_tool("zpool"), "trim", pool], dry_run=dry_run)
+
+
+def poll_scrub_status(pool: str) -> dict:
+    """Parse `zpool status <pool>` into scrub progress. Sibling of
+    poll_resilver_status, keyed on the `scan: scrub` line.
+
+    Returns {done, eta, completed, has_errors, ok}. NOTE: the
+    'scrub repaired ... with N errors' line PERSISTS after the scrub finishes
+    (until the next scrub), so completed=True means 'not currently scrubbing' —
+    exactly what _wait_scrub needs (we just issued the scrub). `ok` is False on
+    empty output so a failed poll is never read as done. A resilver line
+    ('resilvered ...') never matches, so it is not mistaken for a scrub."""
+    out = run([_tool("zpool"), "status", pool])
+    res = {"done": 0.0, "eta": "", "completed": False, "has_errors": False, "ok": True}
+    if not out.strip():
+        res["ok"] = False
+        return res
+    low = out.lower()
+    if "scrub in progress" in low:
+        m_done = re.search(r'(\d+(?:\.\d+)?)%\s*done', out)
+        if m_done:
+            res["done"] = float(m_done.group(1))
+        if "no estimated completion time" in low:
+            res["eta"] = "unknown"
+        else:
+            m_eta = re.search(r'((?:\d+\s*days?\s*)?\d{2}:\d{2}:\d{2})\s*to go', out)
+            if m_eta:
+                res["eta"] = m_eta.group(1).strip()
+        return res
+    m_done = re.search(r'scrub repaired\b.*?with (\d+) errors', out)
+    if m_done:
+        res["completed"] = True
+        res["done"] = 100.0
+        res["has_errors"] = int(m_done.group(1)) > 0
+    return res
+
+
+def poll_trim_status(pool: str) -> dict:
+    """Best-effort trim progress from `zpool status -t <pool>`.
+
+    TRIM is NOT on the `scan:` line — each LEAF carries a per-vdev annotation.
+    Returns {trimming, done, states, ok} where states maps a leaf token ->
+    'trimming'|'untrimmed'|'trimmed'|'unsupported'. The exact `-t` annotation is
+    OpenZFS-version-dependent, so `done` (percent) is best-effort and may be None
+    even while trimming."""
+    out = run([_tool("zpool"), "status", "-t", pool])
+    res = {"trimming": False, "done": None, "states": {}, "ok": bool(out.strip())}
+    for line in out.splitlines():
+        m = re.search(r"\((trimming|untrimmed|trimmed|trim unsupported)"
+                      r"(?:,?\s*(\d+(?:\.\d+)?)%)?\)", line, re.I)
+        if not m:
+            continue
+        tok = line.split()[0]
+        state = m.group(1).lower().replace("trim unsupported", "unsupported")
+        res["states"][tok] = state
+        if state == "trimming":
+            res["trimming"] = True
+            if m.group(2):
+                res["done"] = float(m.group(2))
+    return res
+
+
+def last_scrub_date(pool: str) -> str | None:
+    """Last-scrub completion time from `zpool status <pool>`, as an ISO-8601
+    string (uniform with maint.jsonl / safety timestamps) so callers can
+    rel_time() it. The scan line reads e.g. `scan: scrub repaired 0B in 00:01:23
+    with 0 errors on Tue Jul  8 03:00:00 2026`. Returns None if there is no
+    completed scrub. ZFS keeps only the MOST RECENT scrub — history is in
+    maint.jsonl, not here (§9: this is a pure read, never writes)."""
+    out = run([_tool("zpool"), "status", pool])
+    if not out:
+        return None
+    m = re.search(r'scrub repaired\b.*?\bon\s+(.+?)\s*$', out, re.M)
+    if not m:
+        return None
+    raw = m.group(1).strip()
+    try:
+        return datetime.strptime(raw, "%a %b %d %H:%M:%S %Y").isoformat(timespec="seconds")
+    except ValueError:
+        return raw
+
+
 def wipe_sg(sg_dev: str, *, dry_run: bool = False) -> tuple[bool, str]:
     """Zero first 40 MB of a SCSI generic device to erase RAID metadata.
 
@@ -502,6 +617,64 @@ def wipe(dev: str, *, dry_run: bool = False):
     return False, "; ".join(fails)
 
 
+# --------------------------------------------------------------------------- #
+# Over-provisioning — create a single partition so ZFS gets less than the whole
+# disk (reserve spare area for SSD wear-leveling). First partition-creation site
+# in b2ctl; otherwise ZFS is always handed whole disks (v0.17.0).
+# --------------------------------------------------------------------------- #
+_SIZE_RE = re.compile(r"^\s*([\d.]+)\s*([KMGT])?B?\s*$", re.I)
+_MULT = {None: 1, "K": 2 ** 10, "M": 2 ** 20, "G": 2 ** 30, "T": 2 ** 40}
+
+
+def parse_size(s: str) -> int | None:
+    """'32G'/'512M'/'1.5T'/'1048576' -> bytes; None if unparseable (caller rejects)."""
+    m = _SIZE_RE.match(s or "")
+    if not m:
+        return None
+    try:
+        val = float(m.group(1))
+    except ValueError:
+        return None
+    return int(val * _MULT[(m.group(2) or "").upper() or None])
+
+
+def _part1_path(dev: str) -> str:
+    """First-partition device token for a whole-disk device — STRING CONVENTION
+    only, never os.path.exists (must resolve under --dry-run, where no partition
+    is created). by-id/by-path symlink -> '<link>-part1'; nvme/mmcblk/loop ->
+    '<dev>p1'; /dev/sdX|vdX|hdX -> '<dev>1'."""
+    if "/dev/disk/by-id/" in dev or "/dev/disk/by-path/" in dev:
+        return dev + "-part1"
+    if re.search(r"(nvme\d+n\d+|mmcblk\d+|loop\d+)$", os.path.basename(dev)):
+        return dev + "p1"
+    return dev + "1"
+
+
+def partition(dev: str, size: str, *, type_code: str = "bf01",
+              max_bytes: int | None = None, dry_run: bool = False) -> tuple[bool, str]:
+    """Create a single partition of `size` on `dev`; return (ok, part1_path).
+
+    Runs `sgdisk -n 1:0:+<size> -t 1:<type_code> <dev>` (bf01 = the conventional
+    ZFS type code; cosmetic, gates nothing), then a MANDATORY `udevadm settle` so
+    the `-part1` by-id symlink exists before the caller's `zpool add ...-part1`
+    (the link appears asynchronously — without settle the add races and fails).
+    The primary size<=disk validation lives in the caller (which holds
+    Disk.size_bytes); `max_bytes` is an optional defensive bound."""
+    if max_bytes is not None:
+        req = parse_size(size)
+        if req is None:
+            return False, f"unparseable size '{size}'"
+        if req > max_bytes:
+            return False, f"requested {size} exceeds disk capacity"
+    ok, out = run_check([_tool("sgdisk"), "-n", f"1:0:+{size}",
+                         "-t", f"1:{type_code}", dev], dry_run=dry_run)
+    if not ok:
+        return False, out
+    if not dry_run:                      # nothing was created under dry-run
+        run([_tool("udevadm"), "settle"])
+    return True, _part1_path(dev)
+
+
 MIN_DISKS = {"stripe": 1, "mirror": 2, "raid10": 4, "raidz1": 3, "raidz2": 4}
 
 def has_zfs_label(dev: str) -> bool:
@@ -526,6 +699,15 @@ DEFAULT_FS_OPTS = {"compression": "lz4", "atime": "off", "xattr": "sa",
                    "dnodesize": "auto", "acltype": "posixacl", "recordsize": "128K"}
 
 
+def _mirror_pairs(devs: list[str]) -> list[str]:
+    """['a','b','c','d'] -> ['mirror','a','b','mirror','c','d'] (stripe of mirrors).
+    Shared by create_pool(raid10) and add_log(raid10). Caller validates even>=4."""
+    out: list[str] = []
+    for i in range(0, len(devs), 2):
+        out += ["mirror", devs[i], devs[i + 1]]
+    return out
+
+
 def create_pool(name: str, raid_type: str, devs: list[str], *,
                 pool_opts: dict | None = None, fs_opts: dict | None = None,
                 dry_run: bool = False) -> tuple[bool, str]:
@@ -539,9 +721,7 @@ def create_pool(name: str, raid_type: str, devs: list[str], *,
     if raid_type == "raid10":
         if len(devs) < 4 or len(devs) % 2:
             return False, "raid10 needs an even number of disks (>= 4)"
-        vdev_args: list[str] = []
-        for i in range(0, len(devs), 2):
-            vdev_args += ["mirror", devs[i], devs[i + 1]]
+        vdev_args = _mirror_pairs(devs)
     elif raid_type == "stripe":
         vdev_args = list(devs)
     else:                       # mirror / raidz1 / raidz2 / raidz3
@@ -593,19 +773,21 @@ def _timer_template_exists(kind: str) -> bool:
     return tmpl in out
 
 
-def install_pool_timers(pool: str, *, include_trim: bool = True,
+def install_pool_timers(pool: str, *, include_scrub: bool = True,
+                        include_trim: bool = True,
                         dry_run: bool = False) -> tuple[bool, str]:
     """Enable the per-pool maintenance timers. Returns (ok, summary).
 
-    Always enables `zfs-scrub-monthly@<pool>.timer`; also enables
-    `zfs-trim-monthly@<pool>.timer` when `include_trim` (autotrim=off). If a
+    Enables `zfs-scrub-monthly@<pool>.timer` when `include_scrub` (autoscrub=on)
+    and `zfs-trim-monthly@<pool>.timer` when `include_trim` (autotrim=off). If a
     template unit is missing on this box we WARN and enable nothing for that kind
     (no cron fallback). `ok` reflects the SCRUB timer specifically — a pool with
-    no scheduled scrub is the failure we care about.
+    no scheduled scrub is the failure we care about; when scrub was NOT requested
+    (v0.17.0 autoscrub OFF, ADR-003) there is nothing to fail on, so `ok` is True.
     """
-    kinds = ["scrub"] + (["trim"] if include_trim else [])
+    kinds = (["scrub"] if include_scrub else []) + (["trim"] if include_trim else [])
     enabled, warns = [], []
-    scrub_ok = False
+    scrub_ok = not include_scrub          # nothing to fail on if scrub not requested
     for kind in kinds:
         unit = _timer_unit(kind, pool)
         if not _timer_template_exists(kind):

@@ -242,7 +242,8 @@ class TestAuxAndBurninCommands(unittest.TestCase):
              patch("b2ctl.zfs.add_log", return_value=(True, "")) as mock_add:
             args = cli.build_parser().parse_args(["log-add", "tank", "sde"])
             args.func(args)
-        mock_add.assert_called_once_with("tank", ["/dev/disk/by-id/x"], dry_run=False)
+        mock_add.assert_called_once_with("tank", ["/dev/disk/by-id/x"],
+                                         raid_type=None, dry_run=False)
 
     def test_cache_add_requires_confirmation(self):
         # F-003: declining the prompt must NOT mutate the pool.
@@ -601,6 +602,62 @@ class TestBurninCli(unittest.TestCase):
              patch("b2ctl.spec.load", return_value={}):
             cli._burnin(ns)
         self.assertEqual(rm.call_args[0][0], ["1:4", "1:5"])
+
+
+class TestMaintVerbs(unittest.TestCase):
+    """v0.17.0: scrub / trim / maint --log + aux --size / log-add topology flags."""
+
+    def test_scrub_parse_and_dispatch(self):
+        import b2ctl.cli as cli
+        with patch("b2ctl.cli.zfs_actions.scrub", return_value=0) as m:
+            args = cli.build_parser().parse_args(["scrub", "tank"])
+            rc = args.func(args)
+        m.assert_called_once_with("tank")
+        self.assertEqual(rc, 0)
+
+    def test_trim_parse_and_dispatch(self):
+        import b2ctl.cli as cli
+        with patch("b2ctl.cli.zfs_actions.trim", return_value=0) as m:
+            args = cli.build_parser().parse_args(["trim"])       # pool optional
+            args.func(args)
+        m.assert_called_once_with(None)
+
+    def test_maint_log_reads_events(self):
+        import b2ctl.cli as cli
+        rows = [{"ts": "2026-07-08T03:00:00", "kind": "scrub", "target": "tank",
+                 "status": "ok", "detail": "done"}]
+        with patch("b2ctl.maint.load_events", return_value=rows) as m:
+            args = cli.build_parser().parse_args(["maint", "--log"])
+            rc = args.func(args)
+        m.assert_called_once()
+        self.assertEqual(rc, 0)
+
+    def test_log_add_raid10_flag(self):
+        import b2ctl.cli as cli
+        args = cli.build_parser().parse_args(["log-add", "tank", "a", "b", "--raid10"])
+        self.assertTrue(args.raid10)
+        self.assertFalse(args.mirror)
+
+    def test_log_add_mirror_raid10_mutually_exclusive(self):
+        import b2ctl.cli as cli
+        with self.assertRaises(SystemExit):
+            cli.build_parser().parse_args(["log-add", "tank", "a", "--mirror", "--raid10"])
+
+    def test_cache_add_size_flag(self):
+        import b2ctl.cli as cli
+        args = cli.build_parser().parse_args(["cache-add", "tank", "sde", "--size", "512G"])
+        self.assertEqual(args.size, "512G")
+
+    def test_scrub_requires_root_maint_exempt(self):
+        import b2ctl.cli as cli
+        with patch("b2ctl.cli.need_root") as nr, \
+             patch("b2ctl.cli.zfs_actions.scrub", return_value=0):
+            cli.main(["scrub", "tank"])
+        nr.assert_called_once()                 # scrub mutates -> root required
+        with patch("b2ctl.cli.need_root") as nr2, \
+             patch("b2ctl.maint.load_events", return_value=[]):
+            cli.main(["maint", "--log"])
+        nr2.assert_not_called()                 # read-only history view -> exempt
 
 
 if __name__ == "__main__":

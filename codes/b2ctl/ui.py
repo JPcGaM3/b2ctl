@@ -9,6 +9,11 @@ from __future__ import annotations
 
 from .common import Disk, R, Y, G, C, N, LEVEL_COLOR
 
+# Total rule width of the per-disk table. Bumped from 184 -> 196 when the
+# HEALTH_CHK column (12 wide) was added (v0.17.0); keep the rules/sub-headers in
+# lockstep with the header/row format strings below.
+TABLE_W = 196
+
 
 def fmt_poh(poh) -> str:
     return "N/A" if poh is None else f"{poh}h(~{poh/8766:.1f}y)"
@@ -66,6 +71,23 @@ def _status_cell(d: Disk) -> str:
     return f"{'':10}"
 
 
+def _health_chk_cell(d: Disk) -> str:
+    """12-visible-char HEALTH_CHK cell: last COMPLETED long self-test, read
+    passively from the drive's self-test log (selftest_last_*), so it reflects
+    the last long test whoever triggered it (burn-in / [m] health-check / a manual
+    smartctl). Age is POH-relative (`hPOH` suffix), NOT wall-clock — the drive
+    logs power-on hours, not a date. '-' when none recorded."""
+    if not d.selftest_last_result:
+        return f"{'-':<12}"
+    ok = "without error" in d.selftest_last_result.lower()
+    tag = "OK" if ok else "ERR"
+    age = ""
+    if (d.selftest_last_poh is not None and d.poh is not None
+            and d.poh >= d.selftest_last_poh):
+        age = f" {d.poh - d.selftest_last_poh}hPOH"
+    return (G if ok else R) + f"{(tag + age)[:12]:<12}" + N
+
+
 def _disk_row(d: Disk) -> str:
     wear_used = "N/A" if d.wear_val is None else f"{100 - d.wear_val}%"
     end_left = "N/A" if d.end_left is None else f"{d.end_left:.1f}%"
@@ -88,19 +110,21 @@ def _disk_row(d: Disk) -> str:
         f"{(d.iface or '?'):<5}{(d.model or '?')[:23]:<24}"
         f"{(d.serial or 'N/A')[:17]:<18}{fmt_poh(d.poh):<14}"
         f"{wear_used:<11}{end_left:<11}{written:<19}{d.realloc:<6}"
-        f"{d.health:<9}{pool[:20]:<21}{_status_cell(d)}{color_level(d.level)}")
+        f"{d.health:<9}{pool[:20]:<21}{_status_cell(d)}"
+        f"{_health_chk_cell(d)}{color_level(d.level)}")
 
 
 def _subhdr(label: str) -> str:
     s = f"--- {label} "
-    return C + s + "-" * max(0, 184 - len(s)) + N
+    return C + s + "-" * max(0, TABLE_W - len(s)) + N
 
 
 def render_table(disks: list[Disk]) -> str:
     hdr = (f"{'BAY':<8}{'DEV':<10}{'IF':<5}{'MODEL':<24}{'SERIAL':<18}"
            f"{'POWER_ON':<14}{'WEAR(used)':<11}{'END(left)':<11}"
-           f"{'WRITTEN':<19}{'BAD':<6}{'HEALTH':<9}{'POOL/ARRAY':<21}{'STATUS':<10}{'LEVEL'}")
-    lines = ["=" * 184, hdr, "-" * 184]
+           f"{'WRITTEN':<19}{'BAD':<6}{'HEALTH':<9}{'POOL/ARRAY':<21}{'STATUS':<10}"
+           f"{'HEALTH_CHK':<12}{'LEVEL'}")
+    lines = ["=" * TABLE_W, hdr, "-" * TABLE_W]
     # Group hardware (PERC RAID volume members) above software (ZFS + free),
     # but only when both kinds are present — single-type boxes stay flat.
     hw = [d for d in disks if d.array_type == "HW"]
@@ -112,7 +136,7 @@ def render_table(disks: list[Disk]) -> str:
         lines += [_disk_row(d) for d in sw]
     else:
         lines += [_disk_row(d) for d in hw + sw]
-    lines.append("=" * 184)
+    lines.append("=" * TABLE_W)
     return "\n".join(lines)
 
 
@@ -124,16 +148,19 @@ def render_storage(rows: list[dict]) -> str:
         return ""
     out = ["Storage summary:",
            f"  {'TYPE':<5}{'NAME':<16}{'LEVEL':<9}{'STATE':<10}"
-           f"{'SIZE':<10}{'USED':<10}{'FREE'}"]
+           f"{'SIZE':<10}{'USED':<10}{'FREE':<10}{'SCRUB':<12}{'TRIM'}"]
     for r in rows:
         st = str(r.get("state", "?"))
         low = st.lower()
         col = G if (low.startswith("optl") or low == "online") else (
             Y if low == "degraded" else R)
+        # SCRUB/TRIM are per-pool (SW rows); HW VDs show '-'. Values are
+        # pre-formatted display strings ('2d ago' / '') set by core.pool_maint.
         out.append(
             f"  {r['kind']:<5}{str(r['name'])[:15]:<16}{str(r['level'])[:8]:<9}"
             f"{col}{st[:9]:<10}{N}{str(r['size'])[:9]:<10}"
-            f"{str(r['used'])[:9]:<10}{r['free']}")
+            f"{str(r['used'])[:9]:<10}{str(r['free'])[:9]:<10}"
+            f"{(r.get('last_scrub') or '-'):<12}{r.get('last_trim') or '-'}")
     return "\n".join(out)
 
 
@@ -144,9 +171,15 @@ def render_pools(pools: list[dict]) -> str:
     for p in pools:
         bad = p["health"] != "ONLINE"
         tag = R if bad else G
+        # scrub/trim are pre-formatted display strings ('2d ago' / '') set by
+        # core.pool_maint; shown only when the caller enriched the pool dict.
+        maint = ""
+        if "last_scrub" in p or "last_trim" in p:
+            maint = (f"  scrub={(p.get('last_scrub') or '-'):<9}"
+                     f"trim={p.get('last_trim') or '-'}")
         lines.append(f"  {tag}{p['name']:<10}{p['size']:<8}{p['alloc']:<8}"
                      f"free={p['free']:<8}{p['health']:<10}cap={p['cap']}{N}"
-                     f"{'  <-- not ONLINE' if bad else ''}")
+                     f"{maint}{'  <-- not ONLINE' if bad else ''}")
     return "\n".join(lines)
 
 

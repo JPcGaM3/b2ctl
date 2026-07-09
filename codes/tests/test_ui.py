@@ -215,3 +215,54 @@ class TestBurninProgress:
                "sc_running": False, "sc_pct": 100, "sc_eta": None, "sc_bad": 3,
                "done": True}
         assert "done (3 bad)" in ui.render_burnin_row(row)
+
+
+class TestHealthChkColumn:
+    """v0.17.0: the per-disk HEALTH_CHK column (last long self-test, POH-relative)."""
+
+    def test_header_has_health_chk(self):
+        out = ui.render_table([_disk()])
+        assert "HEALTH_CHK" in out.splitlines()[1]
+
+    def test_cell_ok_with_poh_age(self):
+        d = _disk(poh=18300)
+        d.selftest_last_result = "Completed without error"
+        d.selftest_last_poh = 18200
+        cell = ui._health_chk_cell(d)
+        assert "OK" in cell
+        assert "100hPOH" in cell           # 18300 - 18200
+
+    def test_cell_err_on_failure(self):
+        d = _disk(poh=12500)
+        d.selftest_last_result = "Completed: read failure"
+        d.selftest_last_poh = 12000
+        assert "ERR" in ui._health_chk_cell(d)
+
+    def test_cell_dash_when_no_selftest(self):
+        d = _disk()
+        assert ui._health_chk_cell(d).strip() == "-"
+
+
+class TestPoolMaintColumns:
+    """last scrub / last trim cells in the pool + storage tables."""
+
+    def test_render_pools_shows_scrub_trim_when_enriched(self):
+        pools = [{"name": "tank", "size": "1T", "alloc": "10G", "free": "900G",
+                  "health": "ONLINE", "cap": "1%",
+                  "last_scrub": "2d ago", "last_trim": "5d ago"}]
+        out = ui.render_pools(pools)
+        assert "scrub=2d ago" in out and "trim=5d ago" in out
+
+    def test_render_pools_omits_when_not_enriched(self):
+        pools = [{"name": "tank", "size": "1T", "alloc": "10G", "free": "900G",
+                  "health": "ONLINE", "cap": "1%"}]
+        out = ui.render_pools(pools)
+        assert "scrub=" not in out            # backward compatible
+
+    def test_render_storage_scrub_trim_columns(self):
+        rows = [{"kind": "SW", "name": "tank", "level": "raidz1", "state": "ONLINE",
+                 "size": "1T", "used": "10G", "free": "900G",
+                 "last_scrub": "2d ago", "last_trim": ""}]
+        out = ui.render_storage(rows)
+        assert "SCRUB" in out and "TRIM" in out
+        assert "2d ago" in out

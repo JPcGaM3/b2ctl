@@ -101,6 +101,59 @@ def read(d: Disk, tbw_table: dict) -> None:
         d.selftest_pct = stt["pct"]
         d.selftest_eta = ui.fmt_eta(stt["eta_min"])
 
+    # Last COMPLETED long self-test from the drive's OWN self-test LOG (same -a
+    # output, no extra subprocess). Feeds the HEALTH_CHK column passively — the
+    # drive persists this across reboots, indexed by power-on hours (v0.17.0).
+    res, hrs = _parse_selftest_log(out)
+    if res:
+        d.selftest_last_result = res
+        d.selftest_last_poh = hrs
+
+
+def _parse_selftest_log(out: str) -> tuple[str, int | None]:
+    """Return (result, lifetime_hours) of the most recent COMPLETED long
+    self-test from the SMART self-test LOG, or ('', None).
+
+    'long' = ATA 'Extended' or SAS 'Background long' or NVMe 'Extended'. smartctl
+    lists newest first, so the first matching row wins. Three table shapes are
+    handled (best-effort / version-tolerant):
+      ATA/SAS  '# N  Extended offline  Completed …  … LifeTime(hours)'
+      NVMe     'Self-test Log (NVMe Log 0x06)' header, then bare-index rows
+               ' N  Extended  Completed without error  <Power_on_Hours> …'
+    In every shape, once the leading index is stripped the columns split on
+    2+-space gaps and _selftest_row() reads the description (col 0), status
+    (col 1) and the last all-digit column as lifetime hours. Short/conveyance
+    tests are ignored — only the long test counts as a health check."""
+    in_nvme = False
+    for line in out.splitlines():
+        s = line.strip()
+        if s.startswith("#"):                          # ATA / SAS row
+            r = _selftest_row(re.sub(r"^#\s*\d+\s+", "", s))
+            if r:
+                return r
+        elif re.search(r"Self-test Log \(NVMe", s, re.I):
+            in_nvme = True                             # NVMe self-test block opens
+        elif in_nvme and re.match(r"\d", s):           # NVMe row: bare index, no '#'
+            r = _selftest_row(re.sub(r"^\d+\s+", "", s))
+            if r:
+                return r
+    return "", None
+
+
+def _selftest_row(body: str) -> tuple[str, int | None] | None:
+    """Parse ONE self-test-log row body (leading index already stripped): columns
+    split on 2+-space gaps -> (status, lifetime_hours) for a LONG test, else
+    None (short/conveyance rows, or too few columns)."""
+    cols = re.split(r"\s{2,}", body)                   # columns are 2+-space gaps
+    if len(cols) < 2 or not re.search(r"extended|background long", cols[0], re.I):
+        return None
+    hours = None
+    for c in reversed(cols):
+        if c.strip().isdigit():
+            hours = int(c.strip())
+            break
+    return cols[1].strip(), hours
+
 
 def _parse_ata(d: Disk, out: str) -> None:
     d.iface = d.iface or "SATA"

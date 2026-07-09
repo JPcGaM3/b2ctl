@@ -169,5 +169,31 @@ class TestZfsActionsAuxReplace(unittest.TestCase):
                          "/dev/disk/by-id/ata-LOG")
 
 
+class TestZfsActionsScrubTrim(unittest.TestCase):
+    """scrub/trim wrappers: exit-code mapping + action/pool forwarding to _cmd_maint."""
+
+    def test_scrub_trim_exit_codes(self):
+        for name, action in (("scrub", "scrub"), ("trim", "trim")):
+            with self.subTest(action=name):
+                with patch("b2ctl.zfs_actions.spec.load", return_value={}), \
+                     patch("b2ctl.zfs_actions.watch._cmd_maint", return_value=True):
+                    self.assertEqual(getattr(zfs_actions, name)("tank"), 0)
+                with patch("b2ctl.zfs_actions.spec.load", return_value={}), \
+                     patch("b2ctl.zfs_actions.watch._cmd_maint", return_value=False):
+                    self.assertEqual(getattr(zfs_actions, name)("tank"), 1)
+
+    @patch("b2ctl.zfs_actions.spec.load", return_value={})
+    @patch("b2ctl.zfs_actions.watch._cmd_maint", return_value=True)
+    def test_scrub_forwards_action_and_pool(self, mock_cmd, _load):
+        zfs_actions.scrub("tank")
+        mock_cmd.assert_called_once_with({}, action="scrub", pool="tank")
+
+    @patch("b2ctl.zfs_actions.spec.load", return_value={})
+    @patch("b2ctl.zfs_actions.watch._cmd_maint", return_value=True)
+    def test_trim_forwards_action_and_pool(self, mock_cmd, _load):
+        zfs_actions.trim("tank")
+        mock_cmd.assert_called_once_with({}, action="trim", pool="tank")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -54,8 +54,9 @@ those only work behind a RAID controller and are removed in this build.
 | `hba.py` | enumerate disks, by-id index, bay map + **remap** | `lsblk`, `sas2ircu` |
 | `locate.py` | LED locate: perccli (PERC PD) / ledctl → dd (raw), timed | `perccli`, `ledctl`, `dd` |
 | `smart.py` | direct SMART read + parse, endurance | `smartctl` |
-| `zfs.py` | pool/topology parse, membership, actions | `zpool`, `wipefs`, `sgdisk` |
-| `core.py` | the `scan()` pipeline | (composes the above) |
+| `zfs.py` | pool/topology parse, membership, actions, scrub/trim, partition, timers | `zpool`, `wipefs`, `sgdisk`, `udevadm`, `systemctl` |
+| `maint.py` | append-only maintenance history (`maint.jsonl`) + `rel_time()` (v0.17.0) | none |
+| `core.py` | the `scan()` pipeline, `pool_maint()` scrub/trim display strings | (composes the above) |
 | `ui.py` | table / pools / details / new-disk rendering | none |
 | `watch.py` | interactive select()-loop, event + command handlers | `lsblk` (poll) |
 | `cli.py` | argparse, subcommand dispatch, `--locate` blink | — |
@@ -139,6 +140,20 @@ smartctl -a -d scsi /dev/sdX  # fallback
   `tbw_rating` from `spec.lookup(model)`;
   `end_left = clamp((rating - written)/rating * 100, 0, 100)`. HDDs force
   `wear_val=None`.
+- **Self-test log → HEALTH_CHK (v0.17.0).** The SAME `-a` output is parsed by
+  `smart._parse_selftest_log(out) -> (result, lifetime_hours)`: the newest long
+  self-test row whose description matches `Extended` (ATA / NVMe) or
+  `Background long` (SAS), taking its status column + the last all-digit column
+  (LifeTime/Power_on_Hours). Three table shapes are handled — ATA/SAS `# N …`
+  rows, and NVMe's `Self-test Log (NVMe Log 0x06)` block with bare-index rows
+  (no `#`); a shared `_selftest_row()` splits columns once the index is stripped.
+  Fills
+  `Disk.selftest_last_result` / `Disk.selftest_last_poh` — **zero extra
+  subprocess**. Short/conveyance rows are ignored. `ui._health_chk_cell` renders
+  `OK`/`ERR` + ` <poh - selftest_last_poh>hPOH` (power-on-hours-relative, NOT
+  wall-clock — the drive logs the test against lifetime hours). This is passive:
+  it reflects the last long test whoever fired it (burn-in, `[m]` health-check, or
+  a manual `smartctl`).
 
 **Scan concurrency (v0.11.1).** `core.scan` reads SMART on **two** thread pools:
 direct/IT-mode targets (`smart_dtype` empty) one-thread-per-disk up to 16 (F-077);
@@ -180,21 +195,43 @@ resilvering pool, which is rare). Finds `replacing-N` vdev blocks; returns
 | swap-to-spare | `zpool replace <pool> <member> <spare-token>` |
 | demote-to-spare | `zpool detach <pool> <member>` → `zpool add <pool> spare <by-id>` |
 | add mirror vdev | `zpool add <pool> mirror <a> <b>` |
-| add L2ARC cache | `zpool add -f <pool> cache <by-id...>` (`zfs.add_cache`) |
-| add SLOG log | `zpool add -f <pool> log [mirror] <by-id...>` (`zfs.add_log`; ≥2 devs → mirrored) |
+| add L2ARC cache | `zpool add -f <pool> cache <by-id...>` (`zfs.add_cache`; never a topology — L2ARC can't be mirrored/raidz) |
+| add SLOG log | `zpool add -f <pool> log <spec>` (`zfs.add_log`, v0.17.0 `raid_type=`): `single` → `<devs>`; `mirror` (≥2) → `mirror <devs>`; `raid10` (even ≥4) → `mirror a b mirror c d …`; `None` → legacy auto (mirror if >1). **raidz REJECTED** → `(False, "raidz is invalid for a SLOG vdev …")`, no command run |
 | remove aux vdev | `zpool remove <pool> <token>` (`zfs.remove_vdev`; cache/log/spare leaf) |
 | attach | `zpool attach <pool> <existing> <new>` |
 | create pool | `zpool create ...` (checks `wipefs -n` for existing labels first) |
-| create RAID10 | `zpool create ... <name> mirror a b mirror c d ...` (repeated `mirror` from disk pairs) |
+| create RAID10 | `zpool create ... <name> mirror a b mirror c d ...` (repeated `mirror` from disk pairs, shared `zfs._mirror_pairs`) |
+| over-provision partition (v0.17.0) | `sgdisk -n 1:0:+<size> -t 1:bf01 <dev>` → **mandatory** `udevadm settle` (`zfs.partition`; returns the `-part1` token) |
+| manual scrub | `zpool scrub <pool>` (`zfs.start_scrub`; kernel runs it in the background) |
+| manual trim | `zpool trim <pool>` (`zfs.start_trim`) |
 | wipe | `zpool labelclear -f <dev>` → `wipefs -a <dev>` → `sgdisk --zap-all <dev>` |
 
 **Aux vdevs (runbook STEP 03).** L2ARC `cache` loss is harmless (cache miss),
-so it is added unguarded. SLOG `log` holds in-flight sync writes: `add_log`
-mirrors automatically with ≥2 devices, and the watch/CLI workflow warns on a
-single (non-mirrored) log and always reminds the operator to use a **PLP** SSD
-(PLP is not reliably exposed by SMART, so it is a warning, not a gate). All three
-honor `--dry-run`. CLI: `b2ctl cache-add|cache-rm|log-add|log-rm <pool> <dev…>`;
-watch: `[e]xtend`.
+so it is added unguarded and never given a topology (L2ARC can't be mirrored or
+raidz). SLOG `log` holds in-flight sync writes: since **v0.17.0** `add_log` takes
+an explicit `raid_type` (`single`/`mirror`/`raid10`, `None` = legacy auto-mirror
+on ≥2) — watch `[e]xtend → [2]` prompts it when ≥2 devs, CLI `log-add
+--mirror|--raid10`; **raidz is rejected** (a log vdev cannot be raidz). The
+workflow still warns on a single (non-mirrored) log and always reminds the
+operator to use a **PLP** SSD (PLP is not reliably exposed by SMART, so it is a
+warning, not a gate). All honor `--dry-run`. CLI: `b2ctl
+cache-add|cache-rm|log-add|log-rm <pool> <dev…>`; watch: `[e]xtend`.
+
+**Over-provisioning (v0.17.0, first partition-creation in the repo).** When a
+`--size` (CLI) / "size to use per device" prompt (watch) is given, `zfs.partition(
+dev, size, *, type_code="bf01", max_bytes=None, dry_run=)` runs `sgdisk -n
+1:0:+<size> -t 1:bf01 <dev>` then a **mandatory** `run([_tool("udevadm"),
+"settle"])` (skipped under dry-run) — the `-part1` by-id symlink appears
+asynchronously, so without settle the follow-up `zpool add … -part1` races and
+fails. It returns the first-partition token from `zfs._part1_path` (by-id →
+`-part1`, nvme/mmcblk/loop → `p1`, else `1`; string convention only, never
+`os.path.exists`, so it resolves under dry-run). `zfs.parse_size` turns
+`32G`/`512M`/`1.5T` into bytes. **Blank size = whole disk** (idiomatic
+`wholedisk=on`, unchanged). On create the partition step runs **after** the
+dirty-disk wipe (whose `sgdisk --zap-all` would destroy an earlier partition) and
+**before** `create_pool`. `sgdisk` is already in `safety.WRITE_CMDS` → dry-run
+gated. No perf difference vs whole disk when aligned (sgdisk's 1 MiB default) with
+`ashift=12`; the reserve buys SSD endurance/consistency, costs capacity (ADR-003).
 
 **Aux-vdev repair (v0.14.0).** When an L2ARC cache disk or one leg of a mirrored
 SLOG dies, pull it, insert a new disk, and repair through the tool. Enumerated by
@@ -253,6 +290,60 @@ CLI `b2ctl burnin <bay\|dev> [<bay\|dev> …] [--scan] [--short]`,
 (`[v]`iew / `[c]`ancel-one / cancel-`[a]`ll / `[n]`ew). Only spare/new disks
 (`in_pool` is refused). The only writes are the self-test trigger and a read-only
 `badblocks`; nothing on the disk is modified.
+
+### 3.6b Manual maintenance — scrub / trim / health-check + history (v0.17.0)
+
+Manual scrub/trim is the **primary** maintenance path (scheduled timers are
+secondary and default off — ADR-003). The kernel owns each op, so there is **no
+Popen / state file** (unlike burn-in): b2ctl issues the command and polls.
+
+| step | command / mechanism |
+|------|---------------------|
+| start scrub | `zpool scrub <pool>` (`zfs.start_scrub`) — returns at once, kernel scrubs in the background |
+| start trim | `zpool trim <pool>` (`zfs.start_trim`) |
+| scrub progress | `zpool status <pool>` → `zfs.poll_scrub_status` (sibling of `poll_resilver_status`): matches the `scan: scrub` line — `scrub in progress … N% done … <hh:mm:ss> to go`, or `scrub repaired … with N errors` = completed. `ok=False` on empty output; a resilver line never matches |
+| trim progress | `zpool status -t <pool>` → `zfs.poll_trim_status`: per-leaf `(trimming\|untrimmed\|trimmed\|trim unsupported)` + optional `%`. **Coarse / OpenZFS-version-dependent** — `done` may be None even while trimming |
+| last-scrub date | `zpool status <pool>` → `zfs.last_scrub_date`: parses the scan line's `on <ctime>` with `datetime.strptime(raw, "%a %b %d %H:%M:%S %Y")` → ISO string. **Pure read (§9).** ZFS keeps only the latest scrub → older runs live only in `maint.jsonl` |
+| health-check | `smartctl -t long [-d <dtype>] <dev>` (reuses `burnin.start_selftest`) on picked disk(s) — non-blocking; the verdict lands in the drive's self-test log → HEALTH_CHK |
+
+**Live watch (`watch._wait_scrub`/`_wait_trim`).** 2 s poll with a `% done` bar.
+`_wait_scrub(pool, baseline)` captures the pre-scrub `last_scrub_date` and accepts
+a "completed" reading only once that date **advances** past `baseline` — so the
+persisted OLD `scrub repaired` line isn't mistaken for the scrub just issued.
+**Ctrl-C DETACHES** (the kernel keeps running); 5 consecutive unreadable
+`zpool status` polls stop the watch. All honor `--dry-run`.
+
+**History — `maint.py` + `maint.jsonl`.** A dedicated **append-only** log beside
+`ops.jsonl`/`burnin.json`, resolved from `safety.LOG_DIR` **at call time** so the
+sim/test `safety.LOG_DIR` redirect catches it for free (ADR-002 pattern). It
+copies safety's O_APPEND-of-one-line idiom (POSIX-atomic), **not** the ops schema.
+Record:
+
+```json
+{"ts": "2026-07-08T03:00:00", "kind": "scrub", "target": "tank", "status": "ok",
+ "detail": "completed at 2026-07-08T02:58:41"}
+```
+
+- `kind` ∈ `scrub`/`trim`/`health`; `target` = pool name (scrub/trim) or disk
+  serial (health); `status` ∈ `started`/`ok`/`fail`; `ts` =
+  `datetime.now().isoformat(timespec="seconds")` (naive-local, like safety).
+- API: `log_event(kind, target, status, detail)` (best-effort — a write failure
+  never aborts the op, the kernel already ran it), `load_events(last=N)`,
+  `last_event(kind, target)`, `rel_time(iso_or_epoch) -> "2m ago"`.
+
+**Read-path purity (§9).** The pools SCRUB column is a **pure live read**
+(`core.pool_maint` → `zfs.last_scrub_date`, fallback `maint.last_event("scrub").ts`;
+TRIM only from `maint.last_event("trim")` — ZFS has no live last-trim date).
+Writing a completion record for a background/timer scrub happens **only** in
+`watch._reconcile_scrub_history` (called from watch's refresh, which already
+mutates via `prune_orphan_timers`), deduped on the ISO date embedded in `detail`,
+and honoring `--dry-run`. **`status`/`top` never write.**
+
+**Surfaces.** watch `[m]aint` → `_cmd_maint(tbw, *, action=None, pool=None)`
+(branches on action first: scrub/trim per-pool, health per-disk).
+`zfs_actions.scrub(pool)`/`trim(pool)` → `_cmd_maint(action=…, pool=…)`. CLI
+`b2ctl scrub|trim [<pool>]` (mutate → **root required**) and `b2ctl maint --log
+[--last N]` (read-only history view → **root-exempt**, like `log`).
 
 ### 3.7 LED locate — `locate.py`
 `sas2ircu ... LOCATE <slot>` is **not used** — on this backplane it lights a
@@ -738,6 +829,35 @@ Example — loosen HDD grading, tighten SSD endurance, enable the burn-in POH wa
     "ssd": { "endurance_crit": 25, "poh_warn": 40000 } } }
 ```
 
+### Per-pool maintenance settings — `pools` / `pool_defaults` (v0.17.0)
+
+Two new config sections record the create-time maintenance intent:
+
+```json
+{ "pools":         { "tank": { "autotrim": "off", "autoscrub": false } },
+  "pool_defaults": { "autotrim": "off", "autoscrub": false } }
+```
+
+- `pools.<name>` — per-pool `{autotrim, autoscrub}`, written by
+  `config.set_pool_settings(name, *, autotrim, autoscrub)` on a successful create,
+  dropped by `config.remove_pool_settings(name)` on destroy. Read via
+  `config.pool_settings(name)`.
+- `pool_defaults` — sticky `{autotrim, autoscrub}` that pre-fills the next create's
+  prompts; `config.pool_defaults()` reads it (defaults `autotrim="off"`,
+  `autoscrub=False`), `config.set_pool_defaults(*, autotrim, autoscrub)` updates it
+  after each create. **This is the only source of the autoscrub default-OFF** — there
+  is no `AUTOSCRUB_DEFAULT` constant in code.
+- Both are **shape-guarded** in `load()` (a non-dict `pools`, or a per-pool value
+  that isn't a dict, falls back to `{}` for that entry — the module's
+  malformed→defaults contract).
+
+Every single-setting writer (`set_mode`, `set_pool_settings`,
+`set_pool_defaults`, `remove_pool_settings`) now shares `config._load_for_write()`
+(reads the file preserving **all** existing keys; **raises** on an unparseable /
+non-object file rather than clobbering it — F-075) and `config._atomic_write(data)`
+(tmp-in-same-dir + `os.replace`, so a crash/ENOSPC can't leave a truncated config
+read as all-defaults), then clears `_cache`.
+
 ### Subprocesses added for RAID-mode (new in v0.5.0)
 
 | command | purpose |
@@ -884,28 +1004,37 @@ writer of `/etc/b2ctl/config.json`.
 
 ## ZFS pool lifecycle + maintenance timers
 
-`create` (`[n]ew-pool` / `b2ctl create`) prompts each pool property with an
-SSD-optimal default (`ashift=12`, `compression=lz4`, `atime=off`, `xattr=sa`,
-`dnodesize=auto`, `acltype=posixacl`, `recordsize=128K`) and an **autotrim
-choice**.
+`create` (`[n]ew-pool` / `b2ctl create`) prompts an over-provision **size** (blank
+= whole disk; see the over-provisioning note in §3.6), then each pool property with
+an SSD-optimal default (`ashift=12`, `compression=lz4`, `atime=off`, `xattr=sa`,
+`dnodesize=auto`, `acltype=posixacl`, `recordsize=128K`) and two independent
+**autotrim** + **autoscrub** choices.
 
 Maintenance is scheduled via the **distro systemd timer templates** shipped
 (disabled) by `zfsutils-linux` — b2ctl enables one instance per pool (v0.16.0;
-replaces the previous `/etc/cron.d/b2ctl-<pool>` writer). TRIM and SCRUB are
-unrelated tasks (TRIM tells the SSD which blocks are free; SCRUB reads every
-allocated block, verifies checksums, self-heals — the actual bad-sector/bitrot
-defense), so **the SCRUB timer always enables, regardless of the autotrim choice**.
-Only TRIM is conditional (`autotrim=on` already trims continuously via ZFS itself,
-so a trim timer would be redundant):
+replaces the previous `/etc/cron.d/b2ctl-<pool>` writer).
 
-- **off** — `autotrim=off` → `systemctl enable --now zfs-scrub-monthly@<pool>.timer`
-  **and** `zfs-trim-monthly@<pool>.timer`.
-- **on** — `autotrim=on` (continuous trim) → `zfs-scrub-monthly@<pool>.timer` only.
+**autoscrub is opt-in, default OFF (v0.17.0 — REVERSES v0.16.0's always-on scrub,
+ADR-003).** SCRUB reads every allocated block, verifies checksums, and self-heals —
+the actual bad-sector/bitrot defense — but the scrub timer now enables **only** when
+the operator says yes at the create prompt (default off; seeded from
+`config.pool_defaults()`, no in-code `AUTOSCRUB_DEFAULT`). When off, b2ctl prints a
+`[!] autoscrub OFF …` warning and manual `b2ctl scrub`/`[m]aint` (§3.6b) is the
+primary self-heal path. TRIM is a separate, unrelated task (tells the SSD which
+blocks are free) and its timer enables only on `autotrim=off` (`autotrim=on` trims
+continuously via ZFS itself, so a trim timer would be redundant):
+
+- **autoscrub on** → `systemctl enable --now zfs-scrub-monthly@<pool>.timer`.
+- **autotrim off** → `systemctl enable --now zfs-trim-monthly@<pool>.timer`.
+- **autoscrub off + autotrim on** → **no timers enabled** for that pool.
 
 `enable --now` starts the *timer* (schedules the next `OnCalendar` run — appears in
-`systemctl list-timers`); it does NOT kick off an immediate scrub. `zfs.install_pool_timers(pool, *,
-include_trim=True, dry_run=False)` implements the split; watch passes
-`include_trim = pool_opts["autotrim"] == "off"`.
+`systemctl list-timers`); it does NOT kick off an immediate scrub.
+`zfs.install_pool_timers(pool, *, include_scrub=True, include_trim=True,
+dry_run=False)` implements the split; watch passes `include_scrub = autoscrub_on`
+and `include_trim = pool_opts["autotrim"] == "off"`. `ok` reflects the **scrub**
+timer specifically, but when scrub was NOT requested there is nothing to fail on, so
+`ok=True` (v0.17.0) — unlike v0.16.0 where a missing scrub timer was the failure.
 
 **No double-scrub with the Debian cron.** `zfsutils-linux` also ships
 `/etc/cron.d/zfsutils-linux`, which scrubs/trims **every** online pool monthly,
@@ -931,8 +1060,15 @@ suppressed under `--dry-run`; the read probes use `run()` and still execute.
 
 `destroy` (`[x]` / `b2ctl destroy <pool>`) runs `zpool destroy <pool>` behind a
 double-confirm (must type the pool name; ALL-DATA-LOST warning; audited via
-`safety.begin_op/end_op`) and then `zfs.remove_pool_timers` best-effort
-`systemctl disable --now` for the pool's scrub + trim timers.
+`safety.begin_op/end_op`), then `zfs.remove_pool_timers` best-effort `systemctl
+disable --now` for the pool's scrub + trim timers, and `config.remove_pool_settings(
+pool)` to drop the per-pool record from `/etc/b2ctl/config.json` (v0.17.0).
+
+**Per-pool config (v0.17.0).** On a successful create, watch records the pool's
+maintenance intent with `config.set_pool_settings(name, autotrim=…, autoscrub=…)`
+(→ `pools.<name>` in `config.json`) and refreshes the sticky
+`config.set_pool_defaults(…)` (→ `pool_defaults`, which pre-fills the next create's
+prompts). See §10.
 
 Pools destroyed **outside** b2ctl (manual `zpool destroy`) leave stale enabled
 timers; `b2ctl watch` **prunes orphan timers** at startup

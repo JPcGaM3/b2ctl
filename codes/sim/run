@@ -46,6 +46,10 @@ _safety.LOG_DIR = _simvar
 _safety.SNAP_DIR = os.path.join(_simvar, "snapshots")
 _safety.LOG_FILE = os.path.join(_simvar, "ops.jsonl")
 
+# v0.17.0: create/destroy persist per-pool autotrim/autoscrub to config.json —
+# redirect it under sim/var/ so the sim never writes the real /etc/b2ctl/config.json.
+_cfg.CONFIG_PATH = os.path.join(_simvar, "config.json")
+
 from b2ctl.cli import main  # noqa: E402
 
 sys.exit(main(sys.argv[1:]))

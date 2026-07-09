@@ -165,10 +165,31 @@ def assemble_storage(disks: list[Disk], pools: list[dict],
                      "state": v.get("state", "?"), "size": v.get("size", "-"),
                      "used": used, "free": free})
     for p in pools or []:
-        rows.append({"kind": "SW", "name": p["name"],
-                     "level": zfs.pool_level(p["name"]), "state": p["health"],
-                     "size": p["size"], "used": p["alloc"], "free": p["free"]})
+        row = {"kind": "SW", "name": p["name"],
+               "level": zfs.pool_level(p["name"]), "state": p["health"],
+               "size": p["size"], "used": p["alloc"], "free": p["free"]}
+        row.update(pool_maint(p["name"]))
+        rows.append(row)
     return rows
+
+
+def pool_maint(name: str) -> dict:
+    """Per-pool scrub/trim display strings for the maintenance columns.
+
+    PURE READ (CLAUDE.md §9): last scrub is read LIVE from `zpool status`
+    (`zfs.last_scrub_date`), falling back to the maint.jsonl history; last trim
+    comes only from maint.jsonl (ZFS exposes no live last-trim date). Never
+    writes — reconciling background scrubs into history happens only in watch's
+    refresh and the `maint --log` view, never on the read path."""
+    from . import maint
+    scrub_iso = zfs.last_scrub_date(name)
+    if not scrub_iso:
+        ev = maint.last_event("scrub", name)
+        scrub_iso = ev.get("ts") if ev else None
+    tev = maint.last_event("trim", name)
+    trim_iso = tev.get("ts") if tev else None
+    return {"last_scrub": maint.rel_time(scrub_iso) if scrub_iso else "",
+            "last_trim": maint.rel_time(trim_iso) if trim_iso else ""}
 
 
 def scan_one(dev: str, tbw_table=None) -> Disk:

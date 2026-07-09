@@ -985,5 +985,238 @@ class TestSharedTopoSnapshot:
         mock_topo.assert_not_called()
 
 
+# ========================================================================== #
+# v0.17.0 — SLOG topology, over-provisioning, manual scrub/trim, autoscrub
+# ========================================================================== #
+
+class TestMirrorPairs(unittest.TestCase):
+    def test_pairs(self):
+        assert zfs._mirror_pairs(["a", "b", "c", "d"]) == \
+            ["mirror", "a", "b", "mirror", "c", "d"]
+
+    def test_single_pair(self):
+        assert zfs._mirror_pairs(["a", "b"]) == ["mirror", "a", "b"]
+
+
+class TestAddLogTopology(unittest.TestCase):
+    """add_log(raid_type=): single/mirror/raid10; raidz rejected."""
+
+    @patch("b2ctl.zfs.run_check")
+    def test_mirror(self, mock_rc):
+        mock_rc.return_value = (True, "")
+        zfs.add_log("tank", ["a", "b"], raid_type="mirror")
+        mock_rc.assert_called_with(
+            ["zpool", "add", "-f", "tank", "log", "mirror", "a", "b"], dry_run=False)
+
+    @patch("b2ctl.zfs.run_check")
+    def test_raid10(self, mock_rc):
+        mock_rc.return_value = (True, "")
+        zfs.add_log("tank", ["a", "b", "c", "d"], raid_type="raid10")
+        mock_rc.assert_called_with(
+            ["zpool", "add", "-f", "tank", "log", "mirror", "a", "b",
+             "mirror", "c", "d"], dry_run=False)
+
+    @patch("b2ctl.zfs.run_check")
+    def test_single(self, mock_rc):
+        mock_rc.return_value = (True, "")
+        zfs.add_log("tank", ["a"], raid_type="single")
+        mock_rc.assert_called_with(
+            ["zpool", "add", "-f", "tank", "log", "a"], dry_run=False)
+
+    @patch("b2ctl.zfs.run_check")
+    def test_raidz_rejected_no_command(self, mock_rc):
+        ok, msg = zfs.add_log("tank", ["a", "b", "c"], raid_type="raidz1")
+        assert ok is False
+        assert "raidz" in msg.lower()
+        mock_rc.assert_not_called()
+
+    @patch("b2ctl.zfs.run_check")
+    def test_mirror_needs_two(self, mock_rc):
+        ok, msg = zfs.add_log("tank", ["a"], raid_type="mirror")
+        assert ok is False
+        mock_rc.assert_not_called()
+
+    @patch("b2ctl.zfs.run_check")
+    def test_raid10_needs_even_four(self, mock_rc):
+        ok, msg = zfs.add_log("tank", ["a", "b"], raid_type="raid10")
+        assert ok is False
+        mock_rc.assert_not_called()
+
+    @patch("b2ctl.zfs.run_check")
+    def test_legacy_auto_still_mirrors(self, mock_rc):
+        mock_rc.return_value = (True, "")
+        zfs.add_log("tank", ["a", "b"])                 # raid_type=None
+        mock_rc.assert_called_with(
+            ["zpool", "add", "-f", "tank", "log", "mirror", "a", "b"], dry_run=False)
+
+
+class TestZfsPartition(unittest.TestCase):
+    """Over-provisioning: parse_size / _part1_path / partition."""
+
+    def test_parse_size(self):
+        assert zfs.parse_size("32G") == 32 * 2 ** 30
+        assert zfs.parse_size("512M") == 512 * 2 ** 20
+        assert zfs.parse_size("1.5T") == int(1.5 * 2 ** 40)
+        assert zfs.parse_size("1048576") == 1048576
+        assert zfs.parse_size("bad") is None
+        assert zfs.parse_size("") is None
+
+    def test_part1_path(self):
+        assert zfs._part1_path("/dev/disk/by-id/ata-Foo") == "/dev/disk/by-id/ata-Foo-part1"
+        assert zfs._part1_path("/dev/sdb") == "/dev/sdb1"
+        assert zfs._part1_path("/dev/nvme0n1") == "/dev/nvme0n1p1"
+
+    @patch("b2ctl.zfs.run")
+    @patch("b2ctl.zfs.run_check")
+    def test_partition_argv_and_settle(self, mock_rc, mock_run):
+        mock_rc.return_value = (True, "")
+        ok, part = zfs.partition("/dev/disk/by-id/ata-X", "32G")
+        assert ok
+        assert part == "/dev/disk/by-id/ata-X-part1"
+        mock_rc.assert_called_once_with(
+            ["sgdisk", "-n", "1:0:+32G", "-t", "1:bf01", "/dev/disk/by-id/ata-X"],
+            dry_run=False)
+        # MANDATORY udevadm settle after sgdisk
+        assert mock_run.call_args[0][0] == ["udevadm", "settle"]
+
+    @patch("b2ctl.zfs.run")
+    @patch("b2ctl.zfs.run_check")
+    def test_partition_dry_run_returns_path_no_settle(self, mock_rc, mock_run):
+        mock_rc.return_value = (True, "")
+        ok, part = zfs.partition("/dev/sdb", "16G", dry_run=True)
+        assert ok and part == "/dev/sdb1"
+        mock_run.assert_not_called()            # no settle under dry-run
+
+    @patch("b2ctl.zfs.run_check")
+    def test_partition_max_bytes_rejected_no_sgdisk(self, mock_rc):
+        ok, msg = zfs.partition("/dev/sdb", "32G", max_bytes=10)
+        assert ok is False
+        assert "exceeds" in msg
+        mock_rc.assert_not_called()
+
+    @patch("b2ctl.zfs.run")
+    @patch("b2ctl.zfs.run_check")
+    def test_partition_sgdisk_failure(self, mock_rc, mock_run):
+        mock_rc.return_value = (False, "sgdisk boom")
+        ok, msg = zfs.partition("/dev/sdb", "32G")
+        assert ok is False
+        assert "boom" in msg
+        mock_run.assert_not_called()            # never settle on failure
+
+
+class TestScrubTrim(unittest.TestCase):
+    """Manual scrub/trim start + status pollers + last_scrub_date."""
+
+    _SCRUB_PROGRESS = ("  pool: tank\n state: ONLINE\n"
+                       "  scan: scrub in progress since Tue Jul  8 03:00:00 2026\n"
+                       "\t1.00G scanned, 10.0% done, 00:30:00 to go\n")
+    _SCRUB_DONE = ("  pool: tank\n state: ONLINE\n"
+                   "  scan: scrub repaired 0B in 00:01:23 with 0 errors on "
+                   "Tue Jul  8 03:00:00 2026\n")
+    _SCRUB_ERRORS = ("  pool: tank\n state: ONLINE\n"
+                     "  scan: scrub repaired 8K in 00:01:23 with 2 errors on "
+                     "Tue Jul  8 03:00:00 2026\n")
+
+    @patch("b2ctl.zfs.run_check")
+    def test_start_scrub(self, mock_rc):
+        mock_rc.return_value = (True, "")
+        zfs.start_scrub("tank")
+        mock_rc.assert_called_with(["zpool", "scrub", "tank"], dry_run=False)
+
+    @patch("b2ctl.zfs.run_check")
+    def test_start_trim(self, mock_rc):
+        mock_rc.return_value = (True, "")
+        zfs.start_trim("tank", dry_run=True)
+        mock_rc.assert_called_with(["zpool", "trim", "tank"], dry_run=True)
+
+    @patch("b2ctl.zfs.run")
+    def test_poll_scrub_in_progress(self, mock_run):
+        mock_run.return_value = self._SCRUB_PROGRESS
+        st = zfs.poll_scrub_status("tank")
+        assert st["completed"] is False
+        assert st["done"] == 10.0
+        assert st["eta"] == "00:30:00"
+
+    @patch("b2ctl.zfs.run")
+    def test_poll_scrub_completed_clean(self, mock_run):
+        mock_run.return_value = self._SCRUB_DONE
+        st = zfs.poll_scrub_status("tank")
+        assert st["completed"] is True
+        assert st["has_errors"] is False
+
+    @patch("b2ctl.zfs.run")
+    def test_poll_scrub_completed_with_errors(self, mock_run):
+        mock_run.return_value = self._SCRUB_ERRORS
+        st = zfs.poll_scrub_status("tank")
+        assert st["completed"] is True
+        assert st["has_errors"] is True
+
+    @patch("b2ctl.zfs.run")
+    def test_poll_scrub_empty_not_ok(self, mock_run):
+        mock_run.return_value = ""
+        assert zfs.poll_scrub_status("tank")["ok"] is False
+
+    @patch("b2ctl.zfs.run")
+    def test_poll_scrub_resilver_not_treated_as_scrub(self, mock_run):
+        mock_run.return_value = _RESILVER_DONE       # 'resilvered ...', not 'scrub'
+        assert zfs.poll_scrub_status("tank")["completed"] is False
+
+    @patch("b2ctl.zfs.run")
+    def test_poll_trim_progress(self, mock_run):
+        mock_run.return_value = (
+            "  pool: tank\n"
+            "\t/dev/disk/by-id/ata-X  ONLINE  (trimming, 45%)\n")
+        st = zfs.poll_trim_status("tank")
+        assert st["trimming"] is True
+        assert st["done"] == 45.0
+
+    @patch("b2ctl.zfs.run")
+    def test_poll_trim_untrimmed(self, mock_run):
+        mock_run.return_value = (
+            "  pool: tank\n\t/dev/disk/by-id/ata-X  ONLINE  (untrimmed)\n")
+        st = zfs.poll_trim_status("tank")
+        assert st["trimming"] is False
+        assert st["states"]["/dev/disk/by-id/ata-X"] == "untrimmed"
+
+    @patch("b2ctl.zfs.run")
+    def test_poll_trim_empty_not_ok(self, mock_run):
+        mock_run.return_value = ""
+        assert zfs.poll_trim_status("tank")["ok"] is False
+
+    @patch("b2ctl.zfs.run")
+    def test_last_scrub_date_iso(self, mock_run):
+        mock_run.return_value = self._SCRUB_DONE
+        iso = zfs.last_scrub_date("tank")
+        assert iso is not None and iso.startswith("2026-07-08T03:00:00")
+
+    @patch("b2ctl.zfs.run")
+    def test_last_scrub_date_none_when_no_scrub(self, mock_run):
+        mock_run.return_value = _MIRROR_STATUS       # no scan: scrub line
+        assert zfs.last_scrub_date("tank") is None
+
+
+class TestInstallScrubOptOut(unittest.TestCase):
+    """v0.17.0: install_pool_timers(include_scrub=False) skips the scrub timer."""
+
+    def test_include_scrub_false_no_scrub_timer_ok_true(self):
+        with patch("b2ctl.zfs._timer_template_exists", return_value=True), \
+             patch("b2ctl.zfs.run_check", return_value=(True, "")) as rc, \
+             patch("b2ctl.config.tool", side_effect=lambda n: n):
+            ok, msg = zfs.install_pool_timers("tank", include_scrub=False,
+                                              include_trim=True)
+        assert ok is True                       # scrub not requested -> nothing to fail
+        enables = [c.args[0][3] for c in rc.call_args_list if c.args[0][1] == "enable"]
+        assert enables == ["zfs-trim-monthly@tank.timer"]
+
+    def test_both_off_enables_nothing_ok_true(self):
+        with patch("b2ctl.zfs._timer_template_exists", return_value=True), \
+             patch("b2ctl.zfs.run_check", return_value=(True, "")) as rc, \
+             patch("b2ctl.config.tool", side_effect=lambda n: n):
+            ok, msg = zfs.install_pool_timers("tank", include_scrub=False,
+                                              include_trim=False)
+        assert ok is True
+        assert not [c for c in rc.call_args_list if c.args[0][1] == "enable"]
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,6 @@
 # b2ctl — Step-by-step Walkthrough Guide
 
-> **Version:** `0.5.0-itmode` · **Build:** IT-mode / LSI SAS2308 (PERC H710 crossflashed) · Proxmox VE 9.2
+> **Version:** `0.18.0-itmode` · **Build:** IT-mode / LSI SAS2308 (PERC H710 crossflashed) · Proxmox VE 9.2
 
 เอกสารนี้เป็น **walkthrough** สำหรับคนใช้งานจริง (user เปิดแล้วทำตามได้ทีละขั้น).
 ส่วน pass/fail test report อยู่ที่ [`test-checklist.md`](test-checklist.md).
@@ -41,9 +41,7 @@ b2ctl check
   [✔] Running as root
   [✔] smartctl     /usr/sbin/smartctl       (smartctl 7.5 2025-04-30 ...)
   [✔] sas2ircu     /usr/sbin/sas2ircu       (LSI Corporation SAS2 IR Configuration Utility.)
-  [✗] storcli64    not found (needed for RAID mode)
-  [✔] storcli      /usr/local/bin/storcli   (CLI Version = 007.1705.0000.0000 ...)
-  [✔] perccli64    /usr/local/sbin/perccli64 (Status Code = 0)
+  [i] perccli      not found (needed for RAID mode)   ← ปกติสำหรับ IT-mode
   [✔] zpool        /usr/sbin/zpool          (zfs-2.4.2-pve1)
   [✔] wipefs       /usr/sbin/wipefs         (wipefs from util-linux 2.41)
   [✔] sgdisk       /usr/sbin/sgdisk         (GPT fdisk (sgdisk) version 1.0.10)
@@ -59,7 +57,7 @@ b2ctl check
 - **แปลว่า:** tool ครบ, backend = **IT-mode** (HBA — ถูกสำหรับเครื่อง crossflash).
 - **user ดู:**
   - `sas2ircu [✔]` สำคัญสุด — ถ้าขึ้น `[✗]` หรือ "found but won't execute" → bay column จะเป็น `-` ทั้งหมด; แก้ด้วย `apt-get install -y libc6-i386` (sas2ircu เป็น binary 32-bit)
-  - `storcli64 not found` ตรงนี้ **ปกติ** สำหรับ IT-mode (ใช้ใน RAID-mode เท่านั้น)
+  - `perccli not found` ตรงนี้ **ปกติ** สำหรับ IT-mode (ใช้ใน RAID-mode เท่านั้น; storcli ถูกเอาออกแล้ว)
   - `Controllers found: 6 (6 disks in bay map)` — เลข disk > 0 = bay mapping ทำงาน
   - `Config ... missing — using defaults` ไม่ใช่ error — b2ctl ใช้ค่า default ได้เลย (จะสร้าง config ก็ต่อเมื่ออยาก override path/mode)
 
@@ -84,7 +82,6 @@ b2ctl update
 [b2ctl update]
   [i] config       /etc/b2ctl/config.json missing — using defaults
   [✔] sas2ircu     /usr/sbin/sas2ircu
-  [✔] storcli      /usr/local/bin/storcli
   [✔] perccli      /usr/local/sbin/perccli
   [✔] smartctl     /usr/sbin/smartctl
   [✔] zpool        /usr/sbin/zpool
@@ -112,7 +109,7 @@ b2ctl config show
 <pre>
 {
   "tool_paths": {
-    "sas2ircu": "", "storcli": "", "perccli": "",
+    "sas2ircu": "", "perccli": "",
     "smartctl": "", "zpool": "", "...": ""
   },
   "controller": { "mode": "auto", "index": "all" },
@@ -275,9 +272,9 @@ b2ctl watch
 <summary>📋 ดูตัวอย่าง Output จริง</summary>
 
 <pre>
-[r]efresh [a]ssign [o]ffload [s]wap [d]emote [t]oggle-dryrun [n]ew-pool [e]xtend [b]urnin [u]dev-rescue [x]destroy-pool [l]ocate [q]uit
+[r]efresh [a]ssign [o]ffload [s]wap [d]emote [t]oggle-dryrun [n]ew-pool [e]xtend [m]aint [u]dev-rescue [x]destroy-pool [l]ocate [q]uit
 b2ctl&gt; [DRY-RUN MODE: ON]
-[r]efresh [a]ssign [o]ffload [s]wap [d]emote [t]oggle-dryrun [n]ew-pool [e]xtend [b]urnin [u]dev-rescue [x]destroy-pool [l]ocate [q]uit
+[r]efresh [a]ssign [o]ffload [s]wap [d]emote [t]oggle-dryrun [n]ew-pool [e]xtend [m]aint [u]dev-rescue [x]destroy-pool [l]ocate [q]uit
 b2ctl&gt;
 </pre>
 </details>
@@ -317,7 +314,7 @@ Pools:
   rpool     952G    5.96G   free=946G    ONLINE    cap=0%
   tank      2.72T   1.71G   free=2.72T   ONLINE    cap=0%
 [OK] all disks healthy and assigned
-[r]efresh  [a]ssign  [o]ffload  [s]wap  [d]emote  [t]oggle-dryrun  [n]ew-pool  [e]xtend  [b]urnin  [u]dev-rescue  [x]destroy-pool  [l]ocate  [q]uit   (or hot-plug)
+[r]efresh  [a]ssign  [o]ffload  [s]wap  [d]emote  [t]oggle-dryrun  [n]ew-pool  [e]xtend  [m]aint  [u]dev-rescue  [x]destroy-pool  [l]ocate  [q]uit   (or hot-plug)
 b2ctl&gt;
 
 </pre>
@@ -524,7 +521,7 @@ Execute rollback? [y/N]: Cancelled.
 **Step 1:** เปิด watch — เห็นเมนูล่างตาราง
 
 ```
-[r]efresh  [a]ssign  [o]ffload  [s]wap  [d]emote  [t]oggle-dryrun  [n]ew-pool  [e]xtend  [b]urnin  [u]dev-rescue  [x]destroy-pool  [l]ocate  [q]uit   (or hot-plug)
+[r]efresh  [a]ssign  [o]ffload  [s]wap  [d]emote  [t]oggle-dryrun  [n]ew-pool  [e]xtend  [m]aint  [u]dev-rescue  [x]destroy-pool  [l]ocate  [q]uit   (or hot-plug)
 b2ctl>
 ```
 
@@ -540,7 +537,7 @@ b2ctl>
 | `t` | toggle-dryrun — เปิด/ปิด preview mode (ดู Section 3) | no |
 | `n` | new-pool — สร้าง pool ใหม่จาก disk ว่าง | yes |
 | `e` | extend — เพิ่ม/ถอด L2ARC cache หรือ SLOG log | yes |
-| `b` | burnin — ตรวจ disk หลายลูก (self-test + badblocks) แบบเบื้องหลัง | no (read-only) |
+| `m` | maint — scrub / trim / health-check (self-test + badblocks) แบบเบื้องหลัง | yes (scrub/trim/self-test) |
 | `u` | udev-rescue — กู้ disk ที่ OS ปฏิเสธ (GHOST) ด้วย `udevadm` | no |
 | `x` | destroy-pool — ลบ pool (ยืนยันสองชั้น + พิมพ์ชื่อ pool) | yes |
 | `l` | locate — กระพริบ LED หา disk (ดู Section 5) | no |
@@ -631,6 +628,9 @@ b2ctl> a
 
 - **แปลว่า:** `a` ลิสต์เฉพาะ disk ที่ unassigned → เลือกตัว → เด้งเมนูเดียวกับตอน NEW DISK DETECTED (`[1]`–`[6]` + `[s]`).
 - **user ดู:** ต่างจากตอนเสียบ disk ใหม่ตรงที่ `a` เรียกเมนูนี้เองได้ทุกเมื่อ ไม่ต้องรอ hot-plug
+- **เลือกหลายตัว / batch (v0.11.0):** พิมพ์เลขคั่นเว้นวรรค เช่น `assign which #> 3 4 5` → ถ้า ≥2 ตัว เด้งเมนู
+  **batch** (ทำ action เดียวกับทุกตัว ยืนยันครั้งเดียว) เช่น **set JBOD ทุกตัว** สำหรับ PERC หลายลูก;
+  ต้องเป็นดิสก์ชนิดเดียวกัน (ปนชนิด = ปฏิเสธ). เลือก 1 ตัว = เมนูต่อดิสก์เหมือนเดิม
 
 ### `n` — new-pool (สร้าง pool ใหม่จาก disk ว่าง)
 
@@ -670,21 +670,28 @@ b2ctl> e
 
 - **แปลว่า:** เลือก pool → `[1]` cache (L2ARC) / `[2]` log (SLOG — เลือก ≥2 ลูก = mirror, ต้องมี PLP) / `[3]` ถอด cache/log ออก → เลือก disk ว่าง → confirm.
 
-### `b` burnin — ตรวจ disk ก่อนใช้ (หลายลูก + เบื้องหลัง)
+### `m` maint — scrub / trim / health-check
 
 ```
-b2ctl> b
+b2ctl> m
+  [1] scrub  (verify checksums + self-heal)
+  [2] trim   (release unused SSD blocks)
+  [3] health-check (smartctl -t long + optional badblocks + verdict)
+  action> 3
     [1] /dev/sdb (bay 32:4) Samsung SSD 870 EVO 1TB
     [2] /dev/sda (bay 32:5) Samsung SSD 870 EVO 1TB
-  burn in which #> (space-separated) 1 2
-  burn-in 2 disk(s) (long self-test)? [y/N]> y
+  health-check which #> (space-separated) 1 2
+  health-check 2 disk(s) (long self-test)? [y/N]> y
   also run a full read-surface scan (badblocks, read-only, hours)? [y/N]> y
 
  BAY     DISK      SELF-TEST                     SURFACE SCAN (badblocks)
  32:4    sdb       [########------]  62%  ~1h10m  [###-----------]  18%  ~4h30m
 ```
 
-- **แปลว่า:** เลือกได้หลายลูก → long self-test (รันบน firmware) + badblocks (process เบื้องหลัง) → หน้าจอสดโชว์แถบ + เวลาที่เหลือ. Ctrl-C ออกได้ งานยังรันต่อ กลับเข้าดูด้วย `b2ctl burnin --status`.
+- **แปลว่า:** `[m]aint` รวม scrub/trim/health-check ไว้ที่เดียว (v0.18.0 — verb `burnin`
+  เดิมและปุ่ม `[b]` ถูกยุบมาที่นี่). `[3] health-check` = เลือก disk ว่างได้หลายลูก →
+  long self-test (รันบน firmware) + badblocks (process เบื้องหลัง) → หน้าจอสดโชว์แถบ +
+  เวลาที่เหลือ. Ctrl-C ออกได้ งานยังรันต่อ กลับเข้าดูด้วย `b2ctl maint health --status`.
 
 ### `u` udev-rescue — กู้ disk ที่ OS ปฏิเสธ (GHOST)
 
@@ -710,10 +717,10 @@ b2ctl> x
   [!] destroying 'tank' ERASES ALL DATA on it. This cannot be undone.
   destroy pool 'tank'? [y/N]> y
   type the pool name 'tank' to confirm> tank
-  ✔ pool 'tank' destroyed; cron removed
+  ✔ pool 'tank' destroyed; timers disabled
 ```
 
-- **แปลว่า:** ลบ pool ถาวร — 2 ด่าน (`[y/N]` + พิมพ์ชื่อ pool ให้ตรง). b2ctl ลบ cron ของ pool นั้นให้ด้วย.
+- **แปลว่า:** ลบ pool ถาวร — 2 ด่าน (`[y/N]` + พิมพ์ชื่อ pool ให้ตรง). b2ctl สั่ง disable systemd maintenance timers ของ pool นั้นให้ด้วย (ไม่ใช่ cron แล้ว ตั้งแต่ v0.16.0).
 
 ---
 
@@ -755,6 +762,6 @@ match ได้ 3 แบบ — **ลำดับ by-id > serial > bdf**:
 
 ### burn-in NVMe ก่อนใช้
 ```
-python3 sim/run burnin nvme0n1 --short
+python3 sim/run maint health nvme0n1 --short
 ```
 → รัน SMART self-test แล้วสรุป **PASS/WARN/FAIL** (อ่านอย่างเดียว ไม่เขียนดิสก์) ใช้คัดดิสก์ใหม่/มือสองก่อนเข้า pool

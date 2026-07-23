@@ -158,9 +158,9 @@ class TestAssembleStorage:
 
 
 class TestScanConcurrency:
-    """F-077: the SMART ThreadPoolExecutor is sized to the number of SMART
-    targets — one thread per disk (min(16, max(1, N))) — not a hardcoded 4, so
-    an N-bay box reads SMART in a single wave."""
+    """SMART pools: direct/IT-mode targets read one-thread-per-disk (F-077,
+    min(16, N)); megaraid passthrough targets (d.smart_dtype set) read at a small
+    configurable cap so 16-way probes don't saturate the one PERC and time out."""
 
     @patch("b2ctl.core.ThreadPoolExecutor")
     @patch("b2ctl.core.zfs")
@@ -189,10 +189,10 @@ class TestScanConcurrency:
     @patch("b2ctl.core.smart")
     @patch("b2ctl.core._backend_mod")
     @patch("b2ctl.core.spec")
-    def test_smart_pool_min_one_worker_when_no_targets(self, mock_spec, mock_backend_mod,
-                                                       mock_smart, mock_zfs, mock_tpe):
-        # all-ghost / no-disk edge: max(1, len(targets)) must keep >= 1 worker,
-        # since ThreadPoolExecutor(max_workers=0) raises ValueError.
+    def test_no_smart_pool_when_no_targets(self, mock_spec, mock_backend_mod,
+                                           mock_smart, mock_zfs, mock_tpe):
+        # all-ghost / no-disk edge: each pool skips an empty group, so NO
+        # ThreadPoolExecutor is built (and no max_workers=0 ValueError).
         mock_bk = MagicMock()
         mock_backend_mod.get_backend.return_value = mock_bk
         mock_bk.have_tool.return_value = True
@@ -203,7 +203,34 @@ class TestScanConcurrency:
         mock_zfs.topology.return_value = {}
         mock_spec.load.return_value = {}
         _core_mod.scan()
-        mock_tpe.assert_called_once_with(max_workers=1)
+        mock_tpe.assert_not_called()
+
+    @patch("b2ctl.config.smart_config", return_value={"timeout": 10, "megaraid_workers": 4})
+    @patch("b2ctl.core.ThreadPoolExecutor")
+    @patch("b2ctl.core.zfs")
+    @patch("b2ctl.core.smart")
+    @patch("b2ctl.core._backend_mod")
+    @patch("b2ctl.core.spec")
+    def test_megaraid_targets_use_capped_pool_direct_stay_wide(
+            self, mock_spec, mock_backend_mod, mock_smart, mock_zfs, mock_tpe, _sc):
+        # 3 direct (no smart_dtype) + 5 megaraid (smart_dtype set): the direct pool
+        # is sized to its group (min(16,3)=3); the megaraid pool is capped at the
+        # configured megaraid_workers (min(4,5)=4), NOT 5.
+        direct = _fixture_disks(3)
+        mega = [Disk(dev="/dev/sda", serial=f"M{i}", smart_dtype=f"megaraid,{i}")
+                for i in range(5)]
+        mock_bk = MagicMock()
+        mock_backend_mod.get_backend.return_value = mock_bk
+        mock_bk.have_tool.return_value = True
+        mock_bk.bay_map.return_value = {}
+        mock_bk.enumerate_disks.return_value = direct + mega
+        mock_bk.attach_bays.return_value = None
+        mock_bk.get_ghost_disks.return_value = []
+        mock_zfs.topology.return_value = {}
+        mock_spec.load.return_value = {}
+        _core_mod.scan()
+        sizes = [c.kwargs["max_workers"] for c in mock_tpe.call_args_list]
+        assert sizes == [3, 4]          # direct wide (3), megaraid capped (4)
 
 
 class TestBaySort:

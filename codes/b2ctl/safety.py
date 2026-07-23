@@ -18,7 +18,8 @@ LOG_FILE = "/var/log/b2ctl/ops.jsonl"
 # are threaded through run_check with dry_run=, so they MUST be listed here or a
 # --dry-run preview executes them for real (RAID-mode replace/destroy, burn-in).
 WRITE_CMDS = {"zpool", "wipefs", "sgdisk", "dd",
-              "perccli", "perccli64", "smartctl", "badblocks"}
+              "perccli", "perccli64", "smartctl", "badblocks",
+              "systemctl"}      # enable/disable maintenance timers (read subcmds use run())
 
 # Rollback hint table: op -> lambda(entry) -> hint_str or None.
 # The 'replace' hint prefers the named old_dev/new_dev fields recorded at
@@ -40,6 +41,10 @@ _ROLLBACK: dict = {
         f"zpool attach {e['pool']} <remaining-member> {e['dev_path']}"
     ),
     "create":    lambda e: f"zpool destroy {e['pool']}  # WARNING: destroys all data",
+    "aux-repair": lambda e: (
+        f"aux vdev repair on {e['pool']}: verify `zpool status {e['pool']}` — "
+        f"cache loss is harmless, a SLOG mirror keeps redundancy; no auto-rollback"
+    ),
 }
 _NO_ROLLBACK = {"wipefs", "sgdisk", "wipe"}
 
@@ -232,15 +237,23 @@ def _post_op_verify(entry: dict) -> None:
     op   = entry.get("op", "")
     pool = entry.get("pool", "")
     serial = entry.get("disk_serial", "")
-    if not pool or not serial:
+    # aux-repair from the CLI verbs carries no Disk (serial ""), so it must NOT be
+    # gated on serial — its check keys on the new device token instead. Every
+    # other op always records a serial, so keep requiring it for them.
+    if not pool or (not serial and op != "aux-repair"):
         return
     ok, out = run_check(["zpool", "status", pool], timeout=15)
     if not ok:
         return
+    # aux-repair: a `replace` path resilvers (look for the marker); a cache/log
+    # remove+add path leaves no resilver, so fall back to the new device token.
+    new_dev = os.path.basename(entry.get("new_dev") or entry.get("dev_path", ""))
     op_checks = {
         "offline":   lambda o: serial not in o or "OFFLINE" in o,
         "replace":   lambda o: "resilver" in o or "resilvered" in o,
         "add_spare": lambda o: serial in o,
+        "aux-repair": lambda o: ("resilver" in o or "resilvered" in o
+                                 or (new_dev and new_dev in o)),
     }
     check = op_checks.get(op)
     if check and not check(out):

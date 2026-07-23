@@ -116,6 +116,11 @@ def _render_status(state, pool):
         else:
             lines.append("  scan: resilver in progress since Tue Jan  1 00:00:00 2030")
             lines.append(f"\t590M scanned, {pct}.0% done, 00:00:02 to go")
+    elif pool.get("scrub"):
+        # v0.17.0: a manual scrub is modelled as instantly complete so the scan
+        # line drives last_scrub_date() + the pools SCRUB column.
+        lines.append("  scan: scrub repaired 0B in 00:01:23 with 0 errors on "
+                     "Tue Jan  1 03:00:00 2030")
 
     lines += ["config:", "", "\tNAME                              STATE     READ WRITE CKSUM"]
     lines.append(f"\t{pool['name']:<33} {health}")
@@ -382,6 +387,17 @@ def cmd_labelclear(args, state):
     return 0
 
 
+def cmd_scrub(args, state):
+    """Model a manual scrub as instantly complete: mark the pool so `zpool status`
+    emits a completed scrub scan line (drives last_scrub_date + the SCRUB column)."""
+    pos = _strip_flags(args)
+    for p in state["pools"]:
+        if not pos or p["name"] in pos:
+            p["scrub"] = True
+    S.save(state)
+    return 0
+
+
 def main():
     argv = sys.argv[1:]
     if not argv:
@@ -397,7 +413,9 @@ def main():
     }
     if sub == "version":
         print("zfs-2.4.2-sim"); return 0
-    if sub in ("clear", "trim", "scrub"):     # genuinely no-ops for the sim
+    if sub == "scrub":
+        return cmd_scrub(args, state)
+    if sub in ("clear", "trim", "set"):   # genuinely no-ops for the sim
         return 0
     fn = table.get(sub)
     if fn is None:

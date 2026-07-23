@@ -109,6 +109,33 @@ def _demote(_args) -> int:
     return zfs_actions.demote()
 
 
+def _scrub(args) -> int:
+    return zfs_actions.scrub(getattr(args, "pool", None))
+
+
+def _trim(args) -> int:
+    return zfs_actions.trim(getattr(args, "pool", None))
+
+
+def _maint(args) -> int:
+    """`b2ctl maint --log` — read-only maintenance history (scrub/trim/health)."""
+    from . import maint as _maint_mod
+    events = _maint_mod.load_events(last=getattr(args, "last", 30))
+    if not events:
+        print("No maintenance events logged yet.")
+        return 0
+    print(f"\n{'WHEN':<21} {'KIND':<7} {'TARGET':<20} {'STATUS':<8} DETAIL")
+    print("─" * 90)
+    for e in events:
+        st = e.get("status", "?")
+        color = G if st == "ok" else (R if st == "fail" else Y)
+        print(f"{e.get('ts', ''):<21} {e.get('kind', ''):<7} "
+              f"{str(e.get('target', ''))[:19]:<20} {color}{st:<8}{N} "
+              f"{e.get('detail', '')}")
+    print()
+    return 0
+
+
 def _resolve_devs(tokens, *, strict: bool = False):
     """Map bay/serial/dev/by-id tokens to stable by-id paths.
 
@@ -150,11 +177,45 @@ def _confirm_pool_op(op: str, pool: str, devs: list[str]) -> bool:
     return confirm(f"    {op}?")
 
 
+def _partition_devs(devs, size):
+    """Over-provision the CLI aux-add paths: WIPE then partition each resolved
+    by-id device to `size`, returning the -part1 tokens (or None on failure).
+    The wipe is mandatory — `sgdisk -n 1:0:+<size>` needs a clean GPT or it places
+    partition 1 past a stale one (the used-disk `partition failed` bug, F-132).
+    Validates size against the scanned Disk.size_bytes (defensive max_bytes)."""
+    from . import zfs
+    from .common import confirm
+    sizes = {d.by_id: d.size_bytes for d in core.scan_light() if d.by_id}
+    # §9: the wipe is destructive, so confirm it HERE — before any device is
+    # touched — not at the later add-cache/add-log prompt (which runs post-wipe).
+    print(f"{Y}[!] over-provision will WIPE then partition: {', '.join(devs)}{N}")
+    if not confirm("wipe and partition these disk(s)?"):
+        print(f"{Y}[-] cancelled{N}")
+        return None
+    out = []
+    for dev in devs:
+        wok, wout = zfs.wipe(dev, dry_run=watch._DRY_RUN)
+        if not wok:
+            print(f"{R}[-] wipe {dev}: {wout}{N}")
+            return None
+        ok, part = zfs.partition(dev, size, max_bytes=sizes.get(dev),
+                                 dry_run=watch._DRY_RUN)
+        if not ok:
+            print(f"{R}[-] partition {dev}: {part}{N}")
+            return None
+        out.append(part)
+    return out
+
+
 def _cache_add(args) -> int:
     from . import zfs
     devs = _resolve_devs(args.devs, strict=True)
     if devs is None:
         return 1
+    if getattr(args, "size", None):
+        devs = _partition_devs(devs, args.size)
+        if devs is None:
+            return 1
     if not _confirm_pool_op("add L2ARC cache", args.pool, devs):
         print(f"{Y}[-] cancelled{N}"); return 1
     ok, out = zfs.add_cache(args.pool, devs, dry_run=watch._DRY_RUN)
@@ -177,13 +238,20 @@ def _log_add(args) -> int:
     devs = _resolve_devs(args.devs, strict=True)
     if devs is None:
         return 1
+    if getattr(args, "size", None):
+        devs = _partition_devs(devs, args.size)
+        if devs is None:
+            return 1
+    # single/mirror/raid10 only — raidz is invalid for a log vdev (add_log rejects it).
+    raid_type = ("raid10" if getattr(args, "raid10", False)
+                 else "mirror" if getattr(args, "mirror", False) else None)
     if len(devs) == 1:
         print(f"{Y}[!] SLOG not mirrored: losing this log device can lose "
               f"in-flight sync writes.{N}")
     print(f"{Y}[!] ensure this SSD has Power-Loss Protection (PLP).{N}")
     if not _confirm_pool_op("add SLOG log", args.pool, devs):
         print(f"{Y}[-] cancelled{N}"); return 1
-    ok, out = zfs.add_log(args.pool, devs, dry_run=watch._DRY_RUN)
+    ok, out = zfs.add_log(args.pool, devs, raid_type=raid_type, dry_run=watch._DRY_RUN)
     print((f"{G}[+] SLOG added to {args.pool}" if ok else f"{R}[-] {out}") + N)
     return 0 if ok else 1
 
@@ -198,17 +266,44 @@ def _log_rm(args) -> int:
     return 0 if ok else 1
 
 
+def _cache_replace(args) -> int:
+    old = _resolve_devs([args.old])[0]            # permissive: raw leaf token OK
+    new = _resolve_devs([args.new], strict=True)  # strict: new must be a real by-id disk
+    if new is None:
+        return 1
+    return zfs_actions.cache_replace(args.pool, old, new[0])
+
+
+def _log_replace(args) -> int:
+    old = _resolve_devs([args.old])[0]
+    new = _resolve_devs([args.new], strict=True)
+    if new is None:
+        return 1
+    return zfs_actions.log_replace(args.pool, old, new[0])
+
+
 def _burnin(args) -> int:
     from . import burnin
+    if args.cancel_all:
+        return burnin.cancel_all(dry_run=watch._DRY_RUN)
+    if args.cancel:
+        return burnin.cancel(args.cancel, dry_run=watch._DRY_RUN)
     if args.status:
         return burnin.status_view()
     if not args.target:
-        print(f"{R}burnin: give one or more target disks, or --status{N}",
+        print(f"{R}maint health: give one or more target disks, or --status{N}",
               file=sys.stderr)
         return 2
+    # Mirror the interactive [m]aint health path: record a 'started' event per
+    # target so `b2ctl maint --log` shows health-checks regardless of entry point.
+    from . import maint
+    kind = "short" if args.short else "long"
+    detail = f"smartctl -t {kind}" + (" + badblocks" if args.scan else "")
+    if not watch._DRY_RUN:                    # dry-run must not pollute the maint log
+        for t in args.target:
+            maint.log_event("health", t, "started", detail)
     return burnin.run_multi(args.target, spec.load(), do_scan=args.scan,
-                            kind="short" if args.short else "long",
-                            dry_run=watch._DRY_RUN)
+                            kind=kind, dry_run=watch._DRY_RUN)
 
 
 def _raid_replace(args) -> int:
@@ -580,7 +675,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="stripe of mirrors (RAID10) from an even number of disks")
     cr.set_defaults(func=_create)
 
-    ds = sub.add_parser("destroy", help="destroy a zfs pool (DESTRUCTIVE) + remove its cron")
+    ds = sub.add_parser("destroy", help="destroy a zfs pool (DESTRUCTIVE) + disable its maintenance timers")
     ds.add_argument("pool", nargs="?", help="pool name (prompts if omitted)")
     ds.set_defaults(func=_destroy)
 
@@ -590,10 +685,57 @@ def build_parser() -> argparse.ArgumentParser:
     de = sub.add_parser("demote", help="demote mirror leg to spare")
     de.set_defaults(func=_demote)
 
+    # manual maintenance: scrub / trim (per-pool) + history view
+    scr = sub.add_parser("scrub", help="start a manual scrub on a pool")
+    scr.add_argument("pool", nargs="?", help="pool name (prompts if omitted)")
+    scr.set_defaults(func=_scrub)
+
+    trm = sub.add_parser("trim", help="start a manual TRIM on a pool")
+    trm.add_argument("pool", nargs="?", help="pool name (prompts if omitted)")
+    trm.set_defaults(func=_trim)
+
+    # `maint` is the single maintenance surface (v0.18.0): history view (no sub /
+    # --log) plus scrub / trim / health subcommands. Top-level `scrub`/`trim` above
+    # remain as back-compat aliases.
+    mnt = sub.add_parser("maint",
+                         help="maintenance: scrub / trim / health-check + history")
+    mnt.add_argument("--log", action="store_true",
+                     help="show the maintenance history log (maint.jsonl)")
+    mnt.add_argument("--last", type=int, default=30, metavar="N",
+                     help="show last N events (default 30)")
+    mnt.set_defaults(func=_maint, maint_cmd=None)
+    msub = mnt.add_subparsers(dest="maint_cmd")
+
+    m_scr = msub.add_parser("scrub", help="start a manual scrub on a pool")
+    m_scr.add_argument("pool", nargs="?", help="pool name (prompts if omitted)")
+    m_scr.set_defaults(func=_scrub)
+
+    m_trm = msub.add_parser("trim", help="start a manual TRIM on a pool")
+    m_trm.add_argument("pool", nargs="?", help="pool name (prompts if omitted)")
+    m_trm.set_defaults(func=_trim)
+
+    m_hl = msub.add_parser("health",
+                           help="health-check disk(s): SMART long self-test (+ scan) + verdict")
+    m_hl.add_argument("target", nargs="*",
+                      help="bay / serial / dev of disk(s) (space-separated)")
+    m_hl.add_argument("--scan", action="store_true",
+                      help="also run a full read-surface scan (badblocks, read-only)")
+    m_hl.add_argument("--short", action="store_true",
+                      help="short self-test instead of long")
+    m_hl.add_argument("--status", action="store_true",
+                      help="show live status of in-flight health-checks (re-attach)")
+    m_hl.add_argument("--cancel", nargs="+", metavar="TARGET",
+                      help="cancel in-flight health-check on the given bay/serial/dev")
+    m_hl.add_argument("--cancel-all", action="store_true",
+                      help="cancel ALL in-flight health-checks")
+    m_hl.set_defaults(func=_burnin)
+
     # aux vdevs: L2ARC cache + SLOG log
     ca = sub.add_parser("cache-add", help="add L2ARC read-cache device(s) to a pool")
     ca.add_argument("pool")
     ca.add_argument("devs", nargs="+", help="bay/serial/dev of cache device(s)")
+    ca.add_argument("--size", help="over-provision: partition each device to this "
+                                   "size (e.g. 512G) and add the -part1; default full disk")
     ca.set_defaults(func=_cache_add)
 
     crm = sub.add_parser("cache-rm", help="remove an L2ARC cache device from a pool")
@@ -601,9 +743,17 @@ def build_parser() -> argparse.ArgumentParser:
     crm.add_argument("dev", help="cache leaf token / bay / serial / dev")
     crm.set_defaults(func=_cache_rm)
 
-    la = sub.add_parser("log-add", help="add a SLOG (2 devs = mirrored log)")
+    la = sub.add_parser("log-add",
+                        help="add a SLOG (2 devs default to a mirror; --mirror/--raid10 to force)")
     la.add_argument("pool")
     la.add_argument("devs", nargs="+", help="bay/serial/dev of log device(s)")
+    la.add_argument("--size", help="over-provision: partition each device to this "
+                                   "size (e.g. 32G) and add the -part1; default full disk")
+    la_topo = la.add_mutually_exclusive_group()
+    la_topo.add_argument("--mirror", action="store_true",
+                         help="mirrored SLOG (redundant)")
+    la_topo.add_argument("--raid10", action="store_true",
+                         help="stripe-of-mirrors SLOG (even # of disks >= 4)")
     la.set_defaults(func=_log_add)
 
     lrm = sub.add_parser("log-rm", help="remove a SLOG device from a pool")
@@ -611,17 +761,21 @@ def build_parser() -> argparse.ArgumentParser:
     lrm.add_argument("dev", help="log leaf token / bay / serial / dev")
     lrm.set_defaults(func=_log_rm)
 
-    bi = sub.add_parser("burnin",
-                        help="vet spare/new disk(s) — SMART long self-test (+ scan)")
-    bi.add_argument("target", nargs="*",
-                    help="bay / serial / dev of disk(s) to burn in (space-separated)")
-    bi.add_argument("--scan", action="store_true",
-                    help="also run a full read-surface scan (badblocks, read-only)")
-    bi.add_argument("--short", action="store_true",
-                    help="short self-test instead of long")
-    bi.add_argument("--status", action="store_true",
-                    help="show live status of in-flight burn-ins (re-attach)")
-    bi.set_defaults(func=_burnin)
+    crp = sub.add_parser("cache-replace",
+                         help="repair a degraded L2ARC cache device (remove old + add new)")
+    crp.add_argument("pool")
+    crp.add_argument("old", help="degraded cache leaf token / bay / serial / dev")
+    crp.add_argument("new", help="replacement disk: bay / serial / dev / by-id")
+    crp.set_defaults(func=_cache_replace)
+
+    lrp = sub.add_parser("log-replace",
+                         help="repair a degraded SLOG log device (replace, or remove+add)")
+    lrp.add_argument("pool")
+    lrp.add_argument("old", help="degraded log leaf token / bay / serial / dev")
+    lrp.add_argument("new", help="replacement disk: bay / serial / dev / by-id")
+    lrp.set_defaults(func=_log_replace)
+
+    # NOTE: `burnin` merged into `maint health` (v0.18.0) — see the `maint` parser.
 
     v = sub.add_parser("version", help="print version")
     v.set_defaults(func=lambda _a: (print(f"b2ctl {__version__}") or 0))
@@ -696,6 +850,27 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+_ROOT_EXEMPT = ("version", "check", "config", "log", "rollback",
+                "install", "update", "maint")
+
+
+def _needs_root(args) -> bool:
+    """Read-only commands run without root. `maint` is special: the bare history
+    view (no subcommand / --log) and `maint health --status` are read-only; the
+    mutating subcommands (scrub / trim / health <dev>) need root."""
+    cmd = getattr(args, "cmd", None)
+    if cmd not in _ROOT_EXEMPT:
+        return True
+    if cmd != "maint":
+        return False                          # other exempt cmds never need root
+    mc = getattr(args, "maint_cmd", None)
+    if mc is None:                            # `maint` / `maint --log` = history view
+        return False
+    if mc == "health" and getattr(args, "status", False):
+        return False                          # re-attach view only
+    return True                               # maint scrub|trim|health <dev> mutate
+
+
 def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -705,7 +880,7 @@ def main(argv=None) -> int:
         common.set_dry_run(True)      # bottom-layer owner read by raid_actions/burnin
     if not getattr(args, "cmd", None):
         args = parser.parse_args(["status"])
-    if args.cmd not in ("version", "check", "config", "log", "rollback", "install", "update"):
+    if _needs_root(args):
         need_root()
     try:
         return args.func(args)

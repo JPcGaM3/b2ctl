@@ -12,6 +12,50 @@ from b2ctl import smart
 from b2ctl.common import Disk
 
 
+# Real R740xd NETAPP X357 SAS SSD dump the operator reported for v0.18.0 issue #6
+# ('Why it fail? I think, it is passed.'). Healthy: clean error-counter log,
+# 0 grown defects, self-test 'Completed'. The trap is 'Non-medium error count:
+# 1061' sitting right below the counter log — it must NOT feed d.uncorr.
+_SAS_NON_MEDIUM_OUTPUT = """\
+=== START OF INFORMATION SECTION ===
+Vendor:               NETAPP
+Product:              X357_S164A3T8ATE
+Revision:             NA55
+User Capacity:        3,840,755,982,336 bytes [3.84 TB]
+Rotation Rate:        Solid State Device
+Serial number:        S5JFNA0R500833
+Device type:          disk
+Transport protocol:   SAS (SPL-4)
+SMART support is:     Enabled
+
+=== START OF READ SMART DATA SECTION ===
+SMART Health Status: OK
+
+Percentage used endurance indicator: 0%
+Current Drive Temperature:     31 C
+Accumulated power on time, hours:minutes 41724:19
+Elements in grown defect list: 0
+
+Error counter log:
+           Errors Corrected by           Total   Correction     Gigabytes    Total
+               ECC          rereads/    errors   algorithm      processed    uncorrected
+           fast | delayed   rewrites  corrected  invocations   [10^9 bytes]  errors
+read:          0        0         0         0          0      70511.679           0
+write:         0        0         0         0          0       6361.349           0
+verify:        0        0         0         0          0     347664.599           0
+
+Non-medium error count:     1061
+
+SMART Self-test log
+Num  Test              Status                 segment  LifeTime  LBA_first_err [SK ASC ASQ]
+     Description                              number   (hours)
+# 1  Background long   Completed                   -   41724                 - [-   -    -]
+# 2  Background long   Completed                   -   41722                 - [-   -    -]
+
+Long (extended) Self-test duration: 3600 seconds [60.0 minutes]
+"""
+
+
 class TestSmartParsing:
     """Tests for ATA and SAS SMART parsing."""
 
@@ -47,6 +91,36 @@ class TestSmartParsing:
         assess(d)
         assert d.level == "CRITICAL"
         assert any("uncorrectable errors" in r for r in d.reasons)
+
+    def test_parse_sas_non_medium_error_count_not_uncorrected(self):
+        # v0.18.0 regression: the real R740xd X357 dump the operator reported has
+        # a HEALTHY error-counter log (Total uncorrected = 0 in every row) but a
+        # large 'Non-medium error count: 1061' one line below it. That line is
+        # NOT uncorrected media errors — the parser must read column 7 of the
+        # read/write/verify rows (0), not grab 1061, or the disk FAILs spuriously.
+        d = Disk(dev="/dev/sdm")
+        smart._parse_sas(d, _SAS_NON_MEDIUM_OUTPUT)
+        assert d.uncorr == 0            # NOT 1061 (non-medium error count)
+        assert d.realloc == 0           # zero grown defects
+
+    def test_parse_sas_non_medium_full_pipeline_pass(self):
+        # end-to-end: the exact reported input → burnin.assess PASS (issue #6).
+        # read() maps 'SMART Health Status: OK' → PASSED and parses the self-test
+        # log; the newest SAS row is a bare 'Completed' (success), stripped clean.
+        from b2ctl import burnin
+        d = Disk(dev="/dev/sdm", smart_dtype="")
+        with patch("b2ctl.smart._smartctl", return_value=_SAS_NON_MEDIUM_OUTPUT):
+            smart.read(d, {})
+        assert d.health == "PASSED"
+        assert d.uncorr == 0
+        assert d.selftest_last_result == "Completed"
+        assert d.selftest_last_poh == 41724
+        with patch("b2ctl.burnin.selftest_status",
+                   return_value={"running": False, "pct": 100,
+                                 "result": d.selftest_last_result, "eta_min": None}):
+            verdict, reasons = burnin.assess(d)
+        assert verdict == "PASS", reasons
+        assert reasons == []
 
     def test_endurance_calculation(self):
         d = _disk(lba_written=19305985024, is_ssd=True, model="Samsung SSD 870")
@@ -227,7 +301,9 @@ class TestMegaraidDtype(unittest.TestCase):
 
 
 class TestSmartTimeout(unittest.TestCase):
-    """F-049: a hung disk must not be retried through the whole attempt ladder."""
+    """F-049: an IT-mode hung disk must not be retried through the attempt ladder.
+    A megaraid probe, however, retries ONCE (a timeout there is often just queueing
+    behind sibling probes on the shared controller)."""
 
     def test_ladder_breaks_on_first_timeout(self):
         seen = []
@@ -240,7 +316,54 @@ class TestSmartTimeout(unittest.TestCase):
              patch("b2ctl.config.tool", return_value="smartctl"):
             out = smart._smartctl("/dev/sdx", "")
         assert out == ""
-        assert len(seen) == 1   # broke after the first timeout, no retry
+        assert len(seen) == 1   # IT-mode: broke after the first timeout, no retry
+
+    def test_megaraid_retries_once_then_succeeds(self):
+        calls = {"n": 0}
+
+        def _run(cmd, timeout=None, none_on_timeout=False):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return None   # first passthrough probe times out (controller busy)
+            return "ATTRIBUTE_NAME\nSMART overall-health ... PASSED"
+
+        with patch("b2ctl.smart.run", side_effect=_run), \
+             patch("b2ctl.config.tool", return_value="smartctl"), \
+             patch("b2ctl.config.smart_config",
+                   return_value={"timeout": 10, "megaraid_workers": 4}):
+            out = smart._smartctl("/dev/sda", "megaraid,7")
+        assert "ATTRIBUTE_NAME" in out
+        assert calls["n"] == 2                 # timed out once -> retried -> read
+
+    def test_megaraid_gives_up_after_retry_still_timing_out(self):
+        seen = []
+
+        def _run(cmd, timeout=None, none_on_timeout=False):
+            seen.append(cmd)
+            return None   # every probe times out
+
+        with patch("b2ctl.smart.run", side_effect=_run), \
+             patch("b2ctl.config.tool", return_value="smartctl"), \
+             patch("b2ctl.config.smart_config",
+                   return_value={"timeout": 10, "megaraid_workers": 4}):
+            out = smart._smartctl("/dev/sda", "megaraid,7")
+        assert out == ""
+        # first form retried once (2 calls), then break — never reached sat+megaraid
+        assert len(seen) == 2
+
+    def test_megaraid_timeout_honors_config_value(self):
+        seen = []
+
+        def _run(cmd, timeout=None, none_on_timeout=False):
+            seen.append(timeout)
+            return "ATTRIBUTE_NAME\nSMART overall-health ... PASSED"
+
+        with patch("b2ctl.smart.run", side_effect=_run), \
+             patch("b2ctl.config.tool", return_value="smartctl"), \
+             patch("b2ctl.config.smart_config",
+                   return_value={"timeout": 25, "megaraid_workers": 2}):
+            smart._smartctl("/dev/sda", "megaraid,7")
+        assert seen[0] == 25                   # config timeout threaded into run()
 
     def test_read_marks_noread_on_timeout(self):
         def _run(cmd, timeout=None, none_on_timeout=False):
@@ -325,6 +448,81 @@ class TestNvmeParsing(unittest.TestCase):
         units = 12345678
         self.assertEqual(d.lba_written, units * 1000)
         self.assertNotEqual(d.lba_written, units)     # guard a dropped *1000
+
+
+# ATA self-test LOG block (newest first) — an Extended test + a Short test.
+_SELFTEST_LOG_ATA = """\
+SMART Self-test log structure revision number 1
+Num  Test_Description    Status                  Remaining  LifeTime(hours)  LBA_of_first_error
+# 1  Extended offline    Completed without error       00%     18238         -
+# 2  Short offline       Completed without error       00%     18200         -
+"""
+
+_SELFTEST_LOG_ATA_FAIL = """\
+SMART Self-test log structure revision number 1
+Num  Test_Description    Status                  Remaining  LifeTime(hours)  LBA_of_first_error
+# 1  Extended offline    Completed: read failure       90%     12000         0x0badf00d
+"""
+
+_SELFTEST_LOG_SAS = """\
+SMART Self-test log
+Num  Test              Status                 segment  LifeTime  LBA_first_err [SK ASC ASQ]
+     Description                              number   (hours)
+# 1  Background long   Completed                   -   50451                 - [- - -]
+"""
+
+# NVMe uses a distinct 'Self-test Log (NVMe Log 0x06)' block with bare-index
+# rows (no '#') and a Power_on_Hours column instead of LifeTime(hours).
+_SELFTEST_LOG_NVME = """\
+Self-test Log (NVMe Log 0x06)
+Self-test status: No self-test in progress
+Num  Test_Description  Status                       Power_on_Hours  Failing_LBA  NSID Seg SCT Code
+ 0   Extended          Completed without error                 736            -     -   -   -    -
+ 1   Short             Completed without error                 720            -     -   -   -    -
+"""
+
+
+class TestSelftestLog(unittest.TestCase):
+    """Passive read of the drive's self-test LOG -> selftest_last_* (HEALTH_CHK)."""
+
+    def test_parse_extended_ok(self):
+        res, hrs = smart._parse_selftest_log(_SELFTEST_LOG_ATA)
+        assert res == "Completed without error"
+        assert hrs == 18238
+
+    def test_parse_extended_failure(self):
+        res, hrs = smart._parse_selftest_log(_SELFTEST_LOG_ATA_FAIL)
+        assert "read failure" in res
+        assert hrs == 12000
+
+    def test_parse_sas_background_long(self):
+        res, hrs = smart._parse_selftest_log(_SELFTEST_LOG_SAS)
+        assert res == "Completed"
+        assert hrs == 50451
+
+    def test_parse_nvme_extended(self):
+        # bare-index rows under the NVMe block; newest (index 0) Extended wins,
+        # Short (index 1) is skipped, Power_on_Hours is the numeric column.
+        res, hrs = smart._parse_selftest_log(_SELFTEST_LOG_NVME)
+        assert res == "Completed without error"
+        assert hrs == 736
+
+    def test_nvme_block_not_matched_without_header(self):
+        # a bare-index row with no 'Self-test Log (NVMe' header must NOT be parsed
+        # (guards against matching ATA attribute rows that also start with digits).
+        assert smart._parse_selftest_log(
+            " 0   Extended   Completed without error   736\n") == ("", None)
+
+    def test_no_log_returns_empty(self):
+        assert smart._parse_selftest_log(_ATA_OUTPUT) == ("", None)
+
+    @patch("b2ctl.smart._smartctl")
+    def test_read_populates_selftest_last_fields(self, mock_sc):
+        mock_sc.return_value = _ATA_OUTPUT + "\n" + _SELFTEST_LOG_ATA
+        d = _disk(dev="/dev/sdz", smart_dtype="")
+        smart.read(d, {})
+        assert d.selftest_last_result == "Completed without error"
+        assert d.selftest_last_poh == 18238
 
 
 if __name__ == "__main__":

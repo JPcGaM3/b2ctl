@@ -18,12 +18,13 @@ LBA_BYTES = 512
 WEAR_ATTR_IDS = [177, 233, 202, 231, 173, 169, 232]
 
 
-SMART_TIMEOUT = 10   # per-probe; a hung disk must not stall the whole scan (F-049)
+SMART_TIMEOUT = 10   # per-probe default; overridable via config['smart']['timeout'] (F-049)
 
 
 def _smartctl(dev: str, dtype: str = "") -> str:
     from . import config as _cfg
     _sc = _cfg.tool("smartctl")
+    timeout = _cfg.smart_config().get("timeout", SMART_TIMEOUT)
     # When a device type is forced (RAID-mode "megaraid,7"), the drive is a hidden
     # member with no valid raw identity: try only the passthrough forms, never the
     # auto-detect ladder (that would read the shared VD node and misattribute the
@@ -32,12 +33,20 @@ def _smartctl(dev: str, dtype: str = "") -> str:
         attempts: list[str | None] = [dtype, f"sat+{dtype}"]
     else:
         attempts = [None, "sat", "scsi"]
+    # megaraid passthrough shares one controller: a probe can time out purely from
+    # queueing behind other probes, so retry it ONCE. A raw/IT-mode disk that times
+    # out is genuinely hung — don't re-probe it (F-049).
+    tries = 2 if dtype else 1
     for dt in attempts:
         cmd = [_sc, "-a", dev] if dt is None \
             else [_sc, "-a", "-d", dt, dev]
-        o = run(cmd, timeout=SMART_TIMEOUT, none_on_timeout=True)
+        o = None
+        for _ in range(tries):
+            o = run(cmd, timeout=timeout, none_on_timeout=True)
+            if o is not None:
+                break                     # got a response (timeout is the only retry trigger)
         if o is None:
-            break  # the device timed out; retrying the same hung drive only stalls
+            break  # still timed out after retries — a hung drive; give up (F-049)
         if o and ("ATTRIBUTE_NAME" in o or "Health Status" in o
                   or "SMART overall-health" in o):
             return o
@@ -91,6 +100,59 @@ def read(d: Disk, tbw_table: dict) -> None:
         d.selftest_running = True
         d.selftest_pct = stt["pct"]
         d.selftest_eta = ui.fmt_eta(stt["eta_min"])
+
+    # Last COMPLETED long self-test from the drive's OWN self-test LOG (same -a
+    # output, no extra subprocess). Feeds the HEALTH_CHK column passively — the
+    # drive persists this across reboots, indexed by power-on hours (v0.17.0).
+    res, hrs = _parse_selftest_log(out)
+    if res:
+        d.selftest_last_result = res
+        d.selftest_last_poh = hrs
+
+
+def _parse_selftest_log(out: str) -> tuple[str, int | None]:
+    """Return (result, lifetime_hours) of the most recent COMPLETED long
+    self-test from the SMART self-test LOG, or ('', None).
+
+    'long' = ATA 'Extended' or SAS 'Background long' or NVMe 'Extended'. smartctl
+    lists newest first, so the first matching row wins. Three table shapes are
+    handled (best-effort / version-tolerant):
+      ATA/SAS  '# N  Extended offline  Completed …  … LifeTime(hours)'
+      NVMe     'Self-test Log (NVMe Log 0x06)' header, then bare-index rows
+               ' N  Extended  Completed without error  <Power_on_Hours> …'
+    In every shape, once the leading index is stripped the columns split on
+    2+-space gaps and _selftest_row() reads the description (col 0), status
+    (col 1) and the last all-digit column as lifetime hours. Short/conveyance
+    tests are ignored — only the long test counts as a health check."""
+    in_nvme = False
+    for line in out.splitlines():
+        s = line.strip()
+        if s.startswith("#"):                          # ATA / SAS row
+            r = _selftest_row(re.sub(r"^#\s*\d+\s+", "", s))
+            if r:
+                return r
+        elif re.search(r"Self-test Log \(NVMe", s, re.I):
+            in_nvme = True                             # NVMe self-test block opens
+        elif in_nvme and re.match(r"\d", s):           # NVMe row: bare index, no '#'
+            r = _selftest_row(re.sub(r"^\d+\s+", "", s))
+            if r:
+                return r
+    return "", None
+
+
+def _selftest_row(body: str) -> tuple[str, int | None] | None:
+    """Parse ONE self-test-log row body (leading index already stripped): columns
+    split on 2+-space gaps -> (status, lifetime_hours) for a LONG test, else
+    None (short/conveyance rows, or too few columns)."""
+    cols = re.split(r"\s{2,}", body)                   # columns are 2+-space gaps
+    if len(cols) < 2 or not re.search(r"extended|background long", cols[0], re.I):
+        return None
+    hours = None
+    for c in reversed(cols):
+        if c.strip().isdigit():
+            hours = int(c.strip())
+            break
+    return cols[1].strip(), hours
 
 
 def _parse_ata(d: Disk, out: str) -> None:

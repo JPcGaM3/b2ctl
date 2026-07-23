@@ -325,5 +325,78 @@ class TestOffline(unittest.TestCase):
         self.assertEqual(rc, 0)
 
 
+class TestAssignPercBatch(unittest.TestCase):
+    """assign_perc_batch: one action applied to every selected UGood drive."""
+
+    @staticmethod
+    def _picks(n):
+        picks = []
+        for i in range(n):
+            p = _disk(dev="/dev/sda", serial=f"S{i}")
+            p.bay = f"32:{i}"; p.ctrl_slot = f"32:{i}"
+            p.smart_dtype = f"megaraid,{i}"; p.pd_state = "UGood"; p.ctrl = 0
+            picks.append(p)
+        return picks
+
+    def test_refused_in_it_mode(self):
+        with patch("b2ctl.raid_actions._require_raid", return_value=False):
+            self.assertEqual(ra.assign_perc_batch(self._picks(2), []), 1)
+
+    @patch("b2ctl.raid_actions.safety")
+    @patch("b2ctl.raid_actions.hba_raid")
+    @patch("b2ctl.raid_actions._confirm", return_value=True)
+    @patch("b2ctl.raid_actions._require_raid", return_value=True)
+    @patch("builtins.input", return_value="2")           # [2] set JBOD on all
+    def test_jbod_all_loops_set_jbod_per_pick(self, _inp, _req, _cf, mock_hba, _safety):
+        mock_hba.set_jbod.return_value = (True, "")
+        common.set_dry_run(True)                          # skip udevadm settle branch
+        try:
+            picks = self._picks(3)
+            rc = ra.assign_perc_batch(picks, picks)
+        finally:
+            common.set_dry_run(False)
+        self.assertEqual(mock_hba.set_jbod.call_count, 3)
+        slots = [c.args[0] for c in mock_hba.set_jbod.call_args_list]
+        self.assertEqual(slots, ["32:0", "32:1", "32:2"])
+        # dry-run forwarded to every call -> no real mutation
+        self.assertTrue(all(c.kwargs.get("dry_run") is True
+                            for c in mock_hba.set_jbod.call_args_list))
+        self.assertEqual(rc, 0)
+
+    @patch("b2ctl.raid_actions.create_vd", return_value=0)
+    @patch("b2ctl.raid_actions._require_raid", return_value=True)
+    @patch("builtins.input", side_effect=["3", "raid5"])  # [3] create ONE vd, level raid5
+    def test_create_one_vd_forwards_all_slots(self, _inp, _req, mock_cv):
+        picks = self._picks(3)
+        rc = ra.assign_perc_batch(picks, picks)
+        mock_cv.assert_called_once()
+        args, kwargs = mock_cv.call_args
+        self.assertEqual(args[0], "raid5")
+        self.assertEqual(args[1], ["32:0", "32:1", "32:2"])
+        self.assertEqual(kwargs["controller"], 0)
+        self.assertEqual(rc, 0)
+
+    @patch("b2ctl.raid_actions.safety")
+    @patch("b2ctl.raid_actions.hba_raid")
+    @patch("b2ctl.raid_actions._confirm", return_value=True)
+    @patch("b2ctl.raid_actions._require_raid", return_value=True)
+    @patch("builtins.input", side_effect=["4", ""])       # [4] hot spares, blank DG=global
+    def test_hotspare_all_loops_add_hotspare(self, _inp, _req, _cf, mock_hba, _safety):
+        mock_hba.add_hotspare.return_value = (True, "")
+        rc = ra.assign_perc_batch(self._picks(2), [])
+        self.assertEqual(mock_hba.add_hotspare.call_count, 2)
+        self.assertEqual(rc, 0)
+
+    @patch("b2ctl.raid_actions.create_vd", return_value=0)
+    @patch("b2ctl.raid_actions._require_raid", return_value=True)
+    @patch("builtins.input", side_effect=["3"])           # [3] create ONE vd
+    def test_create_vd_refuses_multi_controller(self, _inp, _req, mock_cv):
+        picks = self._picks(2)
+        picks[1].ctrl = 1                                 # span /c0 + /c1
+        rc = ra.assign_perc_batch(picks, picks)
+        self.assertEqual(rc, 1)                           # refused
+        mock_cv.assert_not_called()                       # no destructive VD build
+
+
 if __name__ == "__main__":
     unittest.main()

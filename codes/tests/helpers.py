@@ -120,6 +120,48 @@ errors: No known data errors
 """
 
 
+# zpool status with auxiliary vdevs: a MIRRORED SLOG (one leg FAULTED) plus a
+# single L2ARC cache device gone UNAVAIL — the aux-repair enumerator's fixture.
+_AUX_STATUS = """\
+  pool: tank
+ state: DEGRADED
+config:
+
+\tNAME                                    STATE     READ WRITE CKSUM
+\ttank                                    DEGRADED     0     0     0
+\t  raidz1-0                              ONLINE       0     0     0
+\t    /dev/disk/by-id/wwn-0xCCC           ONLINE       0     0     0
+\t    /dev/disk/by-id/wwn-0xDDD           ONLINE       0     0     0
+\t    /dev/disk/by-id/wwn-0xEEE           ONLINE       0     0     0
+\tlogs
+\t  mirror-1                              DEGRADED     0     0     0
+\t    /dev/disk/by-id/ata-LOGA            ONLINE       0     0     0
+\t    /dev/disk/by-id/ata-LOGB            FAULTED      0     0     0
+\tcache
+\t    /dev/disk/by-id/ata-CACHE           UNAVAIL      0     0     0
+
+errors: No known data errors
+"""
+
+# zpool status with a SINGLE (non-mirrored) SLOG device gone UNAVAIL.
+_AUX_SINGLE_LOG_STATUS = """\
+  pool: tank
+ state: DEGRADED
+config:
+
+\tNAME                                    STATE     READ WRITE CKSUM
+\ttank                                    DEGRADED     0     0     0
+\t  raidz1-0                              ONLINE       0     0     0
+\t    /dev/disk/by-id/wwn-0xCCC           ONLINE       0     0     0
+\t    /dev/disk/by-id/wwn-0xDDD           ONLINE       0     0     0
+\t    /dev/disk/by-id/wwn-0xEEE           ONLINE       0     0     0
+\tlogs
+\t    /dev/disk/by-id/ata-LOGX            UNAVAIL      0     0     0
+
+errors: No known data errors
+"""
+
+
 # --------------------------------------------------------------------------- #
 # Sample `smartctl -a` outputs (for smart parsing)
 # --------------------------------------------------------------------------- #

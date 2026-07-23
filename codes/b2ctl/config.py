@@ -33,13 +33,50 @@ _DEFAULTS: dict = {
         "sgdisk": "",
         "udevadm": "",
         "dd": "",
+        "systemctl": "",
     },
     "controller": {
         "mode": "auto",    # "auto" | "it" | "raid"
         "index": "all",    # "all" or integer string e.g. "0"
     },
+    "smart": {
+        "timeout": 10,          # per-probe smartctl timeout (seconds)
+        "megaraid_workers": 4,  # concurrent megaraid SMART probes; one PERC
+                                # serializes passthrough, so 16-way saturates it
+                                # and slow disks time out (NOREAD). Raise timeout /
+                                # lower this on a box with slow or dying disks.
+    },
+    # Health-grading thresholds, split by disk type. A threshold of null (or "N/A"
+    # / any non-integer) DISABLES that check. Defect signals (realloc/pending/
+    # uncorr) grade with `>`; endurance/wear grade with `<` (lower % = worse).
+    "health": {
+        "ssd": {                       # SSD + NVMe: any bad sector is a failure
+            "realloc_warn": None, "realloc_crit": 0,
+            "pending_warn": None, "pending_crit": 0,
+            "uncorr_warn": None,  "uncorr_crit": 0,
+            "endurance_warn": 30, "endurance_crit": 20,
+            "wear_warn": 30,      "wear_crit": 20,
+            "poh_warn": None,              # burn-in POH warning (off by default)
+        },
+        "hdd": {                       # HDD: tolerate stable, remapped defects
+            "realloc_warn": 50,   "realloc_crit": 200,
+            "pending_warn": 0,    "pending_crit": None,
+            "uncorr_warn": None,  "uncorr_crit": 0,
+            "endurance_warn": None, "endurance_crit": None,
+            "wear_warn": None,    "wear_crit": None,
+            "poh_warn": None,
+        },
+    },
     "bay_map_path": "",
     "ssd_spec_path": "",
+    # Per-pool maintenance intent recorded at create time (v0.17.0). Keyed by pool
+    # name -> {"autotrim": "on"|"off", "autoscrub": bool}. Written by
+    # set_pool_settings(), removed by remove_pool_settings() on destroy.
+    "pools": {},
+    # Sticky defaults that pre-fill the create prompts. autoscrub default OFF is a
+    # DELIBERATE reversal of the v0.16.0 "scrub always-on" stance (see ADR-003) —
+    # manual scrub is the primary path; the timer is opt-in.
+    "pool_defaults": {"autotrim": "off", "autoscrub": False},
 }
 
 _cache: dict | None = None
@@ -72,10 +109,43 @@ def load() -> dict:
                 cfg["controller"]["mode"] = ctrl["mode"]
             if ctrl.get("index") is not None:
                 cfg["controller"]["index"] = str(ctrl["index"])
+        sm = user.get("smart")
+        if isinstance(sm, dict):
+            for k in ("timeout", "megaraid_workers"):
+                v = sm.get(k)
+                # int-guarded: ignore a non-numeric / non-positive hand-edit and
+                # keep the default for THAT key (module's malformed->defaults rule).
+                if isinstance(v, int) and not isinstance(v, bool) and v > 0:
+                    cfg["smart"][k] = v
+        hh = user.get("health")
+        if isinstance(hh, dict):
+            for typ in ("ssd", "hdd"):
+                sub = hh.get(typ)
+                if isinstance(sub, dict):
+                    for k, v in sub.items():
+                        if k in cfg["health"][typ]:
+                            # null / "N/A" / any non-int -> None (check disabled);
+                            # a real int overrides. Omitted keys keep the default.
+                            cfg["health"][typ][k] = _norm_threshold(v)
         if isinstance(user.get("bay_map_path"), str) and user["bay_map_path"]:
             cfg["bay_map_path"] = user["bay_map_path"]
         if isinstance(user.get("ssd_spec_path"), str) and user["ssd_spec_path"]:
             cfg["ssd_spec_path"] = user["ssd_spec_path"]
+        # Per-pool records — shape-guarded: a non-dict "pools", or a per-pool value
+        # that isn't a dict, falls back to {} for that entry (malformed->defaults).
+        pl = user.get("pools")
+        if isinstance(pl, dict):
+            cfg["pools"] = {
+                k: {"autotrim": v.get("autotrim"),
+                    "autoscrub": bool(v.get("autoscrub", False))}
+                for k, v in pl.items() if isinstance(v, dict)
+            }
+        pd = user.get("pool_defaults")
+        if isinstance(pd, dict):
+            if pd.get("autotrim") in ("on", "off"):
+                cfg["pool_defaults"]["autotrim"] = pd["autotrim"]
+            if "autoscrub" in pd:
+                cfg["pool_defaults"]["autoscrub"] = bool(pd["autoscrub"])
     return cfg
 
 
@@ -84,6 +154,46 @@ def _get() -> dict:
     if _cache is None:
         _cache = load()
     return _cache
+
+
+def smart_config() -> dict:
+    """SMART scan tuning: {'timeout': int seconds, 'megaraid_workers': int}.
+
+    Operator-tunable via /etc/b2ctl/config.json to fit a controller's passthrough
+    throughput (see _DEFAULTS['smart']). Falls back to the defaults if the section
+    is absent, so a partial cache never KeyErrors the scan."""
+    sm = dict(_DEFAULTS["smart"])
+    sm.update(_get().get("smart") or {})
+    return sm
+
+
+def _norm_threshold(v):
+    """A health threshold is a positive/zero int, or None = 'check disabled'.
+    null / "N/A" / bool / any non-int all normalise to None so a hand-edit never
+    grades wrong — it just turns that one check off."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v
+    return None
+
+
+def health_config() -> dict:
+    """Type-aware health thresholds: {'ssd': {...}, 'hdd': {...}}.
+
+    Each threshold is an int or None (None = that check is not applied). Falls back
+    per key to _DEFAULTS['health'] so a partial/absent cache never KeyErrors."""
+    cur = _get().get("health") or {}
+    out = {}
+    for typ in ("ssd", "hdd"):
+        merged = dict(_DEFAULTS["health"][typ])
+        sub = cur.get(typ)
+        if isinstance(sub, dict):
+            for k in merged:
+                if k in sub:
+                    merged[k] = sub[k]
+        out[typ] = merged
+    return out
 
 
 def tool(name: str) -> str:
@@ -132,6 +242,40 @@ def controller_index_setting() -> str:
     return str(_get()["controller"].get("index", "all"))
 
 
+def _load_for_write() -> dict:
+    """Read CONFIG_PATH as a mutable dict, PRESERVING every existing key.
+
+    Refuses (raises ValueError) on an unparseable / non-object file rather than
+    overwriting it — silently resetting would erase tool_paths/bay_map_path
+    (F-075). A missing file returns {}. Shared by every single-setting writer.
+    """
+    if not os.path.exists(CONFIG_PATH):
+        return {}
+    try:
+        with open(CONFIG_PATH) as f:
+            data = json.load(f)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{CONFIG_PATH} is not valid JSON ({exc}); fix it "
+                         f"before writing config") from exc
+    except OSError:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{CONFIG_PATH} top-level is not an object; fix it first")
+    return data
+
+
+def _atomic_write(data: dict) -> None:
+    """Write `data` to CONFIG_PATH atomically (tmp in same dir + os.replace) so a
+    crash/ENOSPC can't leave a truncated config that load() reads as all-defaults
+    (F-075). Creates /etc/b2ctl if needed. Callers clear _cache afterwards."""
+    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+    tmp = CONFIG_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, CONFIG_PATH)
+
+
 def set_mode(mode: str) -> None:
     """Persist controller.mode ('it'|'raid'|'auto') to CONFIG_PATH.
 
@@ -141,34 +285,60 @@ def set_mode(mode: str) -> None:
     global _cache
     if mode not in ("it", "raid", "auto"):
         raise ValueError(f"invalid mode: {mode}")
-    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-    data: dict = {}
-    if os.path.exists(CONFIG_PATH):
-        try:
-            with open(CONFIG_PATH) as f:
-                data = json.load(f)
-        except json.JSONDecodeError as exc:
-            # Refuse to overwrite an unparseable file — silently resetting it to
-            # {"controller": {...}} would erase tool_paths/bay_map_path (F-075).
-            raise ValueError(f"{CONFIG_PATH} is not valid JSON ({exc}); fix it "
-                             f"before setting the mode") from exc
-        except OSError:
-            data = {}
-    if not isinstance(data, dict):
-        raise ValueError(f"{CONFIG_PATH} top-level is not an object; fix it first")
+    data = _load_for_write()
     ctrl = data.get("controller")
     if not isinstance(ctrl, dict):
         ctrl = {}
         data["controller"] = ctrl
     ctrl["mode"] = mode
-    # Atomic write: tmp in the same dir + os.replace so a crash/ENOSPC can't leave
-    # a truncated config that load() would silently read as all-defaults (F-075).
-    tmp = CONFIG_PATH + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(data, f, indent=2)
-        f.write("\n")
-    os.replace(tmp, CONFIG_PATH)
+    _atomic_write(data)
     _cache = None
+
+
+def pool_defaults() -> dict:
+    """Sticky create-prompt defaults: {'autotrim': 'on'|'off', 'autoscrub': bool}."""
+    pd = dict(_DEFAULTS["pool_defaults"])
+    pd.update(_get().get("pool_defaults") or {})
+    return pd
+
+
+def set_pool_defaults(*, autotrim: str, autoscrub: bool) -> None:
+    """Remember the last-chosen create options so the next create pre-fills them."""
+    global _cache
+    data = _load_for_write()
+    data["pool_defaults"] = {"autotrim": autotrim, "autoscrub": bool(autoscrub)}
+    _atomic_write(data)
+    _cache = None
+
+
+def pool_settings(name: str) -> dict:
+    """Persisted per-pool maintenance settings {'autotrim','autoscrub'} or {}."""
+    return dict(_get().get("pools", {}).get(name, {}))
+
+
+def set_pool_settings(name: str, *, autotrim: str, autoscrub: bool) -> None:
+    """Persist pools[name]; preserves every other key (read-preserve-mutate-atomic)."""
+    global _cache
+    data = _load_for_write()
+    pools = data.get("pools")
+    if not isinstance(pools, dict):
+        pools = {}
+        data["pools"] = pools
+    pools[name] = {"autotrim": autotrim, "autoscrub": bool(autoscrub)}
+    _atomic_write(data)
+    _cache = None
+
+
+def remove_pool_settings(name: str) -> None:
+    """Drop pools[name] on pool destroy. No-op if absent / file missing."""
+    global _cache
+    if not os.path.exists(CONFIG_PATH):
+        return
+    data = _load_for_write()
+    pools = data.get("pools")
+    if isinstance(pools, dict) and pools.pop(name, None) is not None:
+        _atomic_write(data)
+        _cache = None
 
 
 def as_json() -> str:

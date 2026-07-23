@@ -32,16 +32,21 @@ the R620s.
 
 - PERC H710 mini crossflashed to **IT mode** → LSI SAS9207-8i (SAS2308),
   firmware `0x2214` IT. No RAID controller CLI; disks are raw `/dev/sd*`.
-- Proxmox VE on ZFS-on-root (`rpool` mirror) + a data pool (`tank`, RAID10 =
-  striped mirrors). Pools created with `/dev/disk/by-id/ata-*` members,
-  `ashift=12`, `compression=lz4`, `atime=off`, `xattr=sa`.
+- Proxmox VE on ZFS-on-root (`rpool` mirror) + a data pool (`tank`, **raidz1** =
+  RAID5, 3× Samsung 870 EVO 1TB + 1 hot spare). Pools created with
+  `/dev/disk/by-id/ata-*` members, `ashift=12`, `compression=lz4`, `atime=off`,
+  `xattr=sa`. (raidz1 resilver reads all surviving members and tolerates only
+  ONE failed disk — slower/more stressful than a mirror resilver.)
 - Python **stdlib only** (no pip deps). Runs as root.
 - Required binaries: `smartctl`, `zpool`, `lsblk`. Optional: `sas2ircu`
   (bay numbers only), `ledmon`/`ledctl` (nicer locate LEDs), `wipefs`/`sgdisk`
   (wipe action). LED locate works without any of them via the dd fallback.
 
-There is intentionally **no storcli/perccli and no `smartctl -d megaraid`** —
-those only work behind a RAID controller and are removed in this build.
+Only **storcli** was removed entirely (an LSI tool blind to a PERC — it caused
+false detection). `perccli` + `smartctl -d megaraid,<DID>` still drive b2ctl's
+co-equal **RAID backend** (auto-detected — see §9 and the §11 deltas). On this
+IT/HBA box neither is needed, because the disks are raw and read directly with
+`smartctl -a /dev/sdX` + `sas2ircu`.
 
 ---
 
@@ -49,13 +54,14 @@ those only work behind a RAID controller and are removed in this build.
 
 | module | responsibility | external commands |
 |--------|-----------------|-------------------|
-| `common.py` | colours, `run()`/`run_check()`, `Disk` model, `assess()` | none |
+| `common.py` | colours, `run()`/`run_check()`, `Disk` model, `assess()`, `selftest_passed()` (v0.18.0 shared ATA/SAS/NVMe self-test grader) | none |
 | `spec.py` | load/lookup TBW ratings (`ssd_spec.json`) | none |
 | `hba.py` | enumerate disks, by-id index, bay map + **remap** | `lsblk`, `sas2ircu` |
 | `locate.py` | LED locate: perccli (PERC PD) / ledctl → dd (raw), timed | `perccli`, `ledctl`, `dd` |
 | `smart.py` | direct SMART read + parse, endurance | `smartctl` |
-| `zfs.py` | pool/topology parse, membership, actions | `zpool`, `wipefs`, `sgdisk` |
-| `core.py` | the `scan()` pipeline | (composes the above) |
+| `zfs.py` | pool/topology parse, membership, actions, scrub/trim, partition, timers | `zpool`, `wipefs`, `sgdisk`, `udevadm`, `systemctl` |
+| `maint.py` | append-only maintenance history (`maint.jsonl`) + `rel_time()` (v0.17.0) | none |
+| `core.py` | the `scan()` pipeline, `pool_maint()` scrub/trim display strings | (composes the above) |
 | `ui.py` | table / pools / details / new-disk rendering | none |
 | `watch.py` | interactive select()-loop, event + command handlers | `lsblk` (poll) |
 | `cli.py` | argparse, subcommand dispatch, `--locate` blink | — |
@@ -139,6 +145,42 @@ smartctl -a -d scsi /dev/sdX  # fallback
   `tbw_rating` from `spec.lookup(model)`;
   `end_left = clamp((rating - written)/rating * 100, 0, 100)`. HDDs force
   `wear_val=None`.
+- **Self-test log → HEALTH_CHK (v0.17.0).** The SAME `-a` output is parsed by
+  `smart._parse_selftest_log(out) -> (result, lifetime_hours)`: the newest long
+  self-test row whose description matches `Extended` (ATA / NVMe) or
+  `Background long` (SAS), taking its status column + the last all-digit column
+  (LifeTime/Power_on_Hours). Three table shapes are handled — ATA/SAS `# N …`
+  rows, and NVMe's `Self-test Log (NVMe Log 0x06)` block with bare-index rows
+  (no `#`); a shared `_selftest_row()` splits columns once the index is stripped.
+  Fills
+  `Disk.selftest_last_result` / `Disk.selftest_last_poh` — **zero extra
+  subprocess**. Short/conveyance rows are ignored. `ui._health_chk_cell` renders
+  `OK`/`ERR` + ` <poh - selftest_last_poh>hPOH` (power-on-hours-relative, NOT
+  wall-clock — the drive logs the test against lifetime hours). This is passive:
+  it reflects the last long test whoever fired it (`[m]` health-check, or a manual
+  `smartctl`). **All three dialects — ATA / SAS / NVMe — are handled; NVMe was
+  never unsupported.**
+- **Pass/fail classifier — `common.selftest_passed(result)` (v0.18.0).** The single
+  authority both `ui._health_chk_cell` (HEALTH_CHK) and `burnin.assess` (burn-in
+  verdict) call. Dialect-tolerant: `"without error"` → pass (ATA success);
+  `fail`/`abort`/`interrupt`/`fatal`/`unknown`/`unable` → fail; else `"completed"` →
+  pass. That last clause is the **fix**: SAS reports self-test success as the bare
+  word **`Completed`** (no `without error` suffix), so the old
+  `"without error" in result` check graded every healthy SAS disk `ERR`/`FAIL`.
+  `burnin._sas_selftest_result` was also fixed to split the SAS log row on 2+-space
+  columns and return the clean status token (`Completed`) instead of the greedy old
+  capture that swallowed the trailing `-  41724  -`. An empty result string is NOT a
+  pass (callers treat `''` as "no test on record" before calling).
+
+**Scan concurrency (v0.11.1).** `core.scan` reads SMART on **two** thread pools:
+direct/IT-mode targets (`smart_dtype` empty) one-thread-per-disk up to 16 (F-077);
+and **megaraid passthrough** targets (`smartctl -a -d megaraid,<DID> /dev/sda`,
+RAID mode) at a small cap (`smart.megaraid_workers`, default 4). Megaraid probes
+all funnel through ONE PERC that serializes IOCTLs, so 16-way saturates it and
+slow disks exceed `smart.timeout` (default 10 s) → the probe times out → `NOREAD`.
+A megaraid timeout is **retried once** (usually just queueing behind siblings); an
+IT-mode timeout is not (F-049). Both knobs live in `config['smart']` — raise the
+timeout / lower the workers on a box with slow or dying SAS disks.
 
 ### 3.5 ZFS topology — `zfs.topology()`
 ```
@@ -170,23 +212,97 @@ resilvering pool, which is rare). Finds `replacing-N` vdev blocks; returns
 | swap-to-spare | `zpool replace <pool> <member> <spare-token>` |
 | demote-to-spare | `zpool detach <pool> <member>` → `zpool add <pool> spare <by-id>` |
 | add mirror vdev | `zpool add <pool> mirror <a> <b>` |
-| add L2ARC cache | `zpool add -f <pool> cache <by-id...>` (`zfs.add_cache`) |
-| add SLOG log | `zpool add -f <pool> log [mirror] <by-id...>` (`zfs.add_log`; ≥2 devs → mirrored) |
+| add L2ARC cache | `zpool add -f <pool> cache <by-id...>` (`zfs.add_cache`; never a topology — L2ARC can't be mirrored/raidz) |
+| add SLOG log | `zpool add -f <pool> log <spec>` (`zfs.add_log`, v0.17.0 `raid_type=`): `single` → `<devs>`; `mirror` (≥2) → `mirror <devs>`; `raid10` (even ≥4) → `mirror a b mirror c d …`; `None` → legacy auto (mirror if >1). **raidz REJECTED** → `(False, "raidz is invalid for a SLOG vdev …")`, no command run |
 | remove aux vdev | `zpool remove <pool> <token>` (`zfs.remove_vdev`; cache/log/spare leaf) |
 | attach | `zpool attach <pool> <existing> <new>` |
 | create pool | `zpool create ...` (checks `wipefs -n` for existing labels first) |
-| create RAID10 | `zpool create ... <name> mirror a b mirror c d ...` (repeated `mirror` from disk pairs) |
+| create RAID10 | `zpool create ... <name> mirror a b mirror c d ...` (repeated `mirror` from disk pairs, shared `zfs._mirror_pairs`) |
+| over-provision partition | **wipe first** (`zfs.wipe`) then `sgdisk -n 1:0:+<size> -t 1:bf01 <dev>` → **mandatory** `udevadm settle` (`zfs.partition`; returns the `-part1` token). Wipe-before is the v0.18.0 fix (F-132) |
+| manual scrub | `zpool scrub <pool>` (`zfs.start_scrub`; kernel runs it in the background) |
+| manual trim | `zpool trim <pool>` (`zfs.start_trim`) |
 | wipe | `zpool labelclear -f <dev>` → `wipefs -a <dev>` → `sgdisk --zap-all <dev>` |
 
 **Aux vdevs (runbook STEP 03).** L2ARC `cache` loss is harmless (cache miss),
-so it is added unguarded. SLOG `log` holds in-flight sync writes: `add_log`
-mirrors automatically with ≥2 devices, and the watch/CLI workflow warns on a
-single (non-mirrored) log and always reminds the operator to use a **PLP** SSD
-(PLP is not reliably exposed by SMART, so it is a warning, not a gate). All three
-honor `--dry-run`. CLI: `b2ctl cache-add|cache-rm|log-add|log-rm <pool> <dev…>`;
-watch: `[e]xtend`.
+so it is added unguarded and never given a topology (L2ARC can't be mirrored or
+raidz). SLOG `log` holds in-flight sync writes: since **v0.17.0** `add_log` takes
+an explicit `raid_type` (`single`/`mirror`/`raid10`, `None` = legacy auto-mirror
+on ≥2) — watch `[e]xtend → [2]` prompts it when ≥2 devs, CLI `log-add
+--mirror|--raid10`; **raidz is rejected** (a log vdev cannot be raidz). The
+workflow still warns on a single (non-mirrored) log and always reminds the
+operator to use a **PLP** SSD (PLP is not reliably exposed by SMART, so it is a
+warning, not a gate). All honor `--dry-run`. CLI: `b2ctl
+cache-add|cache-rm|log-add|log-rm <pool> <dev…>`; watch: `[e]xtend`.
 
-### 3.6a Disk burn-in — `burnin.py` (runbook STEP 02, read-only vetting)
+**Over-provisioning (v0.17.0, first partition-creation in the repo).** When a
+`--size` (CLI) / "size to use per device" prompt (watch) is given, `zfs.partition(
+dev, size, *, type_code="bf01", max_bytes=None, dry_run=)` runs `sgdisk -n
+1:0:+<size> -t 1:bf01 <dev>` then a **mandatory** `run([_tool("udevadm"),
+"settle"])` (skipped under dry-run) — the `-part1` by-id symlink appears
+asynchronously, so without settle the follow-up `zpool add … -part1` races and
+fails. It returns the first-partition token from `zfs._part1_path` (by-id →
+`-part1`, nvme/mmcblk/loop → `p1`, else `1`; string convention only, never
+`os.path.exists`, so it resolves under dry-run). `zfs.parse_size` turns
+`32G`/`512M`/`1.5T` into bytes. **Blank size = whole disk** (idiomatic
+`wholedisk=on`, unchanged). `sgdisk` is already in `safety.WRITE_CMDS` → dry-run
+gated. No perf difference vs whole disk when aligned (sgdisk's 1 MiB default) with
+`ashift=12`; the reserve buys SSD endurance/consistency, costs capacity (ADR-003).
+
+**Wipe-before-partition (v0.18.0 fix, F-132).** `sgdisk -n 1:0:+<size>` places
+partition 1 at the first free aligned sector, so a **stale GPT** on a used disk
+pushed it past the old partition — `Could not create partition 1 from <big sector>`
+(overlap, or past end-of-disk on a small drive). Both over-provision sites now
+**warn + confirm the wipe up front (§9), then wipe each disk before
+`zfs.partition`**, reusing `zfs.wipe` (`zpool labelclear` + `wipefs -a` + `sgdisk
+--zap-all`). **Declining the confirm aborts and touches NOTHING** — the wipe never
+runs:
+- `watch._maybe_partition(disks, indices, size)` — validates sizes, prints a §9
+  WIPE warning naming each disk, asks **one** confirm, then (if accepted) wipe →
+  partition per disk, aborting on any wipe/partition failure.
+- `cli._partition_devs(devs, size)` — prints `[!] over-provision will WIPE then
+  partition: <devs>` and asks `confirm("wipe and partition these disk(s)?")`
+  **before touching any disk** (matching the watch flow); on accept, wipe → partition
+  each resolved by-id device. This is the up-front confirm — it is NOT deferred to
+  the later `add-cache`/`add-log` prompt.
+- In `watch._cmd_create`, when a size is given the over-provision path **replaces**
+  the old whole-disk dirty-wipe block (`zfs.has_zfs_label` → confirm → `zfs.wipe`),
+  so there is no double wipe/confirm; a blank size keeps that whole-disk path.
+
+So over-provisioning on **both** `b2ctl create --size` and `cache-add`/`log-add
+--size` (as well as the watch prompts) warns + confirms the wipe first, then wipes →
+partitions → hands ZFS the `-part1` token; a declined confirm wipes nothing.
+
+**Aux-vdev repair (v0.14.0).** When an L2ARC cache disk or one leg of a mirrored
+SLOG dies, pull it, insert a new disk, and repair through the tool. Enumerated by
+`zfs.aux_leaves(pool)` (cache/log leaves tagged `klass`/`mirror_leg`/`degraded`);
+the shared core is `watch._repair_aux(pool, leaf, new, new_token=…)`, which
+branches by class + leaf state:
+
+| case | commands (list-form, all through `run_check`) | resilver |
+|------|-----------------------------------------------|----------|
+| **cache** (any state) | `zpool remove <pool> <old>` → `zpool add -f <pool> cache <new>` | no (L2ARC is volatile; it cannot be `zpool replace`d) |
+| **SLOG mirror leg** (`vdev=mirror-*`) | `zpool replace -f <pool> <old-leg> <new>` | yes — `_wait_resilver()` polls `poll_resilver_status()` |
+| **SLOG single, gone** (state `REMOVED`/`UNAVAIL`) | `zpool remove <pool> <old>` → `zpool add -f <pool> log <new>` | no |
+| **SLOG single, present** (FAULTED/DEGRADED) | `zpool replace -f <pool> <old> <new>` | yes |
+
+`replace` is chosen over `attach`+`detach` for a mirror leg deliberately: it is
+atomic and never exposes a hand-picked *detach* target, so a mistyped device can't
+destroy the surviving good leg (the operator only ever names the disk to *add*).
+The op is audited as `"aux-repair"` (`safety.begin_op`/`end_op`, `details=
+{old_dev,new_dev}`); `_post_op_verify` passes if `zpool status` shows a resilver
+marker **or** the new device token; the `_ROLLBACK["aux-repair"]` hint is advisory
+(cache loss is harmless, a SLOG mirror keeps redundancy — no auto-rollback). Honors
+`--dry-run`. CLI: `b2ctl cache-replace|log-replace <pool> <old> <new>` (the `new`
+disk resolves strictly to a by-id, §9; `old` is permissive so a raw leaf token
+passes through). watch: `[e]xtend → [4]`.
+
+### 3.6a Disk health-check (burn-in engine) — `burnin.py` (runbook STEP 02, read-only vetting)
+
+> **v0.18.0:** the burn-in **engine** (`burnin.py`) is unchanged, but its
+> **surface** merged into `maint`. The standalone `b2ctl burnin` verb and the watch
+> `[b]` key are **gone**; disk vetting is now `b2ctl maint health` /
+> `[m]aint → [3] health-check` (`watch._maint_health`, renamed from `_cmd_burnin`).
+> See §3.6b and **ADR-004** for the merge rationale (both ran `smartctl -t long`).
 
 **Multi-disk & non-blocking (v0.10.0).** `run_multi(targets, …)` vets several disks
 at once and returns to the prompt while they run; a state file makes it
@@ -199,7 +315,8 @@ re-attachable. See **ADR-002** for the background-process/state-file architectur
 | self-test progress | `smartctl -a <dev>` → `parse_selftest()` reads `% of test remaining` (ATA) / `% complete` (SAS); ETA = `Extended self-test routine recommended polling time: (N) minutes` × remaining% (`_selftest_eta_min`, ATA only) |
 | scan progress | tail the badblocks logfile for the last `NN% done` (`_parse_badblocks_log`); liveness via `os.kill(pid,0)` + `waitpid(WNOHANG)` reaping (`_pid_alive`); ETA computed from our own elapsed time (`scan_progress`) |
 | live view | `live_view()` redraws `ui.render_burnin_view()` every ~2.5 s (ANSI cursor-up + clear). **Ctrl-C detaches** (saves state, keeps running); it does NOT abort |
-| verdict | on completion `_finish()` re-reads SMART (`core.scan_one`) + `assess(disk)` → FAIL (uncorrected>0 / self-test error), WARN (POH>40000 / grown defects / surface-scan bad blocks), else PASS |
+| verdict | on completion `_finish()` re-reads SMART (`core.scan_one`) + `assess(disk)` → FAIL (uncorrected>0 / self-test error via `common.selftest_passed`, v0.18.0), WARN (grown defects / surface-scan bad blocks / power-on hours **if** `health.<type>.poh_warn` is set — off by default, v0.13.0), else PASS |
+| cancel (v0.12.0) | `cancel(targets)` / `cancel_all()` — per record: **abort self-test** `smartctl -X [-d <dtype>] <dev>` (`_cancel_records`) + **stop scan** `os.kill(scan_pid, SIGTERM)`, but only after `_is_our_badblocks(pid,dev)` confirms `/proc/<pid>/cmdline` is our `badblocks <dev>` (PID-reuse guard) — then drop the record from state. Honors `--dry-run`. Both are read-only/abort ops; nothing is written |
 
 - **State file:** `os.path.join(safety.LOG_DIR, "burnin.json")` (records keyed by
   serial: dev/bay/dtype/kind/do_scan/scan_pid/scan_log/started), plus per-disk
@@ -207,15 +324,96 @@ re-attachable. See **ADR-002** for the background-process/state-file architectur
   monkeypatch redirects it to `sim/var/` (`save_state`/`load_state`).
 - **Re-entrancy:** `run_multi` polls `selftest_status` first and **never restarts**
   a disk already under a self-test; `_finish` prunes completed records from state.
-- **Exit code note:** because the run is backgrounded, `b2ctl burnin <disk>` exits
-  `0` once the tests are *started* — the PASS/WARN/FAIL verdict is shown later in
-  the live view / `--status`, not encoded in the exit code (the old single-disk
+- **Exit code note:** because the run is backgrounded, `b2ctl maint health <disk>`
+  exits `0` once the tests are *started* — the PASS/WARN/FAIL verdict is shown later
+  in the live view / `--status`, not encoded in the exit code (the old single-disk
   synchronous FAIL→exit-1 is gone).
 
-CLI `b2ctl burnin <bay\|dev> [<bay\|dev> …] [--scan] [--short]` and
-`b2ctl burnin --status` (re-attach); watch `[b]urnin` (space-separated
-multi-select). Only spare/new disks (`in_pool` is refused). The only writes are
-the self-test trigger and a read-only `badblocks`; nothing on the disk is modified.
+CLI (v0.18.0, was `b2ctl burnin`) `b2ctl maint health <bay\|dev> [<bay\|dev> …]
+[--scan] [--short]`, `b2ctl maint health --status` (re-attach), and `b2ctl maint
+health --cancel <bay\|dev …>` / `--cancel-all`; watch `[m]aint → [3]` opens a menu
+when a health-check is in flight (`[v]`iew / `[c]`ancel-one / cancel-`[a]`ll /
+`[n]`ew). **Both paths vet FREE/SPARE disks only:** the watch selection lists free
+disks (`_avail_for_aux`), and the CLI `maint health <dev…>` also **refuses** an
+in-pool member — both go through `run_multi` → `_poolable_target`, which prints
+`maint health vets free/spare disks; <dev> is in pool '<pool>' — self-test it with
+\`smartctl -t long\` directly`. (To self-test an active member, run `smartctl -t
+long <by-id>` in a shell; the member's HEALTH_CHK still updates passively from
+`smartctl -a`.) Starting a health-check writes a `"health"`/`"started"` event to
+`maint.jsonl` on **both** paths (`watch._maint_health` and CLI `_burnin`),
+**skipped under `--dry-run`**. The only writes are the self-test trigger and a
+read-only `badblocks`; nothing on the disk is modified. On Ctrl-C,
+`burnin.live_view` prints `b2ctl maint health --status` to re-attach
+(`burnin.py:427`).
+
+### 3.6b Manual maintenance — scrub / trim / health-check + history (v0.17.0)
+
+Manual scrub/trim is the **primary** maintenance path (scheduled timers are
+secondary and default off — ADR-003). The kernel owns each op, so there is **no
+Popen / state file** (unlike burn-in): b2ctl issues the command and polls.
+
+| step | command / mechanism |
+|------|---------------------|
+| start scrub | `zpool scrub <pool>` (`zfs.start_scrub`) — returns at once, kernel scrubs in the background |
+| start trim | `zpool trim <pool>` (`zfs.start_trim`) |
+| scrub progress | `zpool status <pool>` → `zfs.poll_scrub_status` (sibling of `poll_resilver_status`): matches the `scan: scrub` line — `scrub in progress … N% done … <hh:mm:ss> to go`, or `scrub repaired … with N errors` = completed. `ok=False` on empty output; a resilver line never matches |
+| trim progress | `zpool status -t <pool>` → `zfs.poll_trim_status`: per-leaf `(trimming\|untrimmed\|trimmed\|trim unsupported)` + optional `%`. **Coarse / OpenZFS-version-dependent** — `done` may be None even while trimming |
+| last-scrub date | `zpool status <pool>` → `zfs.last_scrub_date`: parses the scan line's `on <ctime>` with `datetime.strptime(raw, "%a %b %d %H:%M:%S %Y")` → ISO string. **Pure read (§9).** ZFS keeps only the latest scrub → older runs live only in `maint.jsonl` |
+| health-check | `smartctl -t long [-d <dtype>] <dev>` (reuses `burnin.start_selftest`) on picked disk(s) — non-blocking; the verdict lands in the drive's self-test log → HEALTH_CHK |
+
+**Live watch (`watch._wait_scrub`/`_wait_trim`).** 2 s poll with a `% done` bar.
+`_wait_scrub(pool, baseline)` captures the pre-scrub `last_scrub_date` and accepts
+a "completed" reading only once that date **advances** past `baseline` — so the
+persisted OLD `scrub repaired` line isn't mistaken for the scrub just issued.
+**Ctrl-C DETACHES** (the kernel keeps running); 5 consecutive unreadable
+`zpool status` polls stop the watch. All honor `--dry-run`.
+
+**History — `maint.py` + `maint.jsonl`.** A dedicated **append-only** log beside
+`ops.jsonl`/`burnin.json`, resolved from `safety.LOG_DIR` **at call time** so the
+sim/test `safety.LOG_DIR` redirect catches it for free (ADR-002 pattern). It
+copies safety's O_APPEND-of-one-line idiom (POSIX-atomic), **not** the ops schema.
+Record:
+
+```json
+{"ts": "2026-07-08T03:00:00", "kind": "scrub", "target": "tank", "status": "ok",
+ "detail": "completed at 2026-07-08T02:58:41"}
+```
+
+- `kind` ∈ `scrub`/`trim`/`health`; `target` = pool name (scrub/trim) or disk
+  serial (health); `status` ∈ `started`/`ok`/`fail`; `ts` =
+  `datetime.now().isoformat(timespec="seconds")` (naive-local, like safety).
+- API: `log_event(kind, target, status, detail)` (best-effort — a write failure
+  never aborts the op, the kernel already ran it), `load_events(last=N)`,
+  `last_event(kind, target)`, `rel_time(iso_or_epoch) -> "2m ago"`.
+
+**Read-path purity (§9).** The pools SCRUB column is a **pure live read**
+(`core.pool_maint` → `zfs.last_scrub_date`, fallback `maint.last_event("scrub").ts`;
+TRIM only from `maint.last_event("trim")` — ZFS has no live last-trim date).
+Writing a completion record for a background/timer scrub happens **only** in
+`watch._reconcile_scrub_history` (called from watch's refresh, which already
+mutates via `prune_orphan_timers`), deduped on the ISO date embedded in `detail`,
+and honoring `--dry-run`. **`status`/`top` never write.**
+
+**Surfaces (v0.18.0 — `maint` is the single surface).** watch `[m]aint` →
+`_cmd_maint(tbw, *, action=None, pool=None)` prompts `[1] scrub [2] trim
+[3] health-check` and branches on action first: scrub/trim per-pool,
+`health` → `_maint_health` (the burn-in engine, §3.6a). CLI has one `maint` verb
+with subcommands plus the bare history view:
+
+| CLI | handler | mutates? | root? |
+|-----|---------|----------|-------|
+| `b2ctl maint` / `b2ctl maint --log [--last N]` | `_maint` (reads `maint.jsonl`) | no | exempt |
+| `b2ctl maint scrub [<pool>]` | `_scrub` → `zfs_actions.scrub` | yes | **root** |
+| `b2ctl maint trim [<pool>]` | `_trim` → `zfs_actions.trim` | yes | **root** |
+| `b2ctl maint health <dev…> [--scan] [--short] [--cancel …] [--cancel-all]` | `_burnin` → `burnin.run_multi/cancel` | yes | **root** |
+| `b2ctl maint health --status` | `_burnin` → `burnin.status_view` | no (re-attach) | exempt |
+| `b2ctl scrub\|trim [<pool>]` | back-compat aliases of `maint scrub/trim` | yes | **root** |
+
+Root gating is `cli._needs_root(args)`: `maint` is in `_ROOT_EXEMPT`, but the
+function special-cases it — bare `maint`/`--log` (`args.maint_cmd is None`) and
+`maint health --status` are exempt; `maint scrub|trim|health <dev>` return True
+(need root). `zfs_actions.scrub(pool)`/`trim(pool)` still delegate to
+`_cmd_maint(action=…, pool=…)`.
 
 ### 3.7 LED locate — `locate.py`
 `sas2ircu ... LOCATE <slot>` is **not used** — on this backplane it lights a
@@ -286,7 +484,9 @@ A single `select.select([sys.stdin], [], [], 2.0)` loop:
    - IT-only box: no volumes → the summary is just the software (pool) rows.
 2. Snapshot block devices (`_block_devs()` via `lsblk -P NAME,TYPE`).
 3. Each iteration:
-   - If stdin is ready → read a line → dispatch `r/a/o/s/d/n/t/l/q`.
+   - If stdin is ready → read a line → dispatch
+     `r/a/o/s/d/t/n/e/m/u/x/l/q` (`e`=extend cache/log/raid, `m`=maint
+     scrub/trim/health, `u`=udev-rescue, `x`=destroy).
    - Re-snapshot devices. `new = current - baseline`,
      `gone = baseline - current`.
    - For each `gone` → `_handle_removed()` (report + reprint pool health).
@@ -299,6 +499,23 @@ Keystrokes and hotplug share one loop with no extra deps; the 2 s `select`
 timeout doubles as the poll interval. While a `_handle_new_disk` prompt is open
 (blocking `input()`), polling pauses — acceptable since the operator is at the
 console.
+
+**`[a]ssign` multi-select (v0.11.0).** `_cmd_assign` parses space-separated
+indices via the shared `watch._pick_indices(sel, n)` helper (built on
+`_one_based`): rejects `0`/negatives (F-052) and out-of-range, dedupes, order
+preserved — reused by assign / `[n]ew-pool` / `[e]xtend` / `[m]aint` health-check, which
+closed a pre-existing F-052 gap where `[n]ew-pool`/`[e]xtend` let `0` select the
+LAST disk (`list[-1]`) and wipe it. A single pick keeps the existing per-disk
+menu; 2+ picks open a **homogeneous** batch menu (candidates are tagged by
+category — `zfs` / `ghost` / `perc` — and mixing types is refused with a per-type
+count). PERC-UGood batch (`raid_actions.assign_perc_batch`) loops
+`hba_raid.set_jbod` / `hba_raid.add_hotspare` per drive (or one `create_vd` for
+"one volume from all"); free-disk batch (`watch._assign_free_disks_batch`) loops
+`zfs.add_spare` / `zfs.wipe`. Each looped PERC mutation gets its own
+`safety.begin_op/end_op`; every batch confirm **lists the selected devices**
+(model+serial) before the `[y/N]` (§9 device-readback); and create-VD **refuses**
+a selection spanning two controllers (a single VD is controller-local). All honor
+`--dry-run`.
 
 ---
 
@@ -320,10 +537,14 @@ console.
 
 ### 6.2 Write-command allowlist
 
-`safety.WRITE_CMDS = {"zpool", "wipefs", "sgdisk", "dd"}` — any `run_check`
-call whose `args[0]` is in this set is classified as mutating. Everything else
-is read-only. This set governs both dry-run suppression and pre-op snapshot
-triggering.
+`safety.WRITE_CMDS = {"zpool", "wipefs", "sgdisk", "dd", "perccli", "perccli64",
+"smartctl", "badblocks", "systemctl"}` — any `run_check` call whose `args[0]` is
+in this set is classified as mutating. Everything else is read-only. This set
+governs both dry-run suppression and pre-op snapshot triggering. The last five
+entries cover RAID-mode actions (`perccli`), self-test/surface-scan triggers
+(`smartctl -t`, `badblocks`), and maintenance-timer enable/disable (`systemctl`);
+their read-only sub-commands go through `run()`, not `run_check`, so they are not
+gated.
 
 ### 6.3 Dry-run mode
 
@@ -468,34 +689,34 @@ To reset manually: `sudo mkdir -p /var/log/b2ctl/snapshots && sudo chown root:ro
 cd codes && sudo ./install.sh --with-tools
 ```
 
-Downloads archives for `sas2ircu`, `storcli64`, `perccli64` from Google Drive, then
-extracts and installs the binaries. Runs after the main b2ctl install; each tool is
-independent. Downloads are deleted on EXIT via `trap`.
+Downloads archives for `sas2ircu`, `perccli64` from Google Drive, then extracts and
+installs the binaries (storcli was dropped — LSI tool, blind to a PERC). Runs after
+the main b2ctl install; each tool is independent. Downloads are deleted on EXIT via
+`trap`.
 
 **Download step — `download_tools(dest)`:**
 
 - Checks for `curl` (preferred) or `wget`; aborts with `[✗]` if neither found.
-- Downloads 3 archives to a temp dir using:
+- Downloads 2 archives to a temp dir using:
   `https://drive.usercontent.google.com/download?export=download&confirm=t&id=<FILE_ID>`
   (modern Google Drive endpoint — `confirm=t` bypasses the virus-scan warning page).
 - Validates each download: if the file is < 1 KB it was likely an HTML error page —
   prints `[✗] <name>: download too small` and aborts.
 - File IDs are hardcoded constants at the top of `install.sh`:
-  `_GDRIVE_SAS2IRCU`, `_GDRIVE_STORCLI`, `_GDRIVE_PERCCLI`.
+  `_GDRIVE_SAS2IRCU`, `_GDRIVE_PERCCLI`.
 
 **apt prerequisites installed automatically:**
 
 | package | why |
 |---------|-----|
 | `alien` | converts perccli `.rpm` → `.deb` |
-| `unzip` | extracts `.zip` archives (sas2ircu, storcli) |
+| `unzip` | extracts `.zip` archives (sas2ircu) |
 
 **Extraction chain per tool:**
 
 | tool | archive | method | binary dest |
 |------|---------|--------|-------------|
 | `sas2ircu` | `SAS2IRCU_P20.zip` | `unzip` → find `x86-64_rel/sas2ircu` (falls back to `x86_rel`) | `/usr/local/sbin/sas2ircu` |
-| `storcli64` | `007.3703.0000.0000_MR 7.37_Storcli.zip` | double-unzip → `dpkg-deb -x` Ubuntu DEB | `/usr/local/sbin/storcli64` + symlink `storcli` |
 | `perccli64` | `perccli_7.1-007.0127_linux.tar.gz` | `tar` → `alien --to-deb` RPM → `dpkg-deb -x` | `/usr/local/sbin/perccli64` + symlink `perccli` |
 
 `dpkg-deb -x` extracts binary contents without touching the package database.
@@ -584,7 +805,7 @@ are never touched by `install.sh`.
 |---------|-------------|
 | table empty, pools show | `lsblk` not in `-P` mode or MODEL spaces — confirm `enumerate_disks` uses `-P`; check `lsblk -dnb -P -o NAME,...` by hand |
 | BAY all `-` | `sas2ircu` missing or can't execute; bays are optional (locate still works by serial/dev). If `b2ctl check` shows "binary exists but won't execute", run `apt-get install -y libc6-i386` — sas2ircu is a 32-bit ELF |
-| BAY all `-` (RAID-mode detected despite IT HBA) | crossflashed PERC H710 responds to storcli's management plane; auto-detect sees storcli and picks RaidBackend. Fix: `apt-get install libc6-i386` so sas2ircu executes, or set `controller.mode = "it"` in `/etc/b2ctl/config.json` |
+| BAY all `-` (RAID-mode detected despite IT HBA) | a crossflashed PERC H710 may still answer `perccli show ctrlcount`, so auto-detect can pick RaidBackend if sas2ircu can't run. Fix: `apt-get install libc6-i386` so sas2ircu executes (→ forces IT), or set `controller.mode = "it"` in `/etc/b2ctl/config.json` |
 | BAY numbers wrong | edit `bay_map.json` (reverse rule or explicit map); recalibrate with `b2ctl locate <serial>` |
 | BAY mapping works in one directory but not another (raw BDF elsewhere) | pre-v0.8.5 `python -m` cwd-shadowing: running from the source checkout loaded that copy's `bay_map.json`. Fix: `sudo b2ctl update` (bind `/etc/b2ctl/bay_map.json` in config) and redeploy so the launcher has `PYTHONSAFEPATH=1` |
 | locate lights many bays | you're on old sas2ircu-slot locate; this build uses device-based locate — rebuild/redeploy |
@@ -614,11 +835,11 @@ are never touched by `install.sh`.
 
 1. `sas2ircu list` — if stdout is non-empty → `ITBackend`.
 2. sas2ircu binary exists but failed to execute → warn stderr ("apt-get install -y libc6-i386") and **force `ITBackend`** (prevents false RAID detection on crossflashed H710).
-3. `storcli64 show ctrlcount` → non-empty → `RaidBackend`.
-4. `storcli show ctrlcount` → non-empty → `RaidBackend`.
-5. `perccli64 show ctrlcount` → non-empty → `RaidBackend`.
-6. `perccli show ctrlcount` → non-empty → `RaidBackend`.
-7. None found → `die()` with an install hint.
+3. `perccli64 show ctrlcount` → non-empty → `RaidBackend`.
+4. `perccli show ctrlcount` → non-empty → `RaidBackend`.
+5. None found → `die()` with an install hint.
+
+(storcli is never probed — it was dropped because it responds to a crossflashed PERC and caused false RAID detection.)
 
 `_backend_cache` stores the result; `setup_method` in tests clears it via
 `bk_mod._backend_cache = None` to keep tests isolated.
@@ -646,14 +867,81 @@ The `_cache` module-level dict is populated once by `load()` on first call and
 reused. Tests that need a clean state must set `cfg_mod._cache = None` in
 `setup_method`.
 
+### SMART scan tuning — `config.smart_config()` (v0.11.1)
+
+`config['smart']` = `{"timeout": <sec>, "megaraid_workers": <n>}` (defaults
+`10` / `4`). `timeout` is the per-probe `smartctl` timeout; `megaraid_workers`
+caps concurrent megaraid passthrough probes (one PERC serializes them — see §3.4).
+Int-guarded per key: a non-int / non-positive / bool hand-edit is ignored and the
+default kept. Tune on a box whose SAS disks read slowly or intermittently `NOREAD`:
+
+```json
+{ "smart": { "timeout": 25, "megaraid_workers": 2 } }
+```
+
+### Health thresholds — `config.health_config()` (v0.13.0)
+
+`config['health']` is split by disk type — `ssd` (SSD **and** NVMe, `Disk.is_ssd`)
+vs `hdd` — and read by `common.assess()` (table LEVEL) and `burnin.assess()` (POH).
+**A threshold of `null` / `"N/A"` / any non-integer DISABLES that check**
+(`_norm_threshold`); omitting a key keeps its default. Defect signals
+(`realloc`/`pending`/`uncorr`) grade with `>` (`_grade_high`); endurance/wear grade
+with `<` (`_grade_low`, % remaining). Defaults:
+
+| signal | SSD / NVMe | HDD |
+|--------|-----------|-----|
+| `realloc_warn` / `realloc_crit` | `null` / `0` (any → CRITICAL) | `50` / `200` |
+| `pending_warn` / `pending_crit` | `null` / `0` (any → CRITICAL) | `0` / `null` (→ WARNING) |
+| `uncorr_warn` / `uncorr_crit` | `null` / `0` (any → CRITICAL) | `null` / `0` (any → CRITICAL) |
+| `endurance_warn` / `endurance_crit` | `30` / `20` | `null` / `null` |
+| `wear_warn` / `wear_crit` | `30` / `20` | `null` / `null` |
+| `poh_warn` (burn-in) | `null` (off) | `null` (off) |
+
+Example — loosen HDD grading, tighten SSD endurance, enable the burn-in POH warn:
+
+```json
+{ "health": {
+    "hdd": { "realloc_warn": 100, "realloc_crit": 500 },
+    "ssd": { "endurance_crit": 25, "poh_warn": 40000 } } }
+```
+
+### Per-pool maintenance settings — `pools` / `pool_defaults` (v0.17.0)
+
+Two new config sections record the create-time maintenance intent:
+
+```json
+{ "pools":         { "tank": { "autotrim": "off", "autoscrub": false } },
+  "pool_defaults": { "autotrim": "off", "autoscrub": false } }
+```
+
+- `pools.<name>` — per-pool `{autotrim, autoscrub}`, written by
+  `config.set_pool_settings(name, *, autotrim, autoscrub)` on a successful create,
+  dropped by `config.remove_pool_settings(name)` on destroy. Read via
+  `config.pool_settings(name)`.
+- `pool_defaults` — sticky `{autotrim, autoscrub}` that pre-fills the next create's
+  prompts; `config.pool_defaults()` reads it (defaults `autotrim="off"`,
+  `autoscrub=False`), `config.set_pool_defaults(*, autotrim, autoscrub)` updates it
+  after each create. **This is the only source of the autoscrub default-OFF** — there
+  is no `AUTOSCRUB_DEFAULT` constant in code.
+- Both are **shape-guarded** in `load()` (a non-dict `pools`, or a per-pool value
+  that isn't a dict, falls back to `{}` for that entry — the module's
+  malformed→defaults contract).
+
+Every single-setting writer (`set_mode`, `set_pool_settings`,
+`set_pool_defaults`, `remove_pool_settings`) now shares `config._load_for_write()`
+(reads the file preserving **all** existing keys; **raises** on an unparseable /
+non-object file rather than clobbering it — F-075) and `config._atomic_write(data)`
+(tmp-in-same-dir + `os.replace`, so a crash/ENOSPC can't leave a truncated config
+read as all-defaults), then clears `_cache`.
+
 ### Subprocesses added for RAID-mode (new in v0.5.0)
 
 | command | purpose |
 |---------|---------|
-| `storcli64 /c<n>/eall/sall show all` | enumerate all drives and their EID:Slot for the bay map (also works with storcli, perccli64, perccli) |
-| `storcli64 /c<n>/e<enc>/s<slot> set locate start` | turn on locate LED for one drive slot |
-| `storcli64 /c<n>/e<enc>/s<slot> set locate stop` | turn off locate LED for one drive slot |
-| `storcli64 show ctrlcount` | probe for RAID controller presence (also used in auto-detection) |
+| `perccli64 /c<n>/eall/sall show all` | enumerate all drives and their EID:Slot for the bay map (also works with `perccli`) |
+| `perccli64 /c<n>/e<enc>/s<slot> set locate start` | turn on locate LED for one drive slot |
+| `perccli64 /c<n>/e<enc>/s<slot> set locate stop` | turn off locate LED for one drive slot |
+| `perccli64 show ctrlcount` | probe for RAID controller presence (also used in auto-detection) |
 | `sas2ircu list` | probe for IT/HBA controller presence (existing; now also used in auto-detection) |
 
 ---
@@ -731,13 +1019,13 @@ python3 sim/run watch             # swap/replace/offload/create — state.json m
 python3 sim/simctl pull 1:5       # remove a disk (spare auto-resilvers if present)
 python3 sim/simctl insert 1:5     # re-insert → watch sees NEW DISK DETECTED
 python3 sim/simctl dirty 1:5      # mark old data/labels (create wipe-warning path)
-python3 sim/simctl mode it|raid   # switch backend (sas2ircu ↔ storcli/perccli)
+python3 sim/simctl mode it|raid   # switch backend (sas2ircu ↔ perccli)
 python3 sim/simctl show           # disks + pools + mode
 ```
 
 | aspect | note |
 |--------|------|
-| backends | both — `simctl mode it` (sas2ircu) / `mode raid` (storcli/perccli) |
+| backends | both — `simctl mode it` (sas2ircu) / `mode raid` (perccli) |
 | audit isolation | sim writes `sim/var/ops.jsonl` + `sim/var/snapshots/`, **never** `/var/log/b2ctl/` → impossible to confuse with real ops; `b2ctl log`/`rollback` work in the sim |
 | limitations | `by_id=""` (uses `/dev/sdX` tokens, not `ata-`/`wwn-`), LED locate = message only, models b2ctl logic/flow — **not** real ZFS (no checksum/scrub/real resilver timing) |
 | smoke test | `tests/test_sim_smoke.py` drives `sim/run` via subprocess |
@@ -790,28 +1078,90 @@ writer of `/etc/b2ctl/config.json`.
 
 ---
 
-## ZFS pool lifecycle + maintenance cron
+## ZFS pool lifecycle + maintenance timers
 
-`create` (`[n]ew-pool` / `b2ctl create`) prompts each pool property with an
-SSD-optimal default (`ashift=12`, `compression=lz4`, `atime=off`, `xattr=sa`,
-`dnodesize=auto`, `acltype=posixacl`, `recordsize=128K`) and an **autotrim
-choice**:
+`create` (`[n]ew-pool` / `b2ctl create`) prompts an over-provision **size** (blank
+= whole disk; see the over-provisioning note in §3.6), then each pool property with
+an SSD-optimal default (`ashift=12`, `compression=lz4`, `atime=off`, `xattr=sa`,
+`dnodesize=auto`, `acltype=posixacl`, `recordsize=128K`) and two independent
+**autotrim** + **autoscrub** choices.
 
-- **off (Monthly)** — `autotrim=off` + writes a per-pool cron
-  `/etc/cron.d/b2ctl-<pool>` (root, absolute zpool path):
-  ```
-  24 0 1-7  * * root [ "$(date +\%w)" -eq 0 ] && /usr/sbin/zpool trim <pool>    # 1st Sunday
-  24 0 8-14 * * root [ "$(date +\%w)" -eq 0 ] && /usr/sbin/zpool scrub <pool>   # 2nd Sunday
-  ```
-- **on** — `autotrim=on` (continuous); no cron written.
+Maintenance is scheduled via the **distro systemd timer templates** shipped
+(disabled) by `zfsutils-linux` — b2ctl enables one instance per pool (v0.16.0;
+replaces the previous `/etc/cron.d/b2ctl-<pool>` writer).
+
+**autoscrub is opt-in, default OFF (v0.17.0 — REVERSES v0.16.0's always-on scrub,
+ADR-003).** SCRUB reads every allocated block, verifies checksums, and self-heals —
+the actual bad-sector/bitrot defense — but the scrub timer now enables **only** when
+the operator says yes at the create prompt (default off; seeded from
+`config.pool_defaults()`, no in-code `AUTOSCRUB_DEFAULT`). When off, b2ctl prints a
+`[!] autoscrub OFF …` warning and manual `b2ctl maint scrub`/`[m]aint` (§3.6b) is the
+primary self-heal path.
+
+**TRIM timer DROPPED — `autotrim off` is now MANUAL-ONLY (v0.18.0, ADR-004,
+REVERSES v0.16.0/v0.17.0).** TRIM (tells the SSD which blocks are free) is now
+symmetric with scrub: `autotrim off` installs **no timer** — the operator TRIMs via
+`[m]aint` / `b2ctl maint trim <pool>`; `autotrim on` sets `zpool autotrim=on` (ZFS
+trims inline). `create` therefore calls `install_pool_timers(name,
+include_scrub=autoscrub_on, include_trim=False)` — **always `include_trim=False`**.
+On create with autotrim off you see `[!] autotrim OFF — TRIM manually via
+\`b2ctl maint trim <pool>\``.
+
+- **autoscrub on** → `systemctl enable --now zfs-scrub-monthly@<pool>.timer`.
+- **autoscrub off** → **no scrub timer** (manual scrub is primary).
+- **autotrim on/off** → **never a trim timer** (`autotrim=on` = inline; `off` =
+  manual). The only pool timer b2ctl installs on create is the scrub timer.
+
+`enable --now` starts the *timer* (schedules the next `OnCalendar` run — appears in
+`systemctl list-timers`); it does NOT kick off an immediate scrub.
+`zfs.install_pool_timers(pool, *, include_scrub=True, include_trim=True,
+dry_run=False)` still takes `include_trim=` for API completeness (and
+`remove_pool_timers` still disables both kinds, so a pool created by an older b2ctl
+with a trim timer is cleaned up on destroy), but **create never requests trim**. `ok`
+reflects the **scrub** timer specifically, but when scrub was NOT requested there is
+nothing to fail on, so `ok=True` — unlike v0.16.0 where a missing scrub timer was the
+failure.
+
+**No double-scrub with the Debian cron.** `zfsutils-linux` also ships
+`/etc/cron.d/zfsutils-linux`, which scrubs/trims **every** online pool monthly,
+gated by the per-pool user properties `org.debian:periodic-scrub` /
+`org.debian:periodic-trim` (default `auto` = enabled). Left alone, that cron plus our
+per-pool scrub timer would schedule the pool twice. So immediately **after** the
+scrub timer enables, `install_pool_timers` runs `zpool set
+org.debian:periodic-scrub=disable <pool>` — the distro all-pools cron then skips this
+pool and the per-pool timer is the single schedule. (Since create no longer installs a
+trim timer, the `periodic-trim` disable is not triggered on create — the Debian trim
+cron, if enabled, still covers the pool.) This is best-effort (a failed `zpool set`
+warns but does not flip `ok` — worst case is one extra scrub, never a gap), and needs
+no restore on destroy (the property dies with the pool). `org.debian:*` is a plain
+user property — settable and harmless even on a box where the Debian scripts aren't
+installed.
+
+**Template-missing → warn, no fallback.** A read-only probe
+(`_timer_template_exists` → `systemctl list-unit-files zfs-<kind>-monthly@.timer`,
+via `run()` so it's never dry-run-gated) checks the template exists first. If it
+doesn't (non-standard ZFS build), b2ctl **warns and enables nothing** — the operator
+must install `zfsutils-linux` or schedule manually; b2ctl does not fall back to cron.
+`systemctl` is in `safety.WRITE_CMDS`, so `enable`/`disable` (through `run_check`) are
+suppressed under `--dry-run`; the read probes use `run()` and still execute.
 
 `destroy` (`[x]` / `b2ctl destroy <pool>`) runs `zpool destroy <pool>` behind a
 double-confirm (must type the pool name; ALL-DATA-LOST warning; audited via
-`safety.begin_op/end_op`) and then removes `/etc/cron.d/b2ctl-<pool>`.
+`safety.begin_op/end_op`), then `zfs.remove_pool_timers` best-effort `systemctl
+disable --now` for the pool's scrub + trim timers, and `config.remove_pool_settings(
+pool)` to drop the per-pool record from `/etc/b2ctl/config.json` (v0.17.0).
 
-Pools destroyed **outside** b2ctl (manual `zpool destroy`) leave a stale cron;
-`b2ctl watch` **prunes orphan crons** at startup (`prune_orphan_crons` deletes
-`b2ctl-*` files whose pool is absent from `zpool list`).
+**Per-pool config (v0.17.0).** On a successful create, watch records the pool's
+maintenance intent with `config.set_pool_settings(name, autotrim=…, autoscrub=…)`
+(→ `pools.<name>` in `config.json`) and refreshes the sticky
+`config.set_pool_defaults(…)` (→ `pool_defaults`, which pre-fills the next create's
+prompts). See §10.
+
+Pools destroyed **outside** b2ctl (manual `zpool destroy`) leave stale enabled
+timers; `b2ctl watch` **prunes orphan timers** at startup
+(`prune_orphan_timers` enumerates active `zfs-{scrub,trim}-monthly@*.timer`
+instances via `systemctl list-units` and `disable --now`s those whose pool is absent
+from `zpool list`; guarded so a transient `zpool list` failure disables nothing).
 
 ### bay_map.json (panel schema) + NVMe PCIe bay
 

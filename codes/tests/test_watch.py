@@ -303,22 +303,25 @@ class TestWatchCreate:
         import b2ctl.zfs as real_zfs
         d = _disk(pool=None, vdev=None, vdev_state=None)
         mock_core.scan.return_value = [d]
-        mock_ask.side_effect = ["1", "mypool", "raidz2"]
+        mock_ask.side_effect = ["1", "", "mypool", "raidz2"]   # pick, size, name, raid
         mock_zfs.MIN_DISKS = real_zfs.MIN_DISKS
         _cmd_create({})
         captured = capsys.readouterr()
         assert "need at least" in captured.out
         mock_zfs.create_pool.assert_not_called()
 
+    @patch("b2ctl.watch._cfg")
     @patch("b2ctl.watch.ui")
     @patch("b2ctl.watch.zfs")
     @patch("b2ctl.watch.core")
     @patch("b2ctl.watch._confirm", return_value=True)
     @patch("b2ctl.watch._ask")
     def test_create_pool_prompts_props_and_passes_defaults(self, mock_ask, _mc,
-                                                           mock_core, mock_zfs, mock_ui):
+                                                           mock_core, mock_zfs, mock_ui,
+                                                           mock_cfg):
         from b2ctl.watch import _cmd_create
         import b2ctl.zfs as real_zfs
+        mock_cfg.pool_defaults.return_value = {"autotrim": "off", "autoscrub": False}
         d1 = _disk(pool=None, vdev=None, vdev_state=None, dev="/dev/sda", by_id="/d/a")
         d2 = _disk(pool=None, vdev=None, vdev_state=None, dev="/dev/sdb",
                    serial="S2", by_id="/d/b")
@@ -328,26 +331,35 @@ class TestWatchCreate:
         mock_zfs.DEFAULT_FS_OPTS = real_zfs.DEFAULT_FS_OPTS
         mock_zfs.has_zfs_label.return_value = False
         mock_zfs.create_pool.return_value = (True, "")
-        mock_zfs.install_pool_cron.return_value = (True, "/etc/cron.d/b2ctl-tank")
-        # pick "1 2", name, raid type, then Enter for ashift + autotrim choice + 6 fs
-        mock_ask.side_effect = ["1 2", "tank", "mirror"] + [""] * 8
+        mock_zfs.install_pool_timers.return_value = (True, "enabled …")
+        # pick, size(blank=whole disk), name, raid type, then Enter for ashift +
+        # autotrim choice + autoscrub choice + 6 fs
+        mock_ask.side_effect = ["1 2", "", "tank", "mirror"] + [""] * 9
         _cmd_create({})
         kwargs = mock_zfs.create_pool.call_args.kwargs
-        # autotrim default choice = off (Monthly) -> cron installed
+        # v0.18.0: autotrim default=off, autoscrub default=off (both [1]=off) ->
+        # NO timers installed (manual-only maintenance; trim timer dropped).
         assert kwargs["pool_opts"]["ashift"] == "12"
         assert kwargs["pool_opts"]["autotrim"] == "off"
         assert kwargs["fs_opts"] == real_zfs.DEFAULT_FS_OPTS
-        mock_zfs.install_pool_cron.assert_called_once_with("tank", dry_run=False)
+        mock_zfs.install_pool_timers.assert_called_once_with(
+            "tank", include_scrub=False, include_trim=False, dry_run=False)
+        mock_cfg.set_pool_settings.assert_called_once()
 
+    @patch("b2ctl.watch._cfg")
     @patch("b2ctl.watch.ui")
     @patch("b2ctl.watch.zfs")
     @patch("b2ctl.watch.core")
     @patch("b2ctl.watch._confirm", return_value=True)
     @patch("b2ctl.watch._ask")
-    def test_create_pool_autotrim_on_skips_cron(self, mock_ask, _mc, mock_core,
-                                                mock_zfs, mock_ui):
+    def test_create_pool_autotrim_on_autoscrub_on_timers(
+            self, mock_ask, _mc, mock_core, mock_zfs, mock_ui, mock_cfg):
+        # v0.18.0: both prompts are [1]off/[2]on. autotrim=on -> zpool autotrim=on
+        # (no timer, inline); autoscrub=on -> scrub timer enabled. The trim timer is
+        # never installed (manual-only), so include_trim is always False.
         from b2ctl.watch import _cmd_create
         import b2ctl.zfs as real_zfs
+        mock_cfg.pool_defaults.return_value = {"autotrim": "off", "autoscrub": False}
         d1 = _disk(pool=None, vdev=None, vdev_state=None, dev="/dev/sda", by_id="/d/a")
         d2 = _disk(pool=None, vdev=None, vdev_state=None, dev="/dev/sdb",
                    serial="S2", by_id="/d/b")
@@ -357,11 +369,14 @@ class TestWatchCreate:
         mock_zfs.DEFAULT_FS_OPTS = real_zfs.DEFAULT_FS_OPTS
         mock_zfs.has_zfs_label.return_value = False
         mock_zfs.create_pool.return_value = (True, "")
-        # ashift blank, autotrim choice "2" (on), 6 fs blank
-        mock_ask.side_effect = ["1 2", "tank", "mirror", "", "2"] + [""] * 6
+        mock_zfs.install_pool_timers.return_value = (True, "enabled …")
+        # pick, size blank, name, raid, ashift blank, autotrim "2" (on),
+        # autoscrub "2" (on), 6 fs blank
+        mock_ask.side_effect = ["1 2", "", "tank", "mirror", "", "2", "2"] + [""] * 6
         _cmd_create({})
         assert mock_zfs.create_pool.call_args.kwargs["pool_opts"]["autotrim"] == "on"
-        mock_zfs.install_pool_cron.assert_not_called()
+        mock_zfs.install_pool_timers.assert_called_once_with(
+            "tank", include_scrub=True, include_trim=False, dry_run=False)
 
     @patch("b2ctl.watch.zfs")
     @patch("b2ctl.watch.core")
@@ -373,7 +388,7 @@ class TestWatchCreate:
         d2 = _disk(pool=None, vdev=None, vdev_state=None, dev="/dev/sdb",
                    serial="S2")
         mock_core.scan.return_value = [d1, d2]
-        mock_ask.side_effect = ["1 2", "mypool", "raidz99"]
+        mock_ask.side_effect = ["1 2", "", "mypool", "raidz99"]   # pick, size, name, raid
         _cmd_create({})
         captured = capsys.readouterr()
         assert "invalid raid type" in captured.out
@@ -786,16 +801,16 @@ class TestWatchDestroy(unittest.TestCase):
     @patch("b2ctl.watch.core")
     @patch("b2ctl.watch._confirm", return_value=True)
     @patch("b2ctl.watch._ask", return_value="tank")   # type the pool name
-    def test_destroy_confirmed_destroys_and_removes_cron(self, _ask, _mc, mock_core,
-                                                         mock_zfs, _safety, mock_ui):
+    def test_destroy_confirmed_destroys_and_disables_timers(self, _ask, _mc, mock_core,
+                                                            mock_zfs, _safety, mock_ui):
         from b2ctl.watch import _cmd_destroy
         mock_zfs.list_pools.return_value = [{"name": "tank", "size": "1T", "health": "ONLINE"}]
         mock_core.scan.return_value = []
         mock_zfs.destroy_pool.return_value = (True, "")
-        mock_zfs.remove_pool_cron.return_value = (True, "/etc/cron.d/b2ctl-tank")
+        mock_zfs.remove_pool_timers.return_value = (True, "disabled …")
         _cmd_destroy({}, target="tank")
         mock_zfs.destroy_pool.assert_called_once_with("tank", dry_run=False)
-        mock_zfs.remove_pool_cron.assert_called_once_with("tank", dry_run=False)
+        mock_zfs.remove_pool_timers.assert_called_once_with("tank", dry_run=False)
 
     @patch("b2ctl.watch.ui")
     @patch("b2ctl.watch.zfs")
@@ -808,7 +823,7 @@ class TestWatchDestroy(unittest.TestCase):
         mock_core.scan.return_value = []
         _cmd_destroy({}, target="tank")
         mock_zfs.destroy_pool.assert_not_called()
-        mock_zfs.remove_pool_cron.assert_not_called()
+        mock_zfs.remove_pool_timers.assert_not_called()
 
 
 class TestRefreshStorageSummary(unittest.TestCase):
@@ -863,7 +878,7 @@ class TestExtendAndBurnin(unittest.TestCase):
         mock_zfs.add_cache.return_value = (True, "")
         free = _disk(dev="/dev/sde", pool=None, vdev=None, smart_dtype="")
         mock_core.scan.return_value = [free]
-        mock_ask.side_effect = ["1", "1"]            # action=cache, pick disk #1
+        mock_ask.side_effect = ["1", "1", ""]        # action=cache, pick #1, size(blank)
         _cmd_extend({})
         mock_zfs.add_cache.assert_called_once()
         self.assertEqual(mock_zfs.add_cache.call_args[0][0], "tank")
@@ -879,9 +894,11 @@ class TestExtendAndBurnin(unittest.TestCase):
         a = _disk(dev="/dev/sdx", pool=None, vdev=None, smart_dtype="")
         b = _disk(dev="/dev/sdy", serial="DIFF", pool=None, vdev=None, smart_dtype="")
         mock_core.scan.return_value = [a, b]
-        mock_ask.side_effect = ["2", "1 2"]          # action=log, pick both
+        # action=log, pick both, size(blank), topology "1"=mirror
+        mock_ask.side_effect = ["2", "1 2", "", "1"]
         _cmd_extend({})
         mock_zfs.add_log.assert_called_once()
+        self.assertEqual(mock_zfs.add_log.call_args.kwargs.get("raid_type"), "mirror")
 
     @patch("b2ctl.watch.zfs")
     @patch("b2ctl.watch._confirm", return_value=True)
@@ -896,17 +913,18 @@ class TestExtendAndBurnin(unittest.TestCase):
         _cmd_extend({})
         mock_zfs.remove_vdev.assert_called_once_with("tank", "sde", dry_run=False)
 
+    @patch("b2ctl.watch.maint")
     @patch("b2ctl.watch.core")
     @patch("b2ctl.watch._ask")
-    def test_burnin_dispatch(self, mock_ask, mock_core):
-        from b2ctl.watch import _cmd_burnin
+    def test_burnin_dispatch(self, mock_ask, mock_core, _maint):
+        from b2ctl.watch import _maint_health
         free = _disk(dev="/dev/sde", pool=None, vdev=None, smart_dtype="")
         mock_core.scan.return_value = [free]
         mock_ask.side_effect = ["1"]
         with patch("b2ctl.burnin.run_multi", return_value=0) as mock_run, \
              patch("b2ctl.burnin.load_state", return_value=[]), \
              patch("b2ctl.watch._confirm", side_effect=[True, False]):
-            _cmd_burnin({})
+            _maint_health({})
         mock_run.assert_called_once()
 
     @patch("b2ctl.watch.zfs")
@@ -919,9 +937,9 @@ class TestExtendAndBurnin(unittest.TestCase):
         b = _disk(dev="/dev/b", serial="B", pool=None, vdev=None, smart_dtype="")
         c = _disk(dev="/dev/c", serial="C", pool=None, vdev=None, smart_dtype="")
         mock_core.scan.return_value = [a, b, c]
-        mock_ask.side_effect = ["1 2 3", "tank"]     # pick 3 disks, name
+        mock_ask.side_effect = ["1 2 3", "", "tank"]  # pick 3, size(blank), name
         _cmd_create({}, raid_type="raid10")
-        mock_zfs.create_pool.assert_not_called()     # odd count rejected
+        mock_zfs.create_pool.assert_not_called()     # rejected (< 4 disks)
 
 
 class TestWipeGhostByIdGuard(unittest.TestCase):
@@ -1000,7 +1018,7 @@ class TestOfflineReplaceNewDiskDetection(unittest.TestCase):
 
 
 class TestStartupPruneDryRun(unittest.TestCase):
-    """F-058: `b2ctl --dry-run watch` must not delete cron files at startup."""
+    """F-058: `b2ctl --dry-run watch` must not disable timers at startup."""
 
     def test_prune_receives_dry_run_flag(self):
         import b2ctl.watch as watch
@@ -1011,10 +1029,10 @@ class TestStartupPruneDryRun(unittest.TestCase):
                  patch("b2ctl.watch._block_devs", return_value=set()), \
                  patch("b2ctl.watch.select.select", return_value=([sys.stdin], [], [])), \
                  patch("b2ctl.watch.sys.stdin") as mstdin:
-                mz.prune_orphan_crons.return_value = []
+                mz.prune_orphan_timers.return_value = []
                 mstdin.readline.return_value = "q\n"
                 watch.run()
-            mz.prune_orphan_crons.assert_called_once_with(dry_run=True)
+            mz.prune_orphan_timers.assert_called_once_with(dry_run=True)
         finally:
             watch._DRY_RUN = False
 
@@ -1179,39 +1197,371 @@ class TestAssignFreeDisk:
 
 
 class TestWatchBurnin(unittest.TestCase):
-    """[b]urnin multi-select (space list) -> burnin.run_multi."""
+    """[m]aint health-check multi-select (space list) -> burnin.run_multi (v0.18.0)."""
 
+    @patch("b2ctl.watch.maint")
     @patch("b2ctl.burnin.run_multi")
     @patch("b2ctl.burnin.load_state", return_value=[])
     @patch("b2ctl.watch._confirm")
     @patch("b2ctl.watch._ask")
     @patch("b2ctl.watch._avail_for_aux")
     def test_multi_select_calls_run_multi(self, mock_avail, mock_ask,
-                                          mock_confirm, _load, mock_run_multi):
+                                          mock_confirm, _load, mock_run_multi,
+                                          _maint):
         from b2ctl import watch
         a = _disk(dev="/dev/sdb", serial="A", pool=None, vdev=None, vdev_state=None)
         b = _disk(dev="/dev/sdc", serial="B", pool=None, vdev=None, vdev_state=None)
         c = _disk(dev="/dev/sdd", serial="C", pool=None, vdev=None, vdev_state=None)
         mock_avail.return_value = [a, b, c]
         mock_ask.return_value = "1 3"               # pick 1st and 3rd
-        mock_confirm.side_effect = [True, False]    # burn-in yes, scan no
-        watch._cmd_burnin({})
+        mock_confirm.side_effect = [True, False]    # health-check yes, scan no
+        watch._maint_health({})
         mock_run_multi.assert_called_once()
         picks = mock_run_multi.call_args[0][0]
         self.assertEqual([d.serial for d in picks], ["A", "C"])
         self.assertEqual(mock_run_multi.call_args.kwargs.get("do_scan"), False)
+        _maint.log_event.assert_called()           # health "started" recorded
 
     @patch("b2ctl.burnin.status_view")
     @patch("b2ctl.burnin.run_multi")
     @patch("b2ctl.burnin.load_state",
-           return_value=[{"serial": "X", "dev": "/dev/sdb"}])
-    @patch("b2ctl.watch._confirm", return_value=True)
-    def test_reattaches_when_burnin_in_flight(self, _confirm, _load,
-                                              mock_run_multi, mock_status):
+           return_value=[{"serial": "X", "dev": "/dev/sdb", "bay": "1:0"}])
+    @patch("b2ctl.watch._ask", return_value="v")
+    def test_reattach_view_when_burnin_in_flight(self, _ask, _load,
+                                                 mock_run_multi, mock_status):
         from b2ctl import watch
-        watch._cmd_burnin({})
-        mock_status.assert_called_once()            # viewed the in-flight run
+        watch._maint_health({})
+        mock_status.assert_called_once()            # [v] viewed the in-flight run
         mock_run_multi.assert_not_called()          # did not start a new one
+
+    @patch("b2ctl.burnin.cancel", return_value=0)
+    @patch("b2ctl.burnin.run_multi")
+    @patch("b2ctl.burnin.load_state",
+           return_value=[{"serial": "X", "dev": "/dev/sdb", "bay": "1:0"}])
+    @patch("b2ctl.watch._confirm", return_value=True)
+    @patch("b2ctl.watch._ask", side_effect=["c", "1"])
+    def test_reattach_cancel_one(self, _ask, _confirm, _load,
+                                 mock_run_multi, mock_cancel):
+        from b2ctl import watch
+        watch._maint_health({})
+        mock_cancel.assert_called_once()
+        self.assertEqual(mock_cancel.call_args[0][0], ["X"])   # cancel by serial
+        mock_run_multi.assert_not_called()
+
+    @patch("b2ctl.burnin.cancel_all", return_value=0)
+    @patch("b2ctl.burnin.run_multi")
+    @patch("b2ctl.burnin.load_state",
+           return_value=[{"serial": "X", "dev": "/dev/sdb", "bay": "1:0"}])
+    @patch("b2ctl.watch._confirm", return_value=True)
+    @patch("b2ctl.watch._ask", return_value="a")
+    def test_reattach_cancel_all(self, _ask, _confirm, _load,
+                                 mock_run_multi, mock_cancel_all):
+        from b2ctl import watch
+        watch._maint_health({})
+        mock_cancel_all.assert_called_once()
+        mock_run_multi.assert_not_called()
+
+
+class TestPickIndices(unittest.TestCase):
+    """Shared multi-select parse `_pick_indices` (F-052 guard + dedupe)."""
+
+    def test_multi_dedupe_order_preserved(self):
+        from b2ctl.watch import _pick_indices
+        self.assertEqual(_pick_indices("2 3 4", 5), [1, 2, 3])
+        self.assertEqual(_pick_indices("2 2 3", 5), [1, 2])   # dedupe, keep order
+        self.assertEqual(_pick_indices("1", 5), [0])
+        self.assertEqual(_pick_indices("", 5), [])
+
+    def test_rejects_zero_negative_nonnumeric_and_out_of_range(self):
+        from b2ctl.watch import _pick_indices
+        for bad in ("0", "-1", "x", "1 0", "1 x", "6", "1 6"):   # 6 > n=5
+            with self.assertRaises((ValueError, IndexError)):
+                _pick_indices(bad, 5)
+
+    def test_zero_never_wraps_to_last(self):
+        # F-052: '0' -> index -1 must raise, never silently pick list[-1]
+        from b2ctl.watch import _pick_indices
+        with self.assertRaises(IndexError):
+            _pick_indices("0", 3)
+
+
+class TestAssignMultiSelect(unittest.TestCase):
+    """[a]ssign multi-select: 1 pick -> single per-disk menu (unchanged); 2+ picks
+    -> batch, homogeneous only. Mirrors the burnin space-separated idiom."""
+
+    @staticmethod
+    def _free(dev, sn):
+        d = Disk(dev=dev); d.serial = sn; d.bay = "b"; return d
+
+    @staticmethod
+    def _perc(sn):
+        d = Disk(dev="/dev/sda"); d.serial = sn
+        d.smart_dtype = f"megaraid,{sn}"; d.pd_state = "UGood"; return d
+
+    @patch("b2ctl.watch._assign_free_disks_batch")
+    @patch("b2ctl.watch._assign_free_disk")
+    @patch("b2ctl.raid_actions.assign_perc_batch")
+    @patch("b2ctl.watch._ask", return_value="1 2")
+    @patch("b2ctl.watch.core")
+    def test_batch_zfs_routes_to_free_batch(self, mock_core, _ask, perc_b, single, free_b):
+        import b2ctl.watch as watch
+        a = self._free("/dev/sdb", "A"); b = self._free("/dev/sdc", "B")
+        mock_core.scan.return_value = [a, b]
+        watch._cmd_assign({})
+        free_b.assert_called_once()
+        self.assertEqual(free_b.call_args[0][0], [a, b])
+        single.assert_not_called()
+        perc_b.assert_not_called()
+
+    @patch("b2ctl.watch._assign_free_disks_batch")
+    @patch("b2ctl.watch._assign_free_disk")
+    @patch("b2ctl.watch._ask", return_value="2 2")
+    @patch("b2ctl.watch.core")
+    def test_dedupe_collapses_to_single(self, mock_core, _ask, single, free_b):
+        import b2ctl.watch as watch
+        a = self._free("/dev/sdb", "A"); b = self._free("/dev/sdc", "B")
+        mock_core.scan.return_value = [a, b]
+        watch._cmd_assign({})
+        single.assert_called_once()             # 1 unique pick -> old menu
+        self.assertIs(single.call_args[0][0], b)   # index 2 -> b
+        free_b.assert_not_called()
+
+    @patch("b2ctl.watch._assign_free_disks_batch")
+    @patch("b2ctl.watch._assign_free_disk")
+    @patch("b2ctl.watch.core")
+    def test_reject_zero_and_nonnumeric(self, mock_core, single, free_b):
+        import b2ctl.watch as watch
+        a = self._free("/dev/sdb", "A")
+        mock_core.scan.return_value = [a]
+        for bad in ("0", "x", "1 0", "1 x"):
+            with patch("b2ctl.watch._ask", return_value=bad):
+                watch._cmd_assign({})
+        single.assert_not_called()
+        free_b.assert_not_called()
+
+    @patch("b2ctl.raid_actions.assign_perc_batch")
+    @patch("b2ctl.watch._assign_free_disks_batch")
+    @patch("b2ctl.watch._ask", return_value="1 2")
+    @patch("b2ctl.watch.core")
+    def test_mixed_categories_refused(self, mock_core, _ask, free_b, perc_b):
+        import b2ctl.watch as watch
+        free = self._free("/dev/sdb", "F")      # [1] zfs
+        perc = self._perc("4")                  # [2] perc  (display order: zfs, ghost, perc)
+        mock_core.scan.return_value = [free, perc]
+        watch._cmd_assign({})
+        free_b.assert_not_called()
+        perc_b.assert_not_called()
+
+    @patch("b2ctl.raid_actions.assign_perc_batch", return_value=0)
+    @patch("b2ctl.watch._ask", return_value="1 2")
+    @patch("b2ctl.watch.core")
+    def test_batch_perc_routes_to_perc_batch(self, mock_core, _ask, perc_b):
+        import b2ctl.watch as watch
+        p1 = self._perc("1"); p2 = self._perc("2")
+        mock_core.scan.return_value = [p1, p2]
+        watch._cmd_assign({})
+        perc_b.assert_called_once()
+        self.assertEqual(perc_b.call_args[0][0], [p1, p2])
+
+
+class TestRepairAux(unittest.TestCase):
+    """_repair_aux branches by leaf class/state and honors dry-run."""
+
+    NEW = "/dev/disk/by-id/ata-NEW"
+
+    def _new_disk(self):
+        return _disk(dev="/dev/sdz", by_id=self.NEW, serial="NEW1", bay="1:9",
+                     pool=None, vdev=None, vdev_state=None, pool_token=None)
+
+    @staticmethod
+    def _leaf(klass, *, vdev, state, mirror_leg):
+        return {"token": "/dev/disk/by-id/ata-OLD", "klass": klass, "vdev": vdev,
+                "top_vdev": "logs" if klass == "log" else "cache", "state": state,
+                "mirror_leg": mirror_leg, "degraded": True}
+
+    def _run(self, leaf, *, dry=False, rc_ok=True, resilver=True):
+        import b2ctl.watch as watch
+        with patch("b2ctl.watch._confirm", return_value=True), \
+             patch("b2ctl.watch.run_check", return_value=(rc_ok, "" if rc_ok else "err")) as mrc, \
+             patch("b2ctl.watch._wait_resilver", return_value=resilver) as mwait, \
+             patch("b2ctl.safety.begin_op", return_value="op1"), \
+             patch("b2ctl.safety.end_op") as mend, \
+             patch.object(watch, "_DRY_RUN", dry):
+            ok = watch._repair_aux("tank", leaf, self._new_disk())
+        cmds = [c.args[0] for c in mrc.call_args_list]
+        return ok, cmds, mrc, mwait, mend
+
+    def test_cache_is_remove_then_add_no_resilver(self):
+        leaf = self._leaf("cache", vdev="cache", state="UNAVAIL", mirror_leg=False)
+        ok, cmds, _mrc, mwait, mend = self._run(leaf)
+        self.assertTrue(ok)
+        self.assertEqual(cmds, [
+            ["zpool", "remove", "tank", "/dev/disk/by-id/ata-OLD"],
+            ["zpool", "add", "-f", "tank", "cache", self.NEW]])
+        mwait.assert_not_called()                       # cache never resilvers
+        self.assertIs(mend.call_args.args[1], True)     # audited success
+
+    def test_log_mirror_leg_is_replace_and_waits(self):
+        leaf = self._leaf("log", vdev="mirror-1", state="FAULTED", mirror_leg=True)
+        ok, cmds, _mrc, mwait, _mend = self._run(leaf)
+        self.assertTrue(ok)
+        self.assertEqual(cmds, [
+            ["zpool", "replace", "-f", "tank", "/dev/disk/by-id/ata-OLD", self.NEW]])
+        mwait.assert_called_once_with("tank")
+
+    def test_single_log_gone_is_remove_then_add_log(self):
+        leaf = self._leaf("log", vdev="logs", state="REMOVED", mirror_leg=False)
+        ok, cmds, _mrc, mwait, _mend = self._run(leaf)
+        self.assertTrue(ok)
+        self.assertEqual(cmds, [
+            ["zpool", "remove", "tank", "/dev/disk/by-id/ata-OLD"],
+            ["zpool", "add", "-f", "tank", "log", self.NEW]])
+        mwait.assert_not_called()
+
+    def test_single_log_present_is_replace(self):
+        leaf = self._leaf("log", vdev="logs", state="FAULTED", mirror_leg=False)
+        ok, cmds, _mrc, mwait, _mend = self._run(leaf)
+        self.assertTrue(ok)
+        self.assertEqual(cmds, [
+            ["zpool", "replace", "-f", "tank", "/dev/disk/by-id/ata-OLD", self.NEW]])
+        mwait.assert_called_once_with("tank")
+
+    def test_dry_run_gates_writes_and_skips_resilver(self):
+        leaf = self._leaf("log", vdev="mirror-1", state="FAULTED", mirror_leg=True)
+        ok, _cmds, mrc, mwait, _mend = self._run(leaf, dry=True)
+        self.assertTrue(ok)
+        # every write threaded dry_run=True; resilver wait skipped under dry-run
+        for call in mrc.call_args_list:
+            self.assertTrue(call.kwargs.get("dry_run"))
+        mwait.assert_not_called()
+
+    def test_failed_command_aborts_and_audits_failure(self):
+        leaf = self._leaf("cache", vdev="cache", state="UNAVAIL", mirror_leg=False)
+        ok, cmds, _mrc, _mwait, mend = self._run(leaf, rc_ok=False)
+        self.assertFalse(ok)
+        self.assertEqual(len(cmds), 1)                  # stops at first failure
+        self.assertIs(mend.call_args.args[1], False)
+
+    def test_errored_resilver_returns_false(self):
+        leaf = self._leaf("log", vdev="mirror-1", state="FAULTED", mirror_leg=True)
+        ok, _cmds, _mrc, _mwait, mend = self._run(leaf, resilver=False)
+        self.assertFalse(ok)
+        self.assertIs(mend.call_args.args[1], False)
+
+    def test_decline_confirm_does_not_begin_op(self):
+        import b2ctl.watch as watch
+        leaf = self._leaf("cache", vdev="cache", state="UNAVAIL", mirror_leg=False)
+        with patch("b2ctl.watch._confirm", return_value=False), \
+             patch("b2ctl.watch.run_check") as mrc, \
+             patch("b2ctl.safety.begin_op") as mbegin:
+            self.assertFalse(watch._repair_aux("tank", leaf, self._new_disk()))
+        mbegin.assert_not_called()
+        mrc.assert_not_called()
+
+
+class TestMaint(unittest.TestCase):
+    """_cmd_maint: scrub/trim start + logging, health-check, decline."""
+
+    @patch("b2ctl.watch.maint")
+    @patch("b2ctl.watch.zfs")
+    @patch("b2ctl.watch._confirm", side_effect=[True, False])   # start yes, watch no
+    def test_scrub_starts_and_logs(self, _cf, mock_zfs, mock_maint):
+        from b2ctl.watch import _cmd_maint
+        mock_zfs.last_scrub_date.return_value = None
+        mock_zfs.start_scrub.return_value = (True, "")
+        ok = _cmd_maint({}, action="scrub", pool="tank")
+        assert ok is True
+        mock_zfs.start_scrub.assert_called_once_with("tank", dry_run=False)
+        logged = [c.args[0] for c in mock_maint.log_event.call_args_list]
+        assert "scrub" in logged
+
+    @patch("b2ctl.watch.maint")
+    @patch("b2ctl.watch.zfs")
+    @patch("b2ctl.watch._confirm", side_effect=[True, False])
+    def test_trim_starts(self, _cf, mock_zfs, mock_maint):
+        from b2ctl.watch import _cmd_maint
+        mock_zfs.start_trim.return_value = (True, "")
+        ok = _cmd_maint({}, action="trim", pool="tank")
+        assert ok is True
+        mock_zfs.start_trim.assert_called_once_with("tank", dry_run=False)
+
+    @patch("b2ctl.watch.zfs")
+    @patch("b2ctl.watch._confirm", return_value=False)
+    def test_decline_does_not_start(self, _cf, mock_zfs):
+        from b2ctl.watch import _cmd_maint
+        ok = _cmd_maint({}, action="trim", pool="tank")
+        assert ok is False
+        mock_zfs.start_trim.assert_not_called()
+
+    @patch("b2ctl.watch.maint")
+    @patch("b2ctl.watch._avail_for_aux")
+    @patch("b2ctl.watch._confirm", side_effect=[True, False])   # health-check yes, scan no
+    @patch("b2ctl.watch._ask")
+    def test_health_check_runs_full_vetting(self, mock_ask, _cf, mock_avail, mock_maint):
+        # v0.18.0: [m]aint health-check IS the merged burn-in engine (run_multi),
+        # not a bare start_selftest; it selects free disks via _avail_for_aux.
+        from b2ctl.watch import _cmd_maint
+        d = _disk(dev="/dev/sdz", serial="SER1", pool=None, vdev=None, smart_dtype="")
+        mock_avail.return_value = [d]
+        mock_ask.side_effect = ["1"]            # pick disk #1
+        with patch("b2ctl.burnin.run_multi", return_value=0) as mock_run, \
+             patch("b2ctl.burnin.load_state", return_value=[]):
+            ok = _cmd_maint({}, action="health")
+        assert ok is True
+        mock_run.assert_called_once()
+        assert [x.serial for x in mock_run.call_args.args[0]] == ["SER1"]
+        mock_maint.log_event.assert_called()   # health "started" recorded
+
+
+class TestMaybePartition(unittest.TestCase):
+    """v0.18.0: over-provision WIPES each disk before sgdisk (stale-GPT fix)."""
+
+    @patch("b2ctl.watch.ui")
+    @patch("b2ctl.watch.zfs")
+    @patch("b2ctl.watch._confirm", return_value=True)
+    def test_wipes_then_partitions(self, _cf, mock_zfs, _ui):
+        from b2ctl.watch import _maybe_partition
+        mock_zfs.parse_size.return_value = 32 * 2**30
+        mock_zfs.wipe.return_value = (True, "")
+        mock_zfs.partition.return_value = (True, "/dev/disk/by-id/X-part1")
+        d = _disk(dev="/dev/sdx", by_id="/dev/disk/by-id/X", size_bytes=10**12)
+        out = _maybe_partition([d], [0], "32G")
+        self.assertEqual(out, ["/dev/disk/by-id/X-part1"])
+        # wipe must precede partition on the same by-id device
+        names = [c[0] for c in mock_zfs.method_calls]
+        self.assertLess(names.index("wipe"), names.index("partition"))
+        mock_zfs.wipe.assert_called_once_with("/dev/disk/by-id/X", dry_run=False)
+
+    @patch("b2ctl.watch.ui")
+    @patch("b2ctl.watch.zfs")
+    @patch("b2ctl.watch._confirm", return_value=True)
+    def test_aborts_on_wipe_fail(self, _cf, mock_zfs, _ui):
+        from b2ctl.watch import _maybe_partition
+        mock_zfs.parse_size.return_value = 32 * 2**30
+        mock_zfs.wipe.return_value = (False, "device busy")
+        d = _disk(dev="/dev/sdx", by_id="/dev/disk/by-id/X", size_bytes=10**12)
+        self.assertIsNone(_maybe_partition([d], [0], "32G"))
+        mock_zfs.partition.assert_not_called()
+
+    @patch("b2ctl.watch.ui")
+    @patch("b2ctl.watch.zfs")
+    @patch("b2ctl.watch._confirm", return_value=False)
+    def test_declined_confirm_no_wipe(self, _cf, mock_zfs, _ui):
+        from b2ctl.watch import _maybe_partition
+        mock_zfs.parse_size.return_value = 32 * 2**30
+        d = _disk(dev="/dev/sdx", by_id="/dev/disk/by-id/X", size_bytes=10**12)
+        self.assertIsNone(_maybe_partition([d], [0], "32G"))
+        mock_zfs.wipe.assert_not_called()
+
+    @patch("b2ctl.watch.ui")
+    @patch("b2ctl.watch.zfs")
+    @patch("b2ctl.watch._confirm", return_value=True)
+    def test_size_exceeds_disk_no_wipe(self, _cf, mock_zfs, _ui):
+        from b2ctl.watch import _maybe_partition
+        mock_zfs.parse_size.return_value = 2 * 10**12    # 2 TB > 1 TB disk
+        d = _disk(dev="/dev/sdx", by_id="/dev/disk/by-id/X", size_bytes=10**12)
+        self.assertIsNone(_maybe_partition([d], [0], "2T"))
+        mock_zfs.wipe.assert_not_called()
 
 
 if __name__ == "__main__":

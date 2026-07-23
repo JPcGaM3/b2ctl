@@ -2,16 +2,23 @@
 
 # b2ctl — Test Checklist / Test Report
 
-> **Version:** `0.5.0-itmode`  ·  **Build:** IT-mode / LSI SAS2308 (PERC H710 crossflashed)
-> **ผู้ทดสอบ:** agent (sonnet via SSH)  ·  **วันที่:** 2026-06-22
+> **Version:** `0.18.0-itmode`  ·  **Build:** IT-mode / LSI SAS2308 (+ RAID-mode PERC path)
+> **ผู้ทดสอบ:** Claude (via `codes/sim` harness)  ·  **วันที่:** 2026-07-22
 
-> **Environment:**
-> - Nodes: `pve` 100.100.100.201 + `pve2` 100.100.100.203
-> - OS: Proxmox VE 9.2 (Debian 13)
-> - ZFS Version: 2.4.2 (`zfs-2.4.2-pve1`) — verified via `b2ctl check`
-> - Layout: `rpool` (mirror, boot pool) · `tank` (raidz1, 3 disks + 1 spare)
+> ✅ **SIMULATION RUN (v0.18.0-itmode, 2026-07-22).** ผลด้านล่างมาจากการรัน **b2ctl ตัวจริง**
+> กับ **simulation harness** (`codes/sim/` — fake 8-disk server, 6 SATA/SAS + 2 NVMe, `state.json`)
+> บน laptop **ไม่มี hardware/SSH/root**. มันเทส **CLI / logic / flow / parsing / output ของ v0.18.0
+> จริง** แต่ **ไม่ใช่** hardware pass/fail — sim เป็น *model* ไม่ใช่ ZFS/PERC จริง (ดู
+> [ข้อจำกัด](#sim-limits)). รอบ hardware ล่าสุด (v0.5.0-itmode, 2026-06-22, nodes 201/203) อยู่ใน
+> git history — ต้องรัน hardware ซ้ำเพื่อได้ pass/fail จริงบนเครื่อง.
 
-เอกสารนี้เป็น **checklist** สำหรับไล่เทส b2ctl ทุก scenario แล้วใช้เป็น test report ส่งต่อได้
+> **Environment (sim):**
+> - Harness: `codes/sim/` (launcher `sim/run` = b2ctl ตัวจริง + fake binaries บน PATH)
+> - Fake layout: `rpool` (mirror, 2× 860 PRO) · `tank` (**raidz1**, 3× 870 EVO + 1 spare) · 2× NVMe 990 EVO Plus (unassigned)
+> - `zpool version` = `zfs-2.4.2-sim` · audit/maint/snapshot → `sim/var/` (ไม่แตะ `/var/log/b2ctl/`)
+> - รันจริงบน b2ctl `0.18.0-itmode` (ไม่แก้ production code — sim = fake binaries + launcher)
+
+เอกสารนี้เป็น **checklist** ไล่เทส b2ctl ทุก scenario แล้วใช้เป็น test report ส่งต่อได้.
 ภาษา: เนื้อหาไทย, commands/technical terms อังกฤษ.
 
 ---
@@ -21,16 +28,17 @@
 ## 📑 สารบัญ (Table of Contents)
 
 1. [📊 Executive Summary](#exec-summary)
-   - [📌 Action Items & Known Issues](#action-items)
+   - [🔀 v0.18.0 deltas ที่เทส](#v018-deltas)
 2. [⚠️ Safety rules](#safety)
 3. [วิธีใช้ + Legend](#usage)
 4. [Pre-flight (baseline)](#preflight)
 5. [Section A — Safe / Read-only](#sec-a)
 6. [Section B — Dry-run mutating](#sec-b)
-7. [📸 Snapshot audit](#snapshot)
-8. [Section C — Physical hotplug](#sec-c)
-9. [Section D — Edge / Negative path](#sec-d)
-10. [Section E — Unit tests (pytest)](#sec-e)
+7. [Section C — Hotplug (sim pull/insert)](#sec-c)
+8. [Section D — Edge / Negative path](#sec-d)
+9. [Section E — Unit tests (pytest)](#sec-e)
+10. [Section F — RAID backend](#sec-f)
+11. [ข้อจำกัดของ sim](#sim-limits)
 
 ---
 
@@ -40,44 +48,44 @@
 
 | Section | ทั้งหมด | ✅ PASS | ❌ FAIL | ⏭ SKIP |
 |---------|:------:|:------:|:------:|:------:|
-| A — Safe / Read-only | 9 | 9 | 0 | 0 |
-| B — Dry-run mutating | 7 | 7 | 0 | 0 |
-| C — Physical hotplug | 10 | 9 | 0 | 1 |
-| D — Edge / Negative | 7 | 5 | 0 | 2 |
+| A — Safe / Read-only | 8 | 8 | 0 | 0 |
+| B — Dry-run mutating | 8 | 8 | 0 | 0 |
+| C — Hotplug (sim) | 4 | 4 | 0 | 0 |
+| D — Edge / Negative | 5 | 5 | 0 | 0 |
 | E — Unit tests | 2 | 2 | 0 | 0 |
-| **รวม** | **35** | **32** | **0** | **3** |
+| F — RAID backend | 3 | 3 | 0 | 0 |
+| **รวม** | **30** | **30** | **0** | **0** |
 
-> **0 FAIL.** SKIP 3 = C9 (create new pool — ยังไม่ทำ), D5 (raidz demote refuse — cover ด้วย unit test),
-> D6 (dirty disk — ต้องหา disk มี data เก่า). 203 กู้จาก SUSPENDED + redeploy → เทส C2/C5-C8/D2/D7 ซ้ำผ่าน.
-> Unit tests: **286 passed**.
+> **0 FAIL** ใน sim. Unit suite: **677 passed, 14 subtests**. ทุก v0.18.0 delta (ดูด้านล่าง)
+> ยืนยันด้วย output จริงจาก sim. **ย้ำ:** นี่คือ sim (logic/flow) — hotplug/LED/ZFS-engine
+> เป็น model, ต้องรัน hardware แยกเพื่อ pass/fail จริง.
 
-<a id="action-items"></a>
+<a id="v018-deltas"></a>
 
-### 📌 Action Items & Known Issues
+### 🔀 v0.18.0 deltas ที่เทส (ต่างจาก v0.5.0 hardware report)
 
-- `[Fixed]` **C2-201 pool-aware summary** — เดิมขึ้น `[OK] all disks healthy` ทั้งที่ tank `DEGRADED`. แก้ `ui.render_details` ให้ pool-aware (ขึ้น `pools needing attention` + `[!] ... not ONLINE`). +unit test 2 ตัว
-- `[Fixed]` **B2 dry-run replace** — เดิมจบด้วย `✗` ปลอม + จุดไฟ LED + post-op-verify. แก้ที่ `safety._print_op_result`/`end_op` + `watch._replace_onto_spare` (ข้าม LED/verify ตอน dry-run)
-- `[Fixed]` **snapshot บน dry-run** — `begin_op` รับ `dry_run=` → dry-run ไม่เขียน snapshot อีก
-- `[Fixed]` **swap/replace menu** — กรอง spare ออกจาก candidate list (spare ไม่ใช่ swap source)
-- `[Pending]` **Redeploy `install.sh`** บน 201 + 203 → fix ทั้งหมดข้างบนมีผลจริงบน server (ตอนนี้ source แก้แล้วแต่ server ยังรันของเก่า)
-- `[Pending]` **203 tank SUSPENDED** — กู้แล้วรอบเทส (`zpool clear tank`) แต่ตรวจ disk 1:5 (sdc) ว่าพังจริงไหม → ดู [203 RECOVERY box](#sec-c)
-- `[To-Do]` **C9** create new pool (physical) + **D6** assign dirty disk (physical) — ยังไม่ได้ทำบน server
-- `[To-Do]` **C1-203 timing race** — `_handle_removed` อ่าน pool health ก่อน ZFS update → ต้อง `r`. แก้ด้วย `udevadm settle`
-- `[To-Do]` **watch `l` locate** fix 5 วิ (standalone `b2ctl locate <bay> <sec>` ปรับได้)
-- `[Note]` **D5** raidz demote refuse — menu filter raidz ออกโดย design → cover ด้วย unit test
-- `[Note]` **203 `/dev/sdg`** Virtual Floppy แสดง CRITICAL (NOREAD) — ปกติสำหรับ Proxmox VE
+- **Burn-in ยุบเข้า `maint`** — verb `b2ctl burnin` และปุ่ม watch `[b]` **หายไปแล้ว**; disk vetting =
+  `[m]aint → [3] health-check` / `b2ctl maint health <dev…>` (B7, D3, E4).
+- **TRIM timer ถูกทิ้ง** — `create` เรียก `install_pool_timers(…, include_trim=False)` เสมอ;
+  `autotrim off` = **manual-only** (B4).
+- **autotrim/autoscrub default OFF**, prompt เรียงใหม่เป็น `[1] off (default) / [2] on` (B4).
+- **destroy → `timers disabled`** (ไม่ใช่ `cron removed` แล้ว) + `systemctl disable` per-pool timer (B8).
+- **HEALTH_CHK column** (`OK …hPOH`) + pool **SCRUB/TRIM** columns (A1, C1).
+- **SAS self-test classifier** `common.selftest_passed` — `maint health` บน disk คืน PASS ถูกต้อง (D4).
+- **watch menu** `[m]aint` แทน `[b]urnin` (B7).
 
 ---
 
 <a id="safety"></a>
 
-## ⚠️ Safety rules (อ่านก่อนเทส)
+## ⚠️ Safety rules (อ่านก่อนเทส — ใช้ตอนรัน hardware จริง)
 
-- **เทส mutating ops บน `tank` pool เท่านั้น — อย่าแตะ `rpool`** (เป็น boot pool ของ Proxmox)
-- ลองด้วย **`--dry-run` ก่อนเสมอ** แล้วค่อยทำจริง (Section B = dry-run, ไม่กระทบข้อมูล)
+- **เทส mutating ops บน `tank` เท่านั้น — อย่าแตะ `rpool`** (boot pool ของ Proxmox)
+- ลองด้วย **`--dry-run` ก่อนเสมอ** (Section B = dry-run, ไม่กระทบข้อมูล)
 - **capture `zpool status tank` ก่อน-หลัง** ทุก mutating test ไว้เทียบ
-- `tank` เป็น **raidz1** → ทนดิสก์เสียได้ **1 ตัวเท่านั้น**. ระหว่าง resilver อย่าดึงตัวที่ 2
+- `tank` = **raidz1** → ทนดิสก์เสียได้ **1 ตัวเท่านั้น**; ระหว่าง resilver อย่าดึงตัวที่ 2
 - ห้ามจุดไฟ locate LED บนดิสก์ที่กำลัง resilver
+- (sim ไม่มีความเสี่ยงข้อมูลจริง — state.json สร้างใหม่ได้ด้วย `sim/simctl init`)
 
 ---
 
@@ -85,10 +93,12 @@
 
 ## วิธีใช้ + Legend
 
-1. ทำ **Pre-flight** ก่อน เก็บ baseline ไว้เทียบ
-2. ไล่เทสทีละ section (A → E) ตามลำดับความเสี่ยง
-3. กรอก 3 ช่อง: **Status** (`✅`/`❌`/`⏭`) · **Actual** (สิ่งที่เห็นจริง) · **Comment** (ถ้า `❌` อธิบายว่าต่างจาก Expected ยังไง)
-4. ถ้า `❌` → ส่งกลับมาให้ทีม dev แก้ code รอบถัดไป
+```bash
+cd codes
+python3 sim/simctl init            # สร้าง state เริ่มต้น (rpool mirror + tank raidz1 + spare)
+python3 sim/run <verb> [args]      # รัน b2ctl ตัวจริงกับ sim
+python3 sim/simctl pull|insert|dirty|mode|reset|show   # เปลี่ยน state
+```
 
 | สัญลักษณ์ | ความหมาย |
 | --------- | -------- |
@@ -101,53 +111,39 @@
 
 <a id="preflight"></a>
 
-## Pre-flight (เก็บ baseline)
+## Pre-flight (baseline)
 
 ```bash
-# เก็บสถานะตั้งต้นไว้เทียบทีหลัง
-b2ctl version
-b2ctl check
-b2ctl status --json > /tmp/before.json
-zpool status tank   > /tmp/zpool-before.txt
-zpool status rpool >> /tmp/zpool-before.txt
+python3 sim/simctl init
+python3 sim/run version
+python3 sim/run check
+python3 sim/run status --json > /tmp/before.json
 ```
 
 | ตรวจ | Expected | Status | Actual |
 | ---- | -------- | :----: | ------ |
-| `b2ctl version` | `b2ctl 0.5.0-itmode` | ✅ 201 / ✅ 203 | `b2ctl 0.5.0-itmode` บนทั้งสองเครื่อง |
-| `b2ctl check` รันได้ ไม่ crash | แสดง root, tools, backend mode, config path | ✅ 201 / ✅ 203 | แสดงครบ; sas2ircu ✔, backend IT-mode |
-| `/tmp/before.json` valid JSON | `python3 -m json.tool /tmp/before.json` ผ่าน | ✅ 201 / ✅ 203 | JSON_OK ทั้งคู่ |
-| baseline zpool เก็บแล้ว | ไฟล์ `/tmp/zpool-before.txt` มีเนื้อหา | ✅ 201 / ✅ 203 | zpool status tank ONLINE ทั้งคู่ |
+| `b2ctl version` | `b2ctl 0.18.0-itmode` | ✅ | `b2ctl 0.18.0-itmode` |
+| `b2ctl check` รันได้ ไม่ crash | root, tools, backend mode, bays mapped, config path | ✅ | IT-mode; sas2ircu/zpool/wipefs/sgdisk/udevadm/dd ✔; `Bays mapped: 6 disks across 1 enclosure(s)` |
+| `status --json` valid JSON | `python3 -m json.tool` ผ่าน | ✅ | JSON_OK; array 8 disks, fields ครบ |
 
 <details>
-<summary>📋 ดูตัวอย่าง Output จริง (version / check / baseline) + คำอธิบาย</summary>
+<summary>📋 Output จริง (version / check)</summary>
 
 <pre>
-# 201 — b2ctl version
-b2ctl 0.5.0-itmode
+# b2ctl version
+b2ctl 0.18.0-itmode
 
-# 201 — b2ctl check (ตัดให้สั้น)
+# b2ctl check (sim, ตัดสั้น)
 [✔] Running as root
-[✔] smartctl     /usr/sbin/smartctl
-[✔] sas2ircu     /usr/sbin/sas2ircu
-[✗] storcli64    not found (needed for RAID mode)   ← ปกติสำหรับ IT-mode
-[✔] storcli      /usr/local/bin/storcli
-[✔] perccli64    /usr/local/sbin/perccli64
-[✔] zpool        /usr/sbin/zpool
+[✔] smartctl     .../sim/bin/smartctl (smartctl 7.5 ...)
+[✔] sas2ircu     .../sim/bin/sas2ircu (LSI Corporation SAS2 IR Configuration Utility.)
+[✗] perccli      not found (needed for RAID mode)      ← ปกติ: sim IT-mode ไม่ติด perccli
+[✔] zpool        .../sim/bin/zpool (zfs-2.4.2-sim)
+[✔] wipefs / sgdisk / udevadm / dd   ← tools สำหรับ wipe + over-provision (v0.17/v0.18)
 [✔] Detected backend: IT-mode
-[✔] Controllers found: 6 (6 disks in bay map)
-[!] Config: /etc/b2ctl/config.json (missing — using defaults)
-
-# 201 — zpool status tank (baseline)
-pool: tank  state: ONLINE
-  raidz1-0: wwn-0x5002538f3351ebe2-part1 ONLINE
-             wwn-0x5002538f3351d0f6       ONLINE
-             wwn-0x5002538f3354e3cb       ONLINE
-  spares: wwn-0x5002538f3354e3cd AVAIL
+[✔] Bays mapped: 6 disks across 1 enclosure(s)
+[!] Config: .../sim/var/config.json (missing — using defaults, run 'b2ctl config init')
 </pre>
-
-203: เหมือน 201 (ต่างแค่ serial/hostname); 203 ไม่มี storcli/perccli ติดตั้ง (แสดง `[✗]` ทุกตัว — ปกติสำหรับเครื่องที่ยังไม่ได้ install optional tools)
-
 </details>
 
 ---
@@ -156,49 +152,38 @@ pool: tank  state: ONLINE
 
 ## Section A — Safe / Read-only
 
-> รันผ่าน SSH ได้ ไม่กระทบข้อมูล. รันได้เลยไม่ต้องอยู่หน้าเครื่อง.
+> รันได้เลยไม่กระทบ state.
 
-| ID | Scenario | Expected | Status | Actual | Comment |
-|----|----------|----------|:------:|--------|---------|
-| A1 | ดูสถานะดิสก์ — `b2ctl status` | ตารางครบ: BAY/DEV/IF/MODEL/SERIAL/...POOL/STATUS/LEVEL; pools summary ด้านล่าง | ✅ 201 / ✅ 203 | ตารางครบทุก column; 6 disks (+ 1 Virtual Floppy บน 203) | 203 มี `/dev/sdg` USB Virtual Floppy แสดง CRITICAL (unassigned+NOREAD) — expected บน Proxmox VE |
-| A2 | สถานะ JSON — `b2ctl status --json` | JSON array ของ disk objects, valid (เช็คด้วย `... \| python3 -m json.tool`) | ✅ 201 / ✅ 203 | JSON_OK ทั้งคู่; array มี fields ครบ (dev, bay, model, serial, pool, vdev_state ฯลฯ) | |
-| A3 | MODEL เต็ม (TBW fix) — `b2ctl status` | MODEL แสดงเต็ม เช่น `Samsung SSD 860 PRO 1TB`; WRITTEN แสดง `xx.xxTB/1200TBW` ไม่ใช่ `/?` | ✅ 201 / ✅ 203 | 201: `Samsung SSD 860 PRO 1TB`, WRITTEN=`10.06TB/1200TBW` ✔; 203: `Samsung SSD 870 EVO 1TB`, WRITTEN=`9.70TB/600TBW` ✔ | |
-| A4 | BAY column (libc6 fix) — `b2ctl status` | BAY แสดงเลข enclosure:slot (เช่น `1:0`) ไม่ใช่ `-` ทั้งหมด | ✅ 201 / ✅ 203 | BAY = `1:0`, `1:1`, `1:4`, `1:5`, `1:6`, `1:7` ทุกตัว; sas2ircu ทำงานปกติ | |
-| A5 | Check environment — `b2ctl check` | `[✔] sas2ircu`, backend = `IT-mode`, "Controllers found: N (M disks in bay map)" M>0 | ✅ 201 / ✅ 203 | `[✔] sas2ircu`, backend IT-mode, Controllers found: 6 (6 disks) ทั้งคู่ | |
-| A6 | Update / validate config — `b2ctl update` | แต่ละ tool ขึ้น `[✔]`; sas2ircu ไม่ขึ้น "found but won't execute" | ✅ 201 / ✅ 203 | 201: sas2ircu/storcli/perccli/smartctl/zpool ✔; 203: storcli/perccli `[i] not found → run: b2ctl install` (ไม่ใช่ error) | 203 missing storcli/perccli แต่ไม่ crash — แสดง info hint เท่านั้น |
-| A7 | Config show — `b2ctl config show` | พิมพ์ JSON config (tool_paths, controller, bay_map_path) | ✅ 201 / ✅ 203 | JSON config ครบ 3 keys; ทั้งคู่ใช้ defaults (config.json missing) | |
-| A8 | Operation log — `b2ctl log [--last 5]` | ตาราง history (หรือ "No operations logged yet") | ✅ 201 / ✅ 203 | 201: มี 1 entry (replace op จากก่อน); 203: "No operations logged yet" | |
-| A9 | Locate LED — `watch` → `l` → `1:4` (หรือ `b2ctl locate <bay> <sec>`) | ไฟกระพริบที่ bay ถูกตัว | ✅ 201 / ✅ 203 | `blinking /dev/sdb for 5s ... ✔ done (via dd)` กระพริบ **ถูกตัว** ทั้ง 2 เครื่อง | ⏱ watch `l` fix 5 วินาที; standalone ปรับ sec ได้ |
+| ID | Scenario | Expected | Status | Actual |
+|----|----------|----------|:------:|--------|
+| A1 | `b2ctl status` | ตารางครบ + **HEALTH_CHK** + POOL/ARRAY `SW:<pool>/<vdev>` + Storage summary (มี **SCRUB/TRIM**) | ✅ | 8 disks (6 SAS + 2 NVMe); HEALTH_CHK `OK 0hPOH`; `SW:rpool/mirror-0`, `SW:tank/raidz1-0`, `SW:tank/spares`; summary rpool/tank |
+| A2 | `b2ctl status --json` | JSON array valid | ✅ | JSON_OK; 8 objects; keys `dev,by_id,bay,size_bytes,model,serial,iface,is_ssd,readable,health,poh,wear_val…` |
+| A3 | MODEL เต็ม + WRITTEN/TBW | MODEL เต็ม; WRITTEN `xx.xxTB/nnnnTBW` | ✅ | `Samsung SSD 870 EVO 1TB`, `9.71TB/600TBW`; 860 PRO `10.06TB/1200TBW`; NVMe `/2400TBW` |
+| A4 | BAY column | enclosure:slot (SAS) + PCIe addr (NVMe) | ✅ | `1:0`…`1:7`; NVMe `PCIe2:0`, `PCIe2:1` |
+| A5 | `b2ctl check` | `[✔] sas2ircu`, backend `IT-mode`, bays>0 | ✅ | ✔ sas2ircu, IT-mode, 6 disks / 1 enclosure |
+| A6 | `b2ctl config show` | JSON config (tool_paths, controller, `pools`, `pool_defaults`) | ✅ | `pool_defaults: {autotrim: off, autoscrub: false}`, `pools: {}` (v0.17/v0.18 sections) |
+| A7 | `b2ctl log` | ตาราง history หรือ "No operations logged yet" | ✅ | `No operations logged yet.` (state สด) |
+| A8 | `b2ctl maint --log` | ตาราง maint history หรือ "No maintenance events logged yet" | ✅ | `No maintenance events logged yet.` (ก่อน B/maint) |
 
 <details>
-<summary>📋 ดูตัวอย่าง Output จริง (status table / log) + คำอธิบาย</summary>
+<summary>📋 Output จริง (status table)</summary>
 
 <pre>
-# 201 — b2ctl status
-BAY   DEV  IF   MODEL                   SERIAL            POWER_ON       WEAR  END    WRITTEN           BAD  HEALTH  POOL           STATUS   LEVEL
-1:0   sdf  SAS  Samsung SSD 860 PRO 1TB S5G8NE0MA10474H  51055h(~5.8y)  1%    99.2%  10.06TB/1200TBW   0    PASSED  rpool/mirror-0 ONLINE   NORMAL
-1:1   sda  SAS  Samsung SSD 860 PRO 1TB S5G8NE0MA10478T  51056h(~5.8y)  1%    99.1%  10.27TB/1200TBW   0    PASSED  rpool/mirror-0 ONLINE   NORMAL
-1:4   sdb  SAS  Samsung SSD 870 EVO 1TB S74ZNS0W537278Y  22926h(~2.6y)  1%    98.4%  9.71TB/600TBW     0    PASSED  tank/raidz1-0  ONLINE   NORMAL
-1:5   sdc  SAS  Samsung SSD 870 EVO 1TB S74ZNS0W533737E  18277h(~2.1y)  1%    98.4%  9.88TB/600TBW     0    PASSED  tank/raidz1-0  ONLINE   NORMAL
-1:6   sdd  SAS  Samsung SSD 870 EVO 1TB S74ZNS0W582278Y  18281h(~2.1y)  1%    98.3%  9.91TB/600TBW     0    PASSED  tank/raidz1-0  ONLINE   NORMAL
-1:7   sde  SAS  Samsung SSD 870 EVO 1TB S74ZNS0W582280E  18281h(~2.1y)  1%    99.8%  1.01TB/600TBW     0    PASSED  tank/spares    AVAIL    NORMAL
-Pools:
-  rpool  952G   5.96G  free=946G   ONLINE  cap=0%
-  tank   2.72T  1.71G  free=2.72T  ONLINE  cap=0%
-[OK] all disks healthy and assigned
+BAY     DEV     IF   MODEL                   SERIAL           POWER_ON      WEAR(used) END(left) WRITTEN         BAD HEALTH POOL/ARRAY        STATUS HEALTH_CHK LEVEL
+1:0     sdf     SAS  Samsung SSD 860 PRO 1TB S5G8NE0MA10474H  51055h(~5.8y) 1%         99.2%     10.06TB/1200TBW 0   PASSED SW:rpool/mirror-0 ONLINE OK 0hPOH  NORMAL
+1:4     sdb     SAS  Samsung SSD 870 EVO 1TB S74ZNS0W537278Y  22926h(~2.6y) 1%         98.4%     9.71TB/600TBW   0   PASSED SW:tank/raidz1-0  ONLINE OK 0hPOH  NORMAL
+1:7     sde     SAS  Samsung SSD 870 EVO 1TB S74ZNS0W582280E  18281h(~2.1y) 1%         99.8%     1.01TB/600TBW   0   PASSED SW:tank/spares    AVAIL  OK 0hPOH  NORMAL
+PCIe2:0 nvme0n1 NVME Samsung SSD 990 EVO Plu S7U9NU0Y401069K  2h(~0.0y)     0%         100.0%    0.00TB/2400TBW  0   PASSED -                       OK 0hPOH  CONFIG
+Storage summary:
+  TYPE NAME   LEVEL  STATE   SIZE   USED   FREE   SCRUB   TRIM
+  SW   rpool  mirror ONLINE  952G   1.71G  952G   -       -
+  SW   tank   raidz1 ONLINE  2.72T  1.71G  2.72T  -       -
+===== disks needing config (unassigned) =====
+- bay PCIe2:0 /dev/nvme0n1 (Samsung SSD 990 EVO Plus 4TB, SN S7U9NU0Y401069K) [CONFIG]
 </pre>
 
-ตาราง `b2ctl status` แสดง BAY เป็น `enclosure:slot` (เช่น `1:4`) — ช่อง bay 4 ของ controller 1. WRITTEN = `9.71TB/600TBW` = เขียนไป 9.71TB จาก capacity 600TBW. WEAR = 1% = ใช้ไป 1% ของอายุการใช้งาน.
-203: เหมือน 201; เพิ่ม `/dev/sdg` USB Virtual Floppy แสดง CRITICAL (SMART unreadable + unassigned) ปกติสำหรับ virtual device.
-
-<pre>
-# 201 — b2ctl log --last 5
-OP_ID                          OP       BAY  SERIAL           POOL  STATUS  STARTED
-20260622-141956-293556-replace replace  1:4  S74ZNS0W537278Y  tank  ok      2026-06-22T14:19:56
-</pre>
-
-Log แสดง operation ที่เคยรันพร้อม timestamp, bay, serial, status — ช่วย audit ย้อนหลังได้.
-
+ตาราง v0.18.0 เพิ่ม **HEALTH_CHK** (self-test log แบบ POH-relative, e.g. `OK 120hPOH`) และ
+Storage summary เพิ่ม **SCRUB/TRIM** (last scrub live จาก `zpool status`, last trim จาก `maint.jsonl`).
 </details>
 
 ---
@@ -207,160 +192,89 @@ Log แสดง operation ที่เคยรันพร้อม timestamp,
 
 ## Section B — Dry-run mutating
 
-> ใช้ `--dry-run` → b2ctl **print คำสั่งที่จะรัน แต่ไม่ทำจริง**. รันผ่าน SSH ได้ ไม่ต้องดึงดิสก์.
-> เทียบ `zpool status tank` ก่อน-หลัง ต้อง **ไม่เปลี่ยน**.
+> `--dry-run` → print คำสั่งที่จะรัน **แต่ไม่ทำจริง**. เทียบ state ก่อน-หลัง ต้องไม่เปลี่ยน.
 
-| ID  | Scenario                                                          | Expected                                                                                       |     Status     | Actual                                                                                                       | Comment                                                                                                                                                                                                                  |
-| --- | ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- | :------------: | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| B1  | Swap (dry) — `b2ctl --dry-run swap` → เลือก → y                   | print `zpool replace ...` (dry-run), pool ไม่เปลี่ยน                                           | ✅ 201 / ✅ 203  | แสดง `[DRY-RUN] would run: zpool replace tank ...` + `zpool detach ...` + `zpool add ... spare`              |                                                                                                                                                                                                                          |
-| B2  | Replace (dry) — `b2ctl --dry-run replace` → เลือก → y             | print `zpool replace -f tank ...` (dry-run), ไม่ resilver จริง                                 | ✅ 201 / ✅ 203  | แสดง `[DRY-RUN] would run: zpool replace tank ...` ครบ; มี confirm box ก่อน; pool ไม่เปลี่ยน                 | **แก้แล้วใน source (รอ redeploy):** เดิม dry-run จบด้วย `✗ replace complete` (แดง) + Rollback hint + จุดไฟ LED จริง → เข้าใจผิดว่า fail. แก้เป็น `• replace dry-run preview — nothing changed` + ข้าม LED/post-op-verify |
-| B3  | Demote (dry) — `b2ctl --dry-run demote` → เลือก mirror leg → y    | print `zpool detach ...` + `zpool add ... spare` (dry-run)                                     | ✅ 201 / ✅ 203  | `[DRY-RUN] would run: zpool detach rpool ...` + `zpool add -f rpool spare ...` ครบ                           | เมนูแสดงเฉพาะ mirror-capable disks (rpool legs) — raidz members ถูก filter ออกโดย design                                                                                                                                 |
-| B4  | Create pool (dry) — `b2ctl --dry-run create` → เลือกดิสก์ว่าง → y | print `zpool create -f -o ashift=12 ...` (dry-run)                                             | ✅ 201 / ⏭ 203* | 201: `no available disks to create pool` (ทุกดิสก์ assigned) — ถูกต้อง; 203: มี `sdg` แต่เป็น Virtual Floppy | *203 disk ว่างเป็น USB Virtual Floppy (NOREAD) ไม่เหมาะสร้าง pool — skip full flow                                                                                                                                       |
-| B5  | Offload (dry) — `b2ctl --dry-run offload` → เลือก → y             | print คำสั่ง detach/replace (dry-run) ตาม vdev type                                            | ✅ 201 / ✅ 203  | เลือก spare (1:7): `[DRY-RUN] would run: zpool remove tank ...` แล้วเสนอ assign menu (กด `s` skip)           |                                                                                                                                                                                                                          |
-| B6  | Watch dry-run toggle — `b2ctl watch` → กด `t`                     | แสดง `[DRY-RUN MODE: ON]`                                                                      | ✅ 201 / ✅ 203  | กด `t` → `[DRY-RUN MODE: ON]` ทันที; กด `q` → `bye`                                                          |                                                                                                                                                                                                                          |
-| B7  | Watch menu ครบ — `b2ctl watch`                                    | เมนู `[r]efresh [a]ssign [o]ffload [s]wap [d]emote [t]oggle-dryrun [n]ew-pool [e]xtend [b]urnin [u]dev-rescue [x]destroy-pool [l]ocate [q]uit` | ✅ 201 / ✅ 203  | เมนูครบทุก option                                                                                            |                                                                                                                                                                                                                          |
-
-<details>
-<summary>📋 ดูตัวอย่าง Output จริง (dry-run swap / watch toggle) + คำอธิบาย</summary>
-
-<pre>
-# 201 — b2ctl --dry-run swap (input: "3\ny")
-[1] (1:0) Samsung SSD 860 PRO 1TB (S5G8NE0MA10474H) in rpool
-[2] (1:1) Samsung SSD 860 PRO 1TB (S5G8NE0MA10478T) in rpool
-[3] (1:4) Samsung SSD 870 EVO 1TB (S74ZNS0W537278Y) in tank   ← เลือกอันนี้
-[4] (1:5) Samsung SSD 870 EVO 1TB (S74ZNS0W533737E) in tank
-[5] (1:6) Samsung SSD 870 EVO 1TB (S74ZNS0W582278Y) in tank
-[6] (1:7) Samsung SSD 870 EVO 1TB (S74ZNS0W582280E) in tank
-swap which #&gt; swap (1:4) ... onto spare (1:7) ...? [y/N]&gt;
-[DRY-RUN] would run: zpool replace tank /dev/disk/by-id/wwn-0x.../...part1 /dev/disk/by-id/wwn-0x.../...part1
-  ✔ swap started — resilvering onto spare
-[DRY-RUN] would run: zpool detach tank /dev/disk/by-id/wwn-0x...
-  ✔ detached old disk /dev/sdb
-[DRY-RUN] would run: zpool add -f tank spare /dev/disk/by-id/wwn-0x...
-  ✔ (1:4) Samsung SSD 870 EVO 1TB is now a hot spare in 'tank'
-</pre>
-
-dry-run print คำสั่งพร้อม prefix `[DRY-RUN] would run:` — ไม่มีการเปลี่ยนแปลงจริง ใช้ตรวจว่า b2ctl เลือก disk path ถูกก่อน run จริง.
-
-<pre>
-# 201 — b2ctl watch (input: "t\nq")
-[r]efresh [a]ssign [o]ffload [s]wap [d]emote [t]oggle-dryrun [n]ew-pool [e]xtend [b]urnin [u]dev-rescue [x]destroy-pool [l]ocate [q]uit
-b2ctl&gt; [DRY-RUN MODE: ON]
-[r]efresh [a]ssign [o]ffload [s]wap [d]emote [t]oggle-dryrun [n]ew-pool [e]xtend [b]urnin [u]dev-rescue [x]destroy-pool [l]ocate [q]uit
-b2ctl&gt; bye
-</pre>
-
-กด `t` ใน watch = toggle dry-run; ทุก action หลังจากนั้น print-only ไม่รันจริง เหมาะฝึกก่อน production.
-203: เหมือน 201 (ต่างแค่ serial/hostname).
-
-</details>
-
----
-
-<a id="snapshot"></a>
-
-## 📸 Snapshot audit (`/var/log/b2ctl/snapshots/`)
-
-ทุก mutating op (replace/offline/add_spare) `safety.begin_op()` ถ่าย **pre-op snapshot**
-ไว้ก่อน เผื่อ rollback/สืบสวน. ตรวจแล้วบนทั้ง 2 เครื่อง:
-
-| ตรวจ | ผล |
-|------|-----|
-| โครงสร้างไฟล์ | ✅ ครบ 4 section: `zpool status <pool>` · `zpool list -v` · `zfs list` · `smartctl -a <dev>` |
-| content จริง | ✅ 201: tank `state: ONLINE`, smartctl `PASSED`; ไฟล์ ~7.5KB / ~144 บรรทัด |
-| ทั้ง 2 เครื่อง | ✅ 201 มี 4 ไฟล์, 203 มี 1 ไฟล์ — header + ทุก section ครบ |
+| ID | Scenario | Expected | Status | Actual |
+|----|----------|----------|:------:|--------|
+| B1 | `--dry-run swap` → tank member → y | print `zpool replace/detach/add spare` + preview msg | ✅ | box `Will run:` + `[DRY-RUN] would run: zpool replace tank /dev/sdb /dev/sde` + `• swap dry-run preview — nothing changed` (v0.18: ไม่ขึ้น ✗ ปลอมแล้ว) |
+| B2 | `--dry-run swap` → rpool member | ปฏิเสธ (rpool ไม่มี spare) | ✅ | `no AVAIL spare in pool 'rpool'` |
+| B3 | `--dry-run demote` → rpool leg | last-redundancy guard: warn + type pool name | ✅ | `⚠ this removes the LAST redundancy of 'rpool'…` + `type the pool name 'rpool' to demote anyway>` → ตอบผิด → `cancelled` |
+| B4 | `--dry-run create` (2 NVMe, mirror, default) | `zpool create -f -o ashift=12 -o autotrim=off …`; timers; manual-only warnings | ✅ | ดู output; **autotrim/autoscrub prompt `[1] off (default) / [2] on`**; `✔ maintenance timers: no timers enabled`; `[!] autoscrub OFF …`; `[!] autotrim OFF — TRIM manually via b2ctl maint trim` |
+| B5 | `--dry-run offload` → tank member | replace-preview + free-disk menu | ✅ | `• replace dry-run preview — nothing changed` + menu `[1..6]/[s]`; `s` → `skipped` |
+| B6 | `watch` → `t` | `[DRY-RUN MODE: ON]` | ✅ | กด `t` → `[DRY-RUN MODE: ON]`; `q` → `bye` |
+| B7 | `watch` menu ครบ (v0.18) | `[m]aint` มี, **ไม่มี `[b]urnin`** | ✅ | `[r]efresh [a]ssign [o]ffload [s]wap [d]emote [t]oggle-dryrun [n]ew-pool [e]xtend [m]aint [u]dev-rescue [x]destroy-pool [l]ocate [q]uit` |
+| B8 | `--dry-run destroy` tank | `zpool destroy` + `systemctl disable` timers + `timers disabled` | ✅ | `zpool destroy tank` + `systemctl disable --now zfs-scrub-monthly@tank.timer` + `…zfs-trim-monthly@tank.timer` + **`✔ pool 'tank' destroyed; timers disabled`** |
 
 <details>
-<summary>📋 ดูตัวอย่าง section headers ของ snapshot</summary>
+<summary>📋 Output จริง (B4 create / B8 destroy)</summary>
 
 <pre>
-# ตัวอย่าง section headers ของ 1 snapshot (201)
-=== b2ctl pre-op snapshot: 20260622-161350-348683-replace ===
---- zpool status tank ---
---- zpool list -v ---
---- zfs list ---
---- smartctl -a /dev/disk/by-id/wwn-0x...-part1 ---
-=== START OF INFORMATION SECTION ===
-=== START OF READ SMART DATA SECTION ===
+# B4 — --dry-run create (2 NVMe mirror)
+    autotrim: [1] off — manual TRIM via [m]aint / `b2ctl maint trim` (recommended)
+              [2] on  — zpool autotrim=on (ZFS trims inline)
+    autoscrub: [1] off — manual scrub via [m]aint / `b2ctl maint scrub` (recommended)
+               [2] on  — monthly zfs-scrub timer (self-heals silent bitrot)
+  -> ashift=12 autotrim=off compression=lz4 atime=off xattr=sa dnodesize=auto acltype=posixacl recordsize=128K
+  create pool 'testpool' (mirror) with 2 disks (full disk)? [y/N]>
+[DRY-RUN] would run: zpool create -f -o ashift=12 -o autotrim=off -O compression=lz4 -O atime=off \
+                     -O xattr=sa -O dnodesize=auto -O acltype=posixacl -O recordsize=128K testpool mirror /dev/nvme0n1 /dev/nvme1n1
+  ✔ pool created
+  ✔ maintenance timers: no timers enabled
+  [!] autoscrub OFF — no monthly self-heal scheduled for 'testpool'; run `b2ctl maint scrub testpool` (or [m]aint) periodically
+  [!] autotrim OFF — TRIM manually via `b2ctl maint trim testpool` (or [m]aint)
+
+# B8 — --dry-run destroy tank
+[DRY-RUN] would run: zpool destroy tank
+[DRY-RUN] would run: systemctl disable --now zfs-scrub-monthly@tank.timer
+[DRY-RUN] would run: systemctl disable --now zfs-trim-monthly@tank.timer
+  ✔ pool 'tank' destroyed; timers disabled
 </pre>
 
+v0.18.0: create ไม่ตั้ง trim timer เลย (`include_trim=False`); autoscrub off → `no timers enabled`.
+destroy สั่ง `systemctl disable` timer ของ pool (ไม่ใช่ cron) → ข้อความ `timers disabled`.
 </details>
-
-- `[Fixed]` **Optional 1:** เดิม `--dry-run` ก็สร้าง snapshot (`begin_op` รันก่อน `run_check`). แก้ `begin_op` รับ `dry_run=` แล้วข้าม `_capture_snapshot` ตอน dry-run → dry-run = preview ล้วน (มีผลหลัง redeploy)
-- `[Done]` **Optional 2:** ลบ snapshot ที่งอกจาก dry-run testing — ลบเฉพาะ op `status: "dry_run"` (201: 2, 203: 1); ของ op จริง (ok/fail) เก็บไว้ audit
 
 ---
 
 <a id="sec-c"></a>
 
-## Section C — Physical hotplug (ต้องอยู่หน้าเครื่อง)
+## Section C — Hotplug (sim pull/insert) + maint
 
-> ต้องดึง/เสียบดิสก์จริง. ทำบน **tank** เท่านั้น. เปิด `b2ctl watch` ค้างไว้ระหว่างเทส.
-> 💡 ลำดับแนะนำ: C1 → C2 (รอ resilver เสร็จ) → C3 → C4 → … แล้วคืนสภาพ
+> `sim/simctl pull|insert` = simulated hotplug (ไม่ใช่ physical). maint = scrub/trim/health.
 
-| ID  | Scenario                                           | Expected                                                  |     Status     | Actual                                                                                                                                              | Comment                                                                                            |
-| --- | -------------------------------------------------- | --------------------------------------------------------- | :------------: | --------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| C1  | Hot-remove — `watch` → ดึงดิสก์ tank 1 ตัว         | watch แจ้ง disk removed; `zpool status tank` = `DEGRADED` | ✅ 201 / ⚠️ 203 | 201: `■ disk removed` + tank `DEGRADED` ทันที. 203: แจ้ง removed แต่ pool health auto-print ยัง `ONLINE` — ต้อง `r` ก่อนเห็น `DEGRADED`             | ⚠️ **timing race** (203): `_handle_removed` อ่าน zpool ก่อน ZFS update — ไว้แก้ (`udevadm settle`) |
-| C2  | Spare auto-replace — (มี spare AVAIL) หลัง C1      | ZFS auto-resilver onto spare                              | ✅ 201 / ✅ 203  | 201: spare 1:7 → `INUSE`, `spare-1` + `resilvered 599M`. 203 (หลังกู้+redeploy): spare → `INUSE`, `resilvered 590M`, `errors: No known data errors` | 203 รอบแรกพังเพราะ hardware (เสีย 2 ตัว) — กู้แล้วเทสซ้ำผ่าน ✅                                     |
-| C3  | Hot-insert — เสียบดิสก์กลับ bay เดิม               | watch แสดง `╔══ NEW DISK DETECTED ══`                     | ✅ 201 / ✅ 203  | เสียบกลับ → `NEW DISK DETECTED` + panel (model/SN/bay/health) + assign menu ทั้งคู่                                                                 |                                                                                                    |
-| C4  | Assign menu ครบ — จาก C3 ดูเมนู                    | options `[1]`–`[6]` + `[s]` skip                          | ✅ 201 / ✅ 203  | เมนูครบ: `[1]` blink `[2]` spare `[3]` replace `[4]` attach `[5]` add single `[6]` wipe `[s]` skip                                                  |                                                                                                    |
-| C5  | Assign as spare — C3 → `2` → เลือก pool `tank` → y | ดิสก์เข้า tank เป็น spare                                 |     ✅ 203      | `action> 2` → `pool #> 2` (tank) → y → `✔ added as spare`; refresh เห็น 1:5 `tank/spares AVAIL`                                                     |                                                                                                    |
-| C6  | Replace degraded — C3 → `3` → confirm              | `✔ replace started — resilvering`                         |     ✅ 203      | `action> 3` → เลือก leaf REMOVED → CONFIRM → y → resilver → `✓ replace complete` (เขียว) + Rollback + Snapshot; tank `ONLINE`                       | ✓ เขียวถูกต้อง (real op ไม่ใช่ dry-run)                                                            |
-| C7  | Swap onto spare — `watch` → `s` → ยืนยัน           | `zpool replace` รัน                                       |     ✅ 203      | `s` → member 1:4 → y → swap onto spare 1:7 → resilver → `✔ detached old disk` → `✔ (1:4) is now a hot spare`. **ผล: 1:7 เข้า raidz1, 1:4 → spare**  | by design: disk เดิมกลายเป็น spare ใหม่ — pool ไม่เสีย spare หลัง swap                             |
-| C8  | Offload spare — `watch` → `o` → เลือก spare        | spare ถูก detach                                          |     ✅ 203      | `o` → spare (vdev spares) → y → `✔ removed from pool` → free + assign menu; `s` skip → refresh เห็น `[CONFIG]`                                      |                                                                                                    |
-| C9  | Create new pool — `watch` → `n` → ดิสก์ว่าง ≥2     | `zpool create` สำเร็จ                                     |     ⏭ SKIP     | —                                                                                                                                                   | ยังไม่ได้ทำ                                                                                        |
-| C10 | Locate ใหม่ถูก bay — `watch` → `l`                 | ไฟกระพริบตรงตัว                                           | ✅ 201 / ✅ 203  | `l` → `1:4` → `blinking /dev/sdb for 5s ... ✔ done (via dd)` กระพริบถูกตัว                                                                          | ⏱ fix 5 วินาที; standalone ปรับ sec ได้                                                            |
-
-> **🐛 Bug ที่เจอ + แก้แล้ว (รอ redeploy):** ตอน C2-201 ตารางขึ้น `[OK] all disks healthy and assigned`
-> **ทั้งที่ tank `DEGRADED`** — เพราะ `render_details` เดิมเช็คแค่ระดับ per-disk (disk ที่ดึงออก
-> หายจาก list + spare ที่เข้าแทนเป็น NORMAL). แก้ให้ **pool-aware**: ถ้า pool ไม่ ONLINE จะขึ้น
-> `===== pools needing attention =====` + `[!] disks readable but a pool is not ONLINE` แทน
-> (ไม่ขึ้น "[OK] healthy" หลอกอีก). +unit test 2 ตัว.
-
-> **⚠️ 203 RECOVERY — tank SUSPENDED (ข้อมูลเสี่ยง, คุณต้องกู้เอง):**
-> 203 raidz1 เสีย 2 ตัวพร้อมกัน (ดึง 1:4 ทดสอบ **+** 1:5/sdc มีปัญหาอยู่ก่อน) → `SUSPENDED`
-> + `3 data errors`. b2ctl แสดงถูกต้อง ไม่ใช่ bug. ขั้นกู้:
-> ```bash
-> # 203: เสียบ disk ที่ดึงออกกลับให้ครบก่อน แล้ว
-> zpool clear tank            # เคลียร์ IO error, ปลด SUSPENDED
-> zpool status -v tank        # ดูว่าไฟล์ไหนเสีย (3 data errors)
-> # ตรวจ 1:5 (sdc) ว่าพังจริงไหม → ถ้าพัง replace ตัวนั้น
-> ```
+| ID | Scenario | Expected | Status | Actual |
+|----|----------|----------|:------:|--------|
+| C1 | `simctl pull 1:5` (tank member, มี spare) | spare auto-resilver; `status` = tank **DEGRADED** + spare **INUSE** | ✅ | `pulled sdc (bay 1:5) → spare sde kicking in (resilver)`; status: `SW tank raidz1 DEGRADED`, `SW:tank/spares … INUSE`; `pool tank: DEGRADED` |
+| C2 | `maint scrub tank` → y | `✔ scrub started` + log `started` ใน maint.jsonl | ✅ | `✔ scrub started`; ถาม watch live (Ctrl-C detaches); `maint --log` เห็น `scrub tank started` |
+| C3 | `maint trim tank` → y | `✔ trim started` + log | ✅ | `✔ trim started`; `maint --log` เห็น `trim tank started` |
+| C4 | `maint health nvme0n1 --short` (free disk) | burn-in engine → verdict PASS | ✅ | `Burn-in /dev/nvme0n1 …` → self-test `done` → **`[PASS] … ✔ safe to add to a pool.`** |
 
 <details>
-<summary>📋 ดูตัวอย่าง Output จริง (C1 remove / C2 spare / C3 insert) + คำอธิบาย</summary>
+<summary>📋 Output จริง (C1 pull / C4 maint health / maint --log)</summary>
 
 <pre>
-# 201 — C1 hot-remove (ดึง sdc ออกระหว่าง watch)
-■ disk removed: /dev/sdc
-  current pool health:
-Pools:
-  tank      2.72T   1.71G   free=2.72T   DEGRADED  cap=0%  &lt;-- not ONLINE
+# C1 — simctl pull 1:5
+[sim] pulled sdc (bay 1:5) → spare sde kicking in (resilver)
+# status (หลัง pull)
+1:7  sde  ... SW:tank/spares   INUSE   OK 0hPOH  NORMAL
+  SW   tank   raidz1   DEGRADED   2.72T  1.71G  2.72T
+- pool tank: DEGRADED (not ONLINE — a member may be missing/resilvering)
 
-# 201 — C2 spare auto-replace (zpool status tank)
-        spare-1                       DEGRADED
-          wwn-0x...d0f6               REMOVED     ← disk ที่ดึงออก
-          wwn-0x...e3cd               ONLINE      ← spare เข้าแทน
-    spares
-      wwn-0x...e3cd                   INUSE  currently in use
-  scan: resilvered 599M in 00:00:02 with 0 errors
+# C4 — maint health nvme0n1 --short
+Burn-in /dev/nvme0n1 (bay PCIe2:0) Samsung SSD 990 EVO Plus 4TB (S7U9NU0Y401069K)
+ BAY     DISK     SELF-TEST   SURFACE SCAN (badblocks)
+ PCIe2:0 nvme0n1  done        n/a
+  [PASS] bay PCIe2:0 /dev/nvme0n1 (S7U9NU0Y401069K)
+    ✔ safe to add to a pool.
 
-# 201 — C3 hot-insert (เสียบ sdd กลับ)
-╔══ NEW DISK DETECTED: /dev/sdd ═══════════════════════
-  model  : Samsung SSD 870 EVO 1TB   SN S74ZNS0W582278Y
-  bay    : 1:6   size 931.5G   SAS   SSD
-  health : PASSED   wear 1% used   endurance 98.3% left
-╚════════════════════════════════════════════════════
-    [1] Prepare for physical removal (Blink LED)
-    [2] Add to a pool as hot SPARE
-    [3] REPLACE a degraded/faulted disk in a pool
-    ... [4] attach  [5] add single  [6] wipe  [s] skip
+# maint --log
+WHEN                  KIND   TARGET   STATUS   DETAIL
+2026-07-22T16:51:54   scrub  tank     started
+2026-07-22T16:51:54   trim   tank     started
 </pre>
 
-- **C1**: ดึง disk → `■ disk removed` + pool `DEGRADED` (raidz1 ทนเสีย 1 ตัว ยังอ่าน/เขียนได้)
-- **C2**: มี hot spare → ZFS **auto-resilver onto spare** เอง (`spare-1` + `INUSE`) ไม่ต้องสั่ง
-- **C3**: เสียบกลับ → `NEW DISK DETECTED` + เมนูเลือกว่าจะทำอะไรกับ disk ที่เพิ่งเสียบ
-
+C4 = ตัวเดียวกับ `b2ctl burnin` เดิม (v0.18 ยุบเป็น `maint health`): multi-select long self-test
+(+ optional read-only `badblocks --scan`) + PASS/WARN/FAIL, non-blocking, re-attach `--status`.
 </details>
 
 ---
@@ -369,88 +283,100 @@ Pools:
 
 ## Section D — Edge / Negative path
 
-> เทส negative — ต้องเด้ง error/refuse ถูกต้อง ไม่พังเงียบ ไม่ทำจริง.
+> ต้องเด้ง error/refuse ถูกต้อง ไม่พังเงียบ ไม่ทำจริง.
 
-| ID | Scenario | Expected | Status | Actual | Comment |
-|----|----------|----------|:------:|--------|---------|
-| D1 | Cancel ทุก prompt — ทุก action → `N`/`q` | ไม่มีอะไรเปลี่ยน; ขึ้น `cancelled` | ✅ 201 / ✅ 203 | ตอบ `N` ที่ swap prompt → `cancelled` ทันที; zpool ไม่เปลี่ยน | |
-| D2 | Swap ไม่มี spare — เอา spare ออก → `watch` → `s` | `no AVAIL spare in pool 'tank'` | ✅ 203 | หลัง offload spare → `s` → เลือก member → `no AVAIL spare in pool 'tank'` ✔ | ข้อความจริงไม่มี "add one first" ในเส้นทาง `_cmd_swap` |
-| D3 | Create ดิสก์ไม่พอ — `n` → 1 ดิสก์ → `raidz2` | `error: need at least 4 disks for raidz2` | ⏭ 201 / ✅ 203 | 203: `error: need at least 4 disks for raidz2` ✔ | 201 ไม่มี disk ว่าง → ทำบน 203 (sdg unassigned) |
-| D4 | Invalid raid type — `n` → raid type มั่ว `raid9` | `invalid raid type` | ⏭ 201 / ✅ 203 | 203: `invalid raid type` ✔ | 201 ไม่มี disk ว่าง → ทำบน 203 |
-| D5 | Demote last mirror leg — `d` → leg สุดท้าย | `refuse: not a detachable mirror leg / would break redundancy` | ⏭ SKIP | — | demote menu filter เฉพาะ mirror-capable disks — raidz members ไม่ปรากฏ; trigger ผ่าน SSH ไม่ได้ → cover ด้วย unit test |
-| D6 | Assign dirty disk — เสียบดิสก์มี data เก่า | `WARNING: ... already contain data/labels` | ⏭ SKIP | — | ต้องอยู่หน้าเครื่อง (physical disk) |
-| D7 | ดึงดิสก์ระหว่าง resilver — replace/swap → ดึงอีกตัว | pool survive (raidz1) | ⚠️ 203 (partial) | swap เสร็จ (`✔ resilver completed 100%`) แล้วดึง sde → tank `DEGRADED` (raidz1 รอด) ✔ | ⚠️ **ยังไม่ได้เทส "ดึงระหว่าง resilver จริง"**: tank ใช้ 1.69G → resilver เสร็จใน 2 วิ. swap มี poll loop รอ resilver จบ (`watch.py:524`); b2ctl กันการดึง physical ไม่ได้ |
+| ID | Scenario | Expected | Status | Actual |
+|----|----------|----------|:------:|--------|
+| D1 | Cancel prompt — ตอบ `N`/Enter | `cancelled`, ไม่เปลี่ยน state | ✅ | swap/scrub/trim ตอบ Enter → `cancelled` |
+| D2 | Create raidz2 ดิสก์ไม่พอ (1 disk) | `error: need at least 4 disks for raidz2` | ✅ | `error: need at least 4 disks for raidz2` |
+| D3 | Invalid raid type (`raid9`) | `invalid raid type` | ✅ | `invalid raid type` |
+| D4 | `maint health` บน in-pool member (`sdb`) | ปฏิเสธ — vet เฉพาะ free/spare | ✅ | `[-] maint health vets free/spare disks; /dev/sdb is in pool 'tank' — self-test it with \`smartctl -t long\` directly.` |
+| D5 | Demote last mirror leg (rpool) | guard: warn + require type pool name | ✅ | last-redundancy guard (ดู B3) — raidz members ถูก filter ออกจากเมนู demote |
 
 <details>
-<summary>📋 ดูตัวอย่าง Output จริง (D3/D4 create reject / D1 cancel) + คำอธิบาย</summary>
+<summary>📋 Output จริง (D2/D3 create reject / D4 in-pool refuse)</summary>
 
 <pre>
-# 203 — b2ctl --dry-run create (D3: 1 disk + raidz2)
-[1] /dev/sdg (bay ?)
-pick disks (space-separated #)&gt;  pool name&gt;  raid type (stripe, mirror, raidz1, raidz2) [mirror]&gt;
+# D2 — create raidz2, 1 disk
+  raid type (stripe, mirror, raid10, raidz1, raidz2) [mirror]>  raidz2
   error: need at least 4 disks for raidz2
 
-# 203 — b2ctl --dry-run create (D4: 1 disk + raid9)
-pick disks (space-separated #)&gt;  pool name&gt;  raid type (stripe, mirror, raidz1, raidz2) [mirror]&gt;
+# D3 — create, raid9
+  raid type (...) [mirror]>  raid9
   invalid raid type
+
+# D4 — maint health sdb (in-pool)
+[-] maint health vets free/spare disks; /dev/sdb is in pool 'tank' — self-test it with `smartctl -t long` directly.
 </pre>
 
-เมื่อ user ป้อน raid type ผิด tool reject ทันทีก่อน execute — ไม่ทำ zpool create. raidz2 ต้องการ disk ≥ 4 ตัว (2 parity + 2 data).
-
-<pre>
-# 201 — D1: cancel swap
-swap which #&gt; N
-  cancelled
-</pre>
-
-กด `N` (หรือ Enter) ที่ confirm prompt → ออกทันที ไม่มีอะไรเปลี่ยน.
-
+D4 = v0.18.0 guard `burnin._poolable_target`: `maint health` vet เฉพาะ FREE/SPARE disk ทั้ง CLI + watch;
+active member ให้รัน `smartctl -t long` เองใน shell (HEALTH_CHK column ยังโชว์ passive).
 </details>
 
 ---
 
 <a id="sec-e"></a>
 
-## Section E — Unit tests (pytest) — ✅ agent รันให้แล้วในเครื่อง dev
+## Section E — Unit tests (pytest)
 
 ```bash
 cd codes && python3 -m pytest tests/ -q
 ```
 
-**ผลรอบนี้ (dev machine):** `495 passed, 0 failed` ✅ *(v0.10.0-itmode: multi-disk background burn-in — +34 tests: parse_selftest/ETA, start_scan Popen, scan_progress, state save/load, _pid_alive, burnin_snapshot, live_view, run_multi re-entrancy, smart self-test fields, ui fmt_eta/render_burnin, watch multi-select, cli nargs/--status)*
+| ID | Scenario | Expected | Status | Actual |
+|----|----------|----------|:------:|--------|
+| E1 | Test suite รันได้ | รันจบ ไม่ error import | ✅ | tests collected, รันจบใน ~12s |
+| E2 | Pass rate | ผ่านทั้งหมด | ✅ | **677 passed, 14 subtests passed** |
 
-| ID | Scenario | Expected | Status | Actual | Comment |
-|----|----------|----------|:------:|--------|---------|
-| E1 | Test suite รันได้ | suite รันจบ ไม่ error การ import | ✅ | tests collected, รันจบ | OK |
-| E2 | Pass rate | tests ผ่านทั้งหมด | ✅ | **495 passed / 0 failed** (+4 subtests) | …prior deltas… ; +87 (v0.9.0) Fable5 audit ; +34 (v0.10.0) burn-in: parse_selftest+ETA, start_scan (Popen, no -w, start_new_session), scan_progress+_parse_badblocks_log, _pid_alive reap, state save/load under safety.LOG_DIR, burnin_snapshot, live_view finish/Ctrl-C, run_multi start/re-entrant/dry-run, _finish prune+scan-bad→WARN, status_view, smart selftest fields, ui fmt_eta/TEST%-cell/render_burnin_view, watch multi-select+re-attach, cli nargs+--status |
-| E3 | sim NVMe walk | `sim/run status` โชว์ nvme0n1/nvme1n1 = PCIe2:0/1, `burnin nvme0n1` = PASS | ✅ | NVMe enumerated + serial-relabelled + burn-in PASS ใน sim | NVMe by-id ต้องเครื่องจริง (sysfs/by-id แฟกไม่ได้) |
-| E4 | sim multi burn-in | `burnin <dev> --scan` โชว์ 2 bars + ETA, dirty→WARN, state ใน sim/var | ✅ | live self-test+scan bars, `[WARN] … 3 bad block(s)`, `sim/var/burnin.json` | Ctrl-C = ทิ้งไว้รันต่อ (re-attach `--status`) |
+> โครงสร้าง test = 1 ไฟล์ต่อ 1 module (`tests/test_<module>.py`), shared `_disk()` factory ใน
+> `tests/helpers.py`. รวม regression จริง: X357 SAS ผ่าน `smart.read`→`assess` = `uncorr=0`/PASS
+> ทั้งที่ `Non-medium error count: 1061` (v0.18.0).
+
+---
+
+<a id="sec-f"></a>
+
+## Section F — RAID backend (perccli)
+
+> `simctl mode raid` → b2ctl auto-detect RAID backend (perccli) แทน IT (sas2ircu).
+
+| ID | Scenario | Expected | Status | Actual |
+|----|----------|----------|:------:|--------|
+| F1 | `simctl mode raid` + `check` | `[✔] perccli`, `Detected backend: RAID-mode` | ✅ | `perccli … (Controller Count = 1)`, `Detected backend: RAID-mode` |
+| F2 | `status` (RAID) | sub-headers `--- Hardware (PERC RAID) ---` / `--- Software (ZFS…) ---`; column `HW:vd<n>/<level>` | ✅ | `HW:vd0/raid5` per member; volumes table `HW vd0 raid5 Optl 2.727 TB` |
+| F3 | Members via megaraid | physical members อ่านผ่าน `smartctl -d megaraid,<DID>` | ✅ | members อ่าน SMART ได้ (PASSED); free disks เสนอ `set JBOD / raid-create` |
 
 <details>
-<summary>📋 ดูโครงสร้าง test ใหม่ + รายละเอียด 9 เทสที่แก้</summary>
-
-**โครงสร้าง test ใหม่ — 1 ไฟล์ต่อ 1 module (หาง่าย):**
+<summary>📋 Output จริง (RAID-mode status)</summary>
 
 <pre>
-tests/
-  conftest.py + helpers.py     # shared _disk() factory + sample outputs
-  test_common.py (17)   test_zfs.py (28)    test_watch.py (23)
-  test_ui.py (14)       test_config.py (8)  test_backend.py (7)
-  test_hba.py (7)       test_smart.py (5)   test_spec.py (5)
-  test_core.py (4)      test_safety.py (4)  test_cli.py (2)
+--- Hardware (PERC RAID) ---
+1:0  sdz  SATA Samsung SSD 860 PRO 1TB ...  HW:vd0/raid5   OK 0hPOH  NORMAL
+1:4  sdz  SATA Samsung SSD 870 EVO 1TB ...  HW:vd0/raid5   OK 0hPOH  NORMAL
+--- Software (ZFS / unassigned) ---
+1:6  sdz  SATA Samsung SSD 870 EVO 1TB ...  -              OK 0hPOH  CONFIG
+Storage summary:
+  TYPE NAME  LEVEL  STATE  SIZE      USED  FREE  SCRUB  TRIM
+  HW   vd0   raid5  Optl   2.727 TB  -     -     -      -
+- bay 1:6 ... available (Unconfigured Good) — set JBOD for ZFS, or add to a RAID volume (raid-create)
 </pre>
 
-**9 เทสที่เคย fail — แก้แล้ว:**
-- 7 ตัว (add_spare/replace/create_pool×2/demote_to_spare×2/swap_readds): mock assertion
-  เก่าคาด `run_check([...])` แต่ code เรียก `run_check([...], dry_run=False)` (production
-  ถูก — มี `dry_run` kwarg จากฟีเจอร์ dry-run). แก้ assertion ให้รับ `dry_run=False`
-- 2 ตัว (test_cmd_swap_success / test_cmd_demote_success ใน feature_1b เดิม): **stale** —
-  เขียนไว้สำหรับ `_cmd_swap` เวอร์ชันเก่า (ใช้ `zfs.spares()`, ไม่มี topology-linger detach).
-  เขียนใหม่ใน `test_watch.py::TestWatchSwapDemoteFlow` ให้ตรง implementation ปัจจุบัน
-
-**Source code ไม่ถูกแตะ** — แก้เฉพาะ test (โครงสร้าง + assertion).
-
+พิสูจน์ b2ctl = **dual-backend** (IT + RAID co-equal, auto-detected). `perccli` + `smartctl -d
+megaraid` ใช้ใน RAID backend (มีเฉพาะ `storcli` ที่ถูกถอดออก).
 </details>
+
+---
+
+<a id="sim-limits"></a>
+
+## ข้อจำกัดของ sim (มันคือ model ไม่ใช่ ZFS/PERC จริง)
+
+- **by-id = ""** — sim ใช้ `/dev/sdX` เป็น token (real ใช้ `ata-`/`wwn-`/`nvme-` by-id). flow/logic เทสได้ครบ แต่ path จริงต่าง
+- **LED locate** = print message เฉยๆ ไม่มีไฟจริง; **hotplug** = `simctl pull/insert` (ไม่ใช่ physical unplug)
+- **ไม่เจอ ZFS/hardware quirk จริง**: checksum/real scrub, resilver time จริง, timing race, rpool `-part3` + `proxmox-boot-tool` (เป็น message)
+- bay = identity (state slot == bay ที่แสดง); ไม่จำลอง Dell slot-reversal
+- NVMe `by-id` relabel ต้องเครื่องจริง (sysfs/by-id แฟกไม่ได้)
+- → ใช้เทส **b2ctl logic/flow/parsing/output** ไม่ใช่เทส ZFS engine. **pass/fail บน hardware ต้องรันซ้ำบนเครื่อง.**
 
 ---
 

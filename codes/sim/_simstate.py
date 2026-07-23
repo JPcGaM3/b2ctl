@@ -92,11 +92,26 @@ def save(state: dict) -> None:
 # lookups
 # --------------------------------------------------------------------------- #
 
+def _strip_part(name: str) -> str:
+    """Drop a partition suffix so an over-provisioned member (v0.17.0:
+    <disk>-part1 / nvme0n1p1 / sdb1) resolves back to its base disk. Only used as
+    a FALLBACK after an exact-name lookup fails, so a whole-disk name like
+    'nvme0n1' (which ends in a digit) is never mis-stripped."""
+    import re
+    m = re.match(r"^(.*?)(?:-part\d+|p\d+|\d+)$", name)
+    return m.group(1) if m and m.group(1) else name
+
+
 def disk_by_name(state: dict, name: str):
     name = name.replace("/dev/", "")
     for d in state["disks"]:
         if d["name"] == name:
             return d
+    base = _strip_part(name)          # fallback: partition member -> base disk
+    if base != name:
+        for d in state["disks"]:
+            if d["name"] == base:
+                return d
     return None
 
 

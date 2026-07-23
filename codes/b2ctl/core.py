@@ -62,10 +62,23 @@ def scan(tbw_table=None, *, rescue: bool = False) -> list[Disk]:
 
     tbw_table = tbw_table if tbw_table is not None else spec.load()
     smart_targets = [d for d in disks if d.health != "GHOST"]
-    # smartctl calls are subprocess-wait bound, so one thread per disk is safe;
-    # the old fixed 4 serialised an 8-bay box into two waves (F-077).
-    with ThreadPoolExecutor(max_workers=min(16, max(1, len(smart_targets)))) as executor:
-        list(executor.map(lambda d: smart.read(d, tbw_table), smart_targets))
+    # Direct smartctl on independent /dev/sdX is subprocess-wait bound, so one
+    # thread per disk is safe (F-077). But megaraid passthrough (d.smart_dtype set)
+    # all funnels through ONE PERC that serializes IOCTLs — 16-way there saturates
+    # the controller and slow disks blow the per-probe timeout -> NOREAD. Read the
+    # direct group wide, the megaraid group at a small configurable cap.
+    from . import config as _cfg
+    mega = [d for d in smart_targets if d.smart_dtype]
+    direct = [d for d in smart_targets if not d.smart_dtype]
+
+    def _read_pool(targets, workers):
+        if not targets:
+            return
+        with ThreadPoolExecutor(max_workers=min(workers, max(1, len(targets)))) as executor:
+            list(executor.map(lambda d: smart.read(d, tbw_table), targets))
+
+    _read_pool(direct, 16)
+    _read_pool(mega, _cfg.smart_config().get("megaraid_workers", 4))
 
     # Enterprise SAS drives often have no SERIAL in lsblk (udev doesn't query it).
     # SMART now has the real serial. Re-run bay assignment so those disks get a bay,
@@ -152,10 +165,31 @@ def assemble_storage(disks: list[Disk], pools: list[dict],
                      "state": v.get("state", "?"), "size": v.get("size", "-"),
                      "used": used, "free": free})
     for p in pools or []:
-        rows.append({"kind": "SW", "name": p["name"],
-                     "level": zfs.pool_level(p["name"]), "state": p["health"],
-                     "size": p["size"], "used": p["alloc"], "free": p["free"]})
+        row = {"kind": "SW", "name": p["name"],
+               "level": zfs.pool_level(p["name"]), "state": p["health"],
+               "size": p["size"], "used": p["alloc"], "free": p["free"]}
+        row.update(pool_maint(p["name"]))
+        rows.append(row)
     return rows
+
+
+def pool_maint(name: str) -> dict:
+    """Per-pool scrub/trim display strings for the maintenance columns.
+
+    PURE READ (CLAUDE.md §9): last scrub is read LIVE from `zpool status`
+    (`zfs.last_scrub_date`), falling back to the maint.jsonl history; last trim
+    comes only from maint.jsonl (ZFS exposes no live last-trim date). Never
+    writes — reconciling background scrubs into history happens only in watch's
+    refresh and the `maint --log` view, never on the read path."""
+    from . import maint
+    scrub_iso = zfs.last_scrub_date(name)
+    if not scrub_iso:
+        ev = maint.last_event("scrub", name)
+        scrub_iso = ev.get("ts") if ev else None
+    tev = maint.last_event("trim", name)
+    trim_iso = tev.get("ts") if tev else None
+    return {"last_scrub": maint.rel_time(scrub_iso) if scrub_iso else "",
+            "last_trim": maint.rel_time(trim_iso) if trim_iso else ""}
 
 
 def scan_one(dev: str, tbw_table=None) -> Disk:

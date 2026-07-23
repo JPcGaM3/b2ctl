@@ -6,7 +6,7 @@ replace / wipe / skip). At any time you can type a command:
 
     r  refresh          a  assign a free disk       o  offload onto a spare
     s  swap onto spare  d  demote a mirror leg       t  toggle dry-run
-    n  new pool         e  extend (cache/log/raid)   b  burn-in a disk
+    n  new pool         e  extend (cache/log/raid)   m  maint (scrub/trim/health)
     u  udev-rescue      x  destroy a pool            l  locate a bay LED
     q  quit
 

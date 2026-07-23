@@ -701,10 +701,10 @@ b2ctl> x
   [!] destroying 'tank' ERASES ALL DATA on it. This cannot be undone.
   destroy pool 'tank'? [y/N]> y
   type the pool name 'tank' to confirm> tank
-  ✔ pool 'tank' destroyed; cron removed
+  ✔ pool 'tank' destroyed; timers disabled
 ```
 
-> ⚠️ 2 ด่าน: กด `[y/N]` **และ** พิมพ์ชื่อ pool ให้ตรง b2ctl ลบ cron ของ pool นั้นให้ด้วย
+> ⚠️ 2 ด่าน: กด `[y/N]` **และ** พิมพ์ชื่อ pool ให้ตรง b2ctl จะปิด maintenance timer (systemd) ของ pool นั้นให้ด้วย
 > (ปุ่ม `x` เดี่ยว ไม่มี alias)
 
 ---

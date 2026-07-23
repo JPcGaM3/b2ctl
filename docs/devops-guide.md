@@ -32,16 +32,21 @@ the R620s.
 
 - PERC H710 mini crossflashed to **IT mode** → LSI SAS9207-8i (SAS2308),
   firmware `0x2214` IT. No RAID controller CLI; disks are raw `/dev/sd*`.
-- Proxmox VE on ZFS-on-root (`rpool` mirror) + a data pool (`tank`, RAID10 =
-  striped mirrors). Pools created with `/dev/disk/by-id/ata-*` members,
-  `ashift=12`, `compression=lz4`, `atime=off`, `xattr=sa`.
+- Proxmox VE on ZFS-on-root (`rpool` mirror) + a data pool (`tank`, **raidz1** =
+  RAID5, 3× Samsung 870 EVO 1TB + 1 hot spare). Pools created with
+  `/dev/disk/by-id/ata-*` members, `ashift=12`, `compression=lz4`, `atime=off`,
+  `xattr=sa`. (raidz1 resilver reads all surviving members and tolerates only
+  ONE failed disk — slower/more stressful than a mirror resilver.)
 - Python **stdlib only** (no pip deps). Runs as root.
 - Required binaries: `smartctl`, `zpool`, `lsblk`. Optional: `sas2ircu`
   (bay numbers only), `ledmon`/`ledctl` (nicer locate LEDs), `wipefs`/`sgdisk`
   (wipe action). LED locate works without any of them via the dd fallback.
 
-There is intentionally **no storcli/perccli and no `smartctl -d megaraid`** —
-those only work behind a RAID controller and are removed in this build.
+Only **storcli** was removed entirely (an LSI tool blind to a PERC — it caused
+false detection). `perccli` + `smartctl -d megaraid,<DID>` still drive b2ctl's
+co-equal **RAID backend** (auto-detected — see §9 and the §11 deltas). On this
+IT/HBA box neither is needed, because the disks are raw and read directly with
+`smartctl -a /dev/sdX` + `sas2ircu`.
 
 ---
 
@@ -337,9 +342,9 @@ long <by-id>` in a shell; the member's HEALTH_CHK still updates passively from
 `smartctl -a`.) Starting a health-check writes a `"health"`/`"started"` event to
 `maint.jsonl` on **both** paths (`watch._maint_health` and CLI `_burnin`),
 **skipped under `--dry-run`**. The only writes are the self-test trigger and a
-read-only `badblocks`; nothing on the disk is modified. *(Known cosmetic bug:
-`burnin.live_view` still prints the now-dead `b2ctl burnin --status` on Ctrl-C —
-use `b2ctl maint health --status`.)*
+read-only `badblocks`; nothing on the disk is modified. On Ctrl-C,
+`burnin.live_view` prints `b2ctl maint health --status` to re-attach
+(`burnin.py:427`).
 
 ### 3.6b Manual maintenance — scrub / trim / health-check + history (v0.17.0)
 
@@ -479,7 +484,9 @@ A single `select.select([sys.stdin], [], [], 2.0)` loop:
    - IT-only box: no volumes → the summary is just the software (pool) rows.
 2. Snapshot block devices (`_block_devs()` via `lsblk -P NAME,TYPE`).
 3. Each iteration:
-   - If stdin is ready → read a line → dispatch `r/a/o/s/d/n/t/l/q`.
+   - If stdin is ready → read a line → dispatch
+     `r/a/o/s/d/t/n/e/m/u/x/l/q` (`e`=extend cache/log/raid, `m`=maint
+     scrub/trim/health, `u`=udev-rescue, `x`=destroy).
    - Re-snapshot devices. `new = current - baseline`,
      `gone = baseline - current`.
    - For each `gone` → `_handle_removed()` (report + reprint pool health).
@@ -530,10 +537,14 @@ a selection spanning two controllers (a single VD is controller-local). All hono
 
 ### 6.2 Write-command allowlist
 
-`safety.WRITE_CMDS = {"zpool", "wipefs", "sgdisk", "dd"}` — any `run_check`
-call whose `args[0]` is in this set is classified as mutating. Everything else
-is read-only. This set governs both dry-run suppression and pre-op snapshot
-triggering.
+`safety.WRITE_CMDS = {"zpool", "wipefs", "sgdisk", "dd", "perccli", "perccli64",
+"smartctl", "badblocks", "systemctl"}` — any `run_check` call whose `args[0]` is
+in this set is classified as mutating. Everything else is read-only. This set
+governs both dry-run suppression and pre-op snapshot triggering. The last five
+entries cover RAID-mode actions (`perccli`), self-test/surface-scan triggers
+(`smartctl -t`, `badblocks`), and maintenance-timer enable/disable (`systemctl`);
+their read-only sub-commands go through `run()`, not `run_check`, so they are not
+gated.
 
 ### 6.3 Dry-run mode
 
@@ -678,34 +689,34 @@ To reset manually: `sudo mkdir -p /var/log/b2ctl/snapshots && sudo chown root:ro
 cd codes && sudo ./install.sh --with-tools
 ```
 
-Downloads archives for `sas2ircu`, `storcli64`, `perccli64` from Google Drive, then
-extracts and installs the binaries. Runs after the main b2ctl install; each tool is
-independent. Downloads are deleted on EXIT via `trap`.
+Downloads archives for `sas2ircu`, `perccli64` from Google Drive, then extracts and
+installs the binaries (storcli was dropped — LSI tool, blind to a PERC). Runs after
+the main b2ctl install; each tool is independent. Downloads are deleted on EXIT via
+`trap`.
 
 **Download step — `download_tools(dest)`:**
 
 - Checks for `curl` (preferred) or `wget`; aborts with `[✗]` if neither found.
-- Downloads 3 archives to a temp dir using:
+- Downloads 2 archives to a temp dir using:
   `https://drive.usercontent.google.com/download?export=download&confirm=t&id=<FILE_ID>`
   (modern Google Drive endpoint — `confirm=t` bypasses the virus-scan warning page).
 - Validates each download: if the file is < 1 KB it was likely an HTML error page —
   prints `[✗] <name>: download too small` and aborts.
 - File IDs are hardcoded constants at the top of `install.sh`:
-  `_GDRIVE_SAS2IRCU`, `_GDRIVE_STORCLI`, `_GDRIVE_PERCCLI`.
+  `_GDRIVE_SAS2IRCU`, `_GDRIVE_PERCCLI`.
 
 **apt prerequisites installed automatically:**
 
 | package | why |
 |---------|-----|
 | `alien` | converts perccli `.rpm` → `.deb` |
-| `unzip` | extracts `.zip` archives (sas2ircu, storcli) |
+| `unzip` | extracts `.zip` archives (sas2ircu) |
 
 **Extraction chain per tool:**
 
 | tool | archive | method | binary dest |
 |------|---------|--------|-------------|
 | `sas2ircu` | `SAS2IRCU_P20.zip` | `unzip` → find `x86-64_rel/sas2ircu` (falls back to `x86_rel`) | `/usr/local/sbin/sas2ircu` |
-| `storcli64` | `007.3703.0000.0000_MR 7.37_Storcli.zip` | double-unzip → `dpkg-deb -x` Ubuntu DEB | `/usr/local/sbin/storcli64` + symlink `storcli` |
 | `perccli64` | `perccli_7.1-007.0127_linux.tar.gz` | `tar` → `alien --to-deb` RPM → `dpkg-deb -x` | `/usr/local/sbin/perccli64` + symlink `perccli` |
 
 `dpkg-deb -x` extracts binary contents without touching the package database.
@@ -794,7 +805,7 @@ are never touched by `install.sh`.
 |---------|-------------|
 | table empty, pools show | `lsblk` not in `-P` mode or MODEL spaces — confirm `enumerate_disks` uses `-P`; check `lsblk -dnb -P -o NAME,...` by hand |
 | BAY all `-` | `sas2ircu` missing or can't execute; bays are optional (locate still works by serial/dev). If `b2ctl check` shows "binary exists but won't execute", run `apt-get install -y libc6-i386` — sas2ircu is a 32-bit ELF |
-| BAY all `-` (RAID-mode detected despite IT HBA) | crossflashed PERC H710 responds to storcli's management plane; auto-detect sees storcli and picks RaidBackend. Fix: `apt-get install libc6-i386` so sas2ircu executes, or set `controller.mode = "it"` in `/etc/b2ctl/config.json` |
+| BAY all `-` (RAID-mode detected despite IT HBA) | a crossflashed PERC H710 may still answer `perccli show ctrlcount`, so auto-detect can pick RaidBackend if sas2ircu can't run. Fix: `apt-get install libc6-i386` so sas2ircu executes (→ forces IT), or set `controller.mode = "it"` in `/etc/b2ctl/config.json` |
 | BAY numbers wrong | edit `bay_map.json` (reverse rule or explicit map); recalibrate with `b2ctl locate <serial>` |
 | BAY mapping works in one directory but not another (raw BDF elsewhere) | pre-v0.8.5 `python -m` cwd-shadowing: running from the source checkout loaded that copy's `bay_map.json`. Fix: `sudo b2ctl update` (bind `/etc/b2ctl/bay_map.json` in config) and redeploy so the launcher has `PYTHONSAFEPATH=1` |
 | locate lights many bays | you're on old sas2ircu-slot locate; this build uses device-based locate — rebuild/redeploy |
@@ -824,11 +835,11 @@ are never touched by `install.sh`.
 
 1. `sas2ircu list` — if stdout is non-empty → `ITBackend`.
 2. sas2ircu binary exists but failed to execute → warn stderr ("apt-get install -y libc6-i386") and **force `ITBackend`** (prevents false RAID detection on crossflashed H710).
-3. `storcli64 show ctrlcount` → non-empty → `RaidBackend`.
-4. `storcli show ctrlcount` → non-empty → `RaidBackend`.
-5. `perccli64 show ctrlcount` → non-empty → `RaidBackend`.
-6. `perccli show ctrlcount` → non-empty → `RaidBackend`.
-7. None found → `die()` with an install hint.
+3. `perccli64 show ctrlcount` → non-empty → `RaidBackend`.
+4. `perccli show ctrlcount` → non-empty → `RaidBackend`.
+5. None found → `die()` with an install hint.
+
+(storcli is never probed — it was dropped because it responds to a crossflashed PERC and caused false RAID detection.)
 
 `_backend_cache` stores the result; `setup_method` in tests clears it via
 `bk_mod._backend_cache = None` to keep tests isolated.
@@ -927,10 +938,10 @@ read as all-defaults), then clears `_cache`.
 
 | command | purpose |
 |---------|---------|
-| `storcli64 /c<n>/eall/sall show all` | enumerate all drives and their EID:Slot for the bay map (also works with storcli, perccli64, perccli) |
-| `storcli64 /c<n>/e<enc>/s<slot> set locate start` | turn on locate LED for one drive slot |
-| `storcli64 /c<n>/e<enc>/s<slot> set locate stop` | turn off locate LED for one drive slot |
-| `storcli64 show ctrlcount` | probe for RAID controller presence (also used in auto-detection) |
+| `perccli64 /c<n>/eall/sall show all` | enumerate all drives and their EID:Slot for the bay map (also works with `perccli`) |
+| `perccli64 /c<n>/e<enc>/s<slot> set locate start` | turn on locate LED for one drive slot |
+| `perccli64 /c<n>/e<enc>/s<slot> set locate stop` | turn off locate LED for one drive slot |
+| `perccli64 show ctrlcount` | probe for RAID controller presence (also used in auto-detection) |
 | `sas2ircu list` | probe for IT/HBA controller presence (existing; now also used in auto-detection) |
 
 ---
@@ -1008,13 +1019,13 @@ python3 sim/run watch             # swap/replace/offload/create — state.json m
 python3 sim/simctl pull 1:5       # remove a disk (spare auto-resilvers if present)
 python3 sim/simctl insert 1:5     # re-insert → watch sees NEW DISK DETECTED
 python3 sim/simctl dirty 1:5      # mark old data/labels (create wipe-warning path)
-python3 sim/simctl mode it|raid   # switch backend (sas2ircu ↔ storcli/perccli)
+python3 sim/simctl mode it|raid   # switch backend (sas2ircu ↔ perccli)
 python3 sim/simctl show           # disks + pools + mode
 ```
 
 | aspect | note |
 |--------|------|
-| backends | both — `simctl mode it` (sas2ircu) / `mode raid` (storcli/perccli) |
+| backends | both — `simctl mode it` (sas2ircu) / `mode raid` (perccli) |
 | audit isolation | sim writes `sim/var/ops.jsonl` + `sim/var/snapshots/`, **never** `/var/log/b2ctl/` → impossible to confuse with real ops; `b2ctl log`/`rollback` work in the sim |
 | limitations | `by_id=""` (uses `/dev/sdX` tokens, not `ata-`/`wwn-`), LED locate = message only, models b2ctl logic/flow — **not** real ZFS (no checksum/scrub/real resilver timing) |
 | smoke test | `tests/test_sim_smoke.py` drives `sim/run` via subprocess |

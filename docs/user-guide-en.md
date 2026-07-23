@@ -44,8 +44,11 @@ b2ctl reads each drive directly and talks to ZFS for everything else.
   with a pre-op snapshot and rollback hint.
 - **Roll back a previous operation** with `b2ctl rollback <op_id>`.
 
-> 📌 Note: This is the IT-mode sibling of the original storcli/RAID-mode b2ctl. Same look
-> and feel, but no perccli/storcli or megaraid passthrough needed.
+> 📌 Note: b2ctl is one tool with two co-equal, auto-detected backends —
+> **IT/HBA mode** (`sas2ircu`, raw disks, ZFS lifecycle) and **RAID mode**
+> (`perccli` + `smartctl -d megaraid` passthrough, hardware RAID). It picks the
+> right one per box; force it with `controller.mode`. (Only the old `storcli`
+> tool was dropped — it was blind to a PERC and caused false detection.)
 
 ---
 
@@ -739,11 +742,11 @@ b2ctl> x
   [!] destroying 'tank' ERASES ALL DATA on it. This cannot be undone.
   destroy pool 'tank'? [y/N]> y
   type the pool name 'tank' to confirm> tank
-  ✔ pool 'tank' destroyed; cron removed
+  ✔ pool 'tank' destroyed; timers disabled
 ```
 
 > ⚠️ Two gates: the `[y/N]` **and** re-typing the exact pool name. b2ctl also
-> removes that pool's maintenance cron. (Bare key `x` only — no word alias.)
+> disables that pool's systemd maintenance timers. (Bare key `x` only — no word alias.)
 
 ---
 
@@ -1164,17 +1167,20 @@ SSD-optimal default — **press Enter to accept**, or type to override (`ashift`
 `recordsize` is workload-tunable (128K general, DB 16K, media 1M, VM 64–128K) and
 can be changed per-dataset later.
 
-**autotrim** and **autoscrub** are two independent choices (v0.17.0). b2ctl
-schedules maintenance with the distro's own **systemd timers** (from
-`zfsutils-linux`), one per pool:
-- **autoscrub** — *default **off***. `[1] on` enables `zfs-scrub-monthly@<pool>.timer`.
+**autotrim** and **autoscrub** are two independent choices, **both default OFF**,
+and **OFF means manual-only — no timer is installed** (v0.18.0). Both questions
+read `[1] off` (default) `/ [2] on`:
+- **autoscrub** — *default **off***. `[2] on` enables `zfs-scrub-monthly@<pool>.timer`.
   With **off**, the pool has **no scheduled scrub** — manual scrub is now the primary
-  path (`[m]aint` / `b2ctl scrub`), and b2ctl prints a reminder + the pool's SCRUB
+  path (`[m]aint` / `b2ctl maint scrub`), and b2ctl prints a reminder + the pool's SCRUB
   column shows how stale the last scrub is. *(This reverses the older always-on scrub;
   see ADR-003 — a pool you never scrub can accumulate undetected bitrot, so scrub it
   regularly or turn autoscrub on.)*
-- **autotrim** — *default off* — enables `zfs-trim-monthly@<pool>.timer`. Choosing
-  `on` trims continuously (ZFS handles it), so no trim timer is scheduled.
+- **autotrim** — *default off* — TRIM by hand with `[m]aint` / `b2ctl maint trim
+  <pool>`; `[2] on` sets `zpool autotrim=on` so ZFS trims inline. Either way **no trim
+  timer is installed**. *(This reverses the older v0.16/v0.17 behaviour where
+  `autotrim off` scheduled a monthly `zfs-trim` timer — there is no trim timer any
+  more; see ADR-004.)*
 
 Check what's scheduled: `systemctl list-timers | grep zfs`. If the distro doesn't
 ship the timer units, b2ctl warns "scrub timer NOT scheduled" and installs nothing —
@@ -1183,8 +1189,9 @@ answers are remembered and pre-fill the next `create`.
 
 Debian/Proxmox also has a built-in cron that scrubs *all* pools monthly (property
 `org.debian:periodic-scrub`). To avoid scrubbing twice, when b2ctl enables a pool's
-timer it sets that pool's `org.debian:periodic-scrub=disable` (and `…periodic-trim`
-for the trim timer) — so your per-pool timer becomes the single schedule.
+scrub timer it sets that pool's `org.debian:periodic-scrub=disable` — so your
+per-pool timer becomes the single schedule. (No trim timer is installed, so
+`org.debian:periodic-trim` is left untouched.)
 
 ## Destroying a ZFS pool (`[x]` or `b2ctl destroy <pool>`)
 

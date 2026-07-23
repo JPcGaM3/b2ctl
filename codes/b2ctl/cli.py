@@ -675,7 +675,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="stripe of mirrors (RAID10) from an even number of disks")
     cr.set_defaults(func=_create)
 
-    ds = sub.add_parser("destroy", help="destroy a zfs pool (DESTRUCTIVE) + remove its cron")
+    ds = sub.add_parser("destroy", help="destroy a zfs pool (DESTRUCTIVE) + disable its maintenance timers")
     ds.add_argument("pool", nargs="?", help="pool name (prompts if omitted)")
     ds.set_defaults(func=_destroy)
 

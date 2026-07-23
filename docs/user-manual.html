@@ -171,7 +171,7 @@
 
   <!-- ===================== SIDEBAR ===================== -->
   <aside class="sidebar" id="sidebar">
-    <div class="brand"><span class="logo">b2ctl</span><span class="v">v0.10 · IT-mode</span></div>
+    <div class="brand"><span class="logo">b2ctl</span><span class="v">v0.18 · IT-mode</span></div>
     <p class="brand-sub">คู่มือผู้ใช้ — เริ่มจากศูนย์</p>
 
     <div class="search-wrap">
@@ -192,7 +192,7 @@
       <a href="#s5"><span class="n">05</span>โหมด watch</a>
       <a href="#s6"><span class="n">06</span>คำสั่งทีละปุ่ม</a>
       <a href="#s7"><span class="n">07</span>Runbook หน้างาน</a>
-      <a href="#s8"><span class="n">08</span>Burn-in ดิสก์ใหม่</a>
+      <a href="#s8"><span class="n">08</span>Maintenance (scrub/trim/health)</a>
       <a href="#s9"><span class="n">09</span>Dry-run (ซ้อมก่อน)</a>
       <div class="toc-group">ปลอดภัย & อ้างอิง</div>
       <a href="#s10"><span class="n">10</span>ระบบความปลอดภัย</a>
@@ -370,9 +370,12 @@ Pools:
         <tr><td class="mono">HEALTH</td><td>ผลตรวจ SMART</td><td class="mono">PASSED / FAILED</td></tr>
         <tr><td class="mono">POOL</td><td>อยู่ pool/vdev ไหน</td><td class="mono">tank/raidz1-0</td></tr>
         <tr><td class="mono">STATUS</td><td>สถานะ vdev ของ ZFS</td><td class="mono">ONLINE, AVAIL</td></tr>
+        <tr><td class="mono">HEALTH_CHK</td><td>ผล self-test ล่าสุด (อ่านจาก log ใน <code class="inl">smartctl -a</code>) เทียบกับ POH</td><td class="mono">OK 120hPOH</td></tr>
         <tr><td class="mono">LEVEL</td><td>เกรดรวม (ดูด้านล่าง)</td><td>—</td></tr>
       </tbody>
     </table>
+
+    <div class="info"><b>สรุป pool มีคอลัมน์ SCRUB / TRIM ด้วย</b> (v0.17.0): บอกว่า scrub ล่าสุด (อ่านสดจาก <code class="inl">zpool status</code>) และ trim ล่าสุด (จาก <code class="inl">maint.jsonl</code>) นานแค่ไหนแล้ว — เตือนให้มาสั่ง <kbd>m</kbd> (maint) เมื่อ autoscrub/autotrim ตั้งปิดไว้</div>
 
     <h3>LEVEL — เกรดรวม ดูสีเดียวรู้เรื่อง</h3>
     <table>
@@ -410,7 +413,7 @@ Storage summary:
   SW   tank    raidz1   <span class="g">ONLINE</span>    2.72T  1.72G   2.72T
 <span class="g">[OK] all disks healthy and assigned</span>
 
-[r]efresh [a]ssign [o]ffload [s]wap [d]emote [t]oggle-dryrun [n]ew-pool [e]xtend [b]urnin [u]dev-rescue [x]destroy-pool [l]ocate [q]uit   (or hot-plug)
+[r]efresh [a]ssign [o]ffload [s]wap [d]emote [t]oggle-dryrun [n]ew-pool [e]xtend [m]aint [u]dev-rescue [x]destroy-pool [l]ocate [q]uit   (or hot-plug)
 <span class="p">b2ctl&gt;</span></pre>
 
     <div class="ok"><b>วิธีสั่งงาน:</b> ที่ prompt <code class="inl">b2ctl&gt;</code> ให้ <b>พิมพ์ตัวอักษรตัวเดียว</b> (เช่น <kbd>s</kbd>) <b>แล้วกด Enter</b>.
@@ -435,7 +438,7 @@ Storage summary:
 <pre><span class="p">b2ctl&gt;</span> a
     [1] bay 1:7 /dev/sde (Samsung SSD 870, SN S74ZNS0WXXXXXXX)
   assign which #&gt; (space-separated for batch) <span class="hl">1</span></pre>
-    <p><b>เลือกหลายตัว / batch (v0.11.0):</b> พิมพ์เลขคั่นเว้นวรรค (เหมือน <kbd>n</kbd>/<kbd>b</kbd>) — เลือก 1 ตัว = เมนูต่อดิสก์เหมือนเดิม; เลือก ≥2 ตัว = เมนู <b>batch</b> ทำ action เดียวกับทุกตัว (ยืนยันครั้งเดียว): <b>PERC</b> → blink / <b>set JBOD ทุกตัว</b> / สร้าง volume ก้อนเดียว / เพิ่มเป็น hot spare ทุกตัว; <b>ดิสก์ว่าง</b> → blink / เพิ่มเป็น SPARE ทุกตัว / WIPE ทุกตัว. ต้องเป็นดิสก์ชนิดเดียวกัน (ปนชนิด = ปฏิเสธ)</p>
+    <p><b>เลือกหลายตัว / batch (v0.11.0):</b> พิมพ์เลขคั่นเว้นวรรค (เหมือน <kbd>n</kbd>/<kbd>m</kbd>) — เลือก 1 ตัว = เมนูต่อดิสก์เหมือนเดิม; เลือก ≥2 ตัว = เมนู <b>batch</b> ทำ action เดียวกับทุกตัว (ยืนยันครั้งเดียว): <b>PERC</b> → blink / <b>set JBOD ทุกตัว</b> / สร้าง volume ก้อนเดียว / เพิ่มเป็น hot spare ทุกตัว; <b>ดิสก์ว่าง</b> → blink / เพิ่มเป็น SPARE ทุกตัว / WIPE ทุกตัว. ต้องเป็นดิสก์ชนิดเดียวกัน (ปนชนิด = ปฏิเสธ)</p>
     <p>รายการนี้รวมดิสก์ว่าง <b>3 แบบ</b>: <b>ดิสก์ว่างปกติ</b> (เปิดเมนู action ด้านล่าง); ดิสก์ <b class="mono">[GHOST]</b> (OS ปฏิเสธ ไม่มี <code class="inl">/dev</code>, ขึ้นว่า <code class="inl">— needs wipe</code>) → ไปทาง wipe/rescue (ดูปุ่ม <kbd>u</kbd>); และดิสก์ <b>PERC Unconfigured-Good</b> (เฉพาะเครื่อง RAID mode) → ไปเมนู hardware RAID (set JBOD / สร้าง volume / เพิ่มเป็น spare)</p>
     <p><b>ขั้นที่ 2</b> — เลือกดิสก์ว่างปกติ แล้วเด้งเมนูเดียวกับตอนเสียบดิสก์ใหม่ (NEW DISK DETECTED):</p>
 <pre>  Disk /dev/disk/by-id/wwn-0x5002538... is free.
@@ -533,7 +536,7 @@ Storage summary:
         <tr><td class="mono">raid10</td><td>4 (คู่)</td><td>1 ต่อคู่</td><td>50%</td></tr>
       </tbody>
     </table>
-    <div class="note"><b>ถ้าดิสก์มีข้อมูลเก่า</b> ระบบจะเตือนและถามว่าจะ wipe ก่อนไหม. หลังเลือกชนิด RAID b2ctl จะถามค่า property ทีละตัว (ashift, compression ฯลฯ) — <b>กด Enter เพื่อใช้ค่า default ที่เหมาะกับ SSD อยู่แล้ว</b></div>
+    <div class="note"><b>ถ้าดิสก์มีข้อมูลเก่า</b> ระบบจะเตือนและถามว่าจะ wipe ก่อนไหม. หลังเลือกชนิด RAID b2ctl จะถามค่า property ทีละตัว (ashift, compression ฯลฯ) — <b>กด Enter เพื่อใช้ค่า default ที่เหมาะกับ SSD อยู่แล้ว</b>. สุดท้ายถาม <b>autotrim / autoscrub</b> (ทั้งคู่ <code class="inl">[1] off (ค่าเริ่มต้น) / [2] on</code>) — ปิดไว้ = บำรุงรักษาเองด้วยปุ่ม <kbd>m</kbd> (ดูหัวข้อ 08)</div>
 
     <div class="keyrow"><div class="kc">e</div><div class="kb"><p class="kt">Extend <span class="en">เพิ่ม cache / log ให้ pool</span></p><p class="kd">เร่งความเร็ว pool เดิม: <b>L2ARC cache</b> = เร่งการอ่าน (เสียแล้วแค่ cache miss ไม่กระทบข้อมูล) · <b>SLOG log</b> = เร่งการเขียนแบบ sync (ควรใช้ 2 ลูกทำ mirror + ต้องเป็น SSD ที่มี PLP)</p></div></div>
 <pre><span class="p">b2ctl&gt;</span> e
@@ -547,13 +550,18 @@ Storage summary:
   <span class="k">[!] ensure the SSD(s) have Power-Loss Protection (PLP).</span>
   add SLOG (mirror) to 'tank'? [y/N]&gt; <span class="hl">y</span>
   <span class="g">✔</span> SLOG added</pre>
+    <div class="note"><b>v0.17.0:</b> SLOG เลือก topology ได้ (<b>single / mirror / raid10</b> — CLI <code class="inl">log-add --mirror|--raid10</code>; log vdev ทำ raidz ไม่ได้). และรองรับ <b>over-provisioning</b>: ตอบขนาด (เช่น <code class="inl">32G</code>) = แบ่ง partition แล้วเว้น spare area ให้ SSD ทน (CLI <code class="inl">cache-add/log-add --size</code>); เว้นว่าง = ใช้ทั้งลูก</div>
 
-    <div class="keyrow"><div class="kc">b</div><div class="kb"><p class="kt">Burn-in <span class="en">ทดสอบดิสก์ก่อนใช้</span></p><p class="kd">วนทดสอบดิสก์ใหม่/มือสองก่อนเชื่อใจ — เลือกหลายลูกพร้อมกันได้ รันเบื้องหลัง (รายละเอียดเต็มดูหัวข้อ 08)</p></div></div>
-<pre><span class="p">b2ctl&gt;</span> b
+    <div class="keyrow"><div class="kc">m</div><div class="kb"><p class="kt">Maint <span class="en">บำรุงรักษา — scrub / trim / health-check</span></p><p class="kd">เมนูรวมงานบำรุงรักษา 3 อย่าง: <b>[1] scrub</b> ตรวจ checksum + self-heal, <b>[2] trim</b> คืน block ว่างให้ SSD, <b>[3] health-check</b> ทดสอบดิสก์ว่าง (long self-test + badblocks + verdict; คือ burn-in เดิม). รายละเอียดเต็มดูหัวข้อ 08</p></div></div>
+<pre><span class="p">b2ctl&gt;</span> m
+  [1] scrub  (verify checksums + self-heal)
+  [2] trim   (release unused SSD blocks)
+  [3] health-check (smartctl -t long + optional badblocks + verdict)
+  action&gt; <span class="hl">3</span>
     [1] /dev/sdb (bay 32:4) Samsung SSD 870 EVO 1TB
     [2] /dev/sda (bay 32:5) Samsung SSD 870 EVO 1TB
-  burn in which #&gt; (space-separated) <span class="hl">1 2</span>
-  burn-in 2 disk(s) (long self-test)? [y/N]&gt; <span class="hl">y</span>
+  health-check which #&gt; (space-separated) <span class="hl">1 2</span>
+  health-check 2 disk(s) (long self-test)? [y/N]&gt; <span class="hl">y</span>
   also run a full read-surface scan (badblocks, read-only, hours)? [y/N]&gt; <span class="hl">y</span>
 <span class="c"># เปิดหน้าจอสดแสดงแถบความคืบหน้าของแต่ละลูก — Ctrl-C ออกได้ งานยังรันต่อ</span></pre>
 
@@ -575,7 +583,7 @@ Storage summary:
   run udevadm trigger/settle to rescue 1 ghost disk(s)? [y/N]&gt; <span class="hl">y</span>
   <span class="g">✔</span> rescued 1 disk(s)</pre>
 
-    <div class="keyrow"><div class="kc">x</div><div class="kb"><p class="kt">Destroy <span class="en">ลบ pool</span></p><p class="kd"><span class="badge b-red">อันตรายสุด</span> ลบ pool ทั้งก้อนด้วย <code class="inl">zpool destroy</code> — ข้อมูลหายหมด ต้องยืนยัน <b>และพิมพ์ชื่อ pool</b> จึงจะทำ (b2ctl ลบ cron ของ pool นั้นให้ด้วย)</p></div></div>
+    <div class="keyrow"><div class="kc">x</div><div class="kb"><p class="kt">Destroy <span class="en">ลบ pool</span></p><p class="kd"><span class="badge b-red">อันตรายสุด</span> ลบ pool ทั้งก้อนด้วย <code class="inl">zpool destroy</code> — ข้อมูลหายหมด ต้องยืนยัน <b>และพิมพ์ชื่อ pool</b> จึงจะทำ (b2ctl ปิด systemd maintenance timer ของ pool นั้นให้ด้วย ไม่ใช่ cron)</p></div></div>
 <pre><span class="p">b2ctl&gt;</span> x
     [1] rpool (952G, ONLINE)
     [2] tank (2.72T, ONLINE)
@@ -586,7 +594,7 @@ Storage summary:
   <span class="r">[!] destroying 'tank' ERASES ALL DATA on it. This cannot be undone.</span>
   destroy pool 'tank'? [y/N]&gt; <span class="hl">y</span>
   type the pool name 'tank' to confirm&gt; <span class="hl">tank</span>
-  <span class="g">✔</span> pool 'tank' destroyed; cron removed</pre>
+  <span class="g">✔</span> pool 'tank' destroyed; timers disabled</pre>
 
     <div class="keyrow ro"><div class="kc">q</div><div class="kb"><p class="kt">Quit <span class="en">ออก</span></p><p class="kd">ออกจากโหมด watch กลับสู่ shell</p></div></div>
 <pre><span class="p">b2ctl&gt;</span> q
@@ -654,31 +662,53 @@ bye</pre>
     <div class="crit"><b>ระวัง:</b> ระหว่าง DEGRADED / resilver <b>ไม่มี redundancy</b> — ถ้าดิสก์ลูกที่สองเสียในช่วงนี้ ข้อมูลหาย. b2ctl จะไม่ยอมให้ offline ลูกที่สองระหว่างนี้</div>
   </section>
 
-  <!-- ===== 08 BURN-IN ===== -->
+  <!-- ===== 08 MAINTENANCE ===== -->
   <section id="s8">
-    <div class="eyebrow"><span class="num">08</span><h2>Burn-in — ทดสอบดิสก์ใหม่/มือสองก่อนใช้</h2></div>
-    <p class="lead">ก่อนเชื่อใจดิสก์ใหม่ (โดยเฉพาะมือสอง) รันทดสอบเพื่อคัดตัวใกล้ตายออกก่อนเข้า pool — ได้ผลเป็น <b>PASS / WARN / FAIL</b>. เลือกหลายลูกพร้อมกันได้ และรันเบื้องหลัง</p>
+    <div class="eyebrow"><span class="num">08</span><h2>Maintenance — scrub / trim / health-check</h2></div>
+    <p class="lead">ปุ่ม <kbd>m</kbd> ในโหมด watch (หรือ CLI <code class="inl">b2ctl maint …</code>) รวมงานบำรุงรักษา 3 อย่างไว้ที่เดียว. ตั้งแต่ v0.18.0 <b>การบำรุงรักษาด้วยมือคือทางหลัก</b> — autoscrub/autotrim ตอนสร้าง pool ตั้ง <b>ปิด (OFF)</b> เป็นค่าเริ่มต้น จึงต้องมาสั่ง scrub/trim เองเป็นระยะ (คอลัมน์ SCRUB/TRIM ในสรุป pool บอกว่านานแค่ไหนแล้ว)</p>
 
-<pre><span class="p">b2ctl&gt;</span> b
+<pre><span class="p">b2ctl&gt;</span> m
+  [1] scrub  (verify checksums + self-heal)
+  [2] trim   (release unused SSD blocks)
+  [3] health-check (smartctl -t long + optional badblocks + verdict)
+  action&gt;</pre>
+
+    <h3><span class="badge b-green">[1]</span> scrub — ตรวจ checksum ทั้ง pool + ซ่อมเอง</h3>
+    <p>อ่านทุก block ใน pool เทียบ checksum — เจอ bit เพี้ยน (bitrot) จะซ่อมจากตัวสำรอง (บน vdev ที่ redundant). ควรรันเดือนละครั้ง. กด <kbd>Ctrl-C</kbd> ได้ — <b>งาน scrub วิ่งใน kernel ต่อ</b> (แค่ปลด view). CLI: <code class="inl">b2ctl maint scrub &lt;pool&gt;</code> หรือ <code class="inl">b2ctl scrub &lt;pool&gt;</code></p>
+<pre><span class="p">b2ctl&gt;</span> m
+  action&gt; <span class="hl">1</span>
+    [1] rpool  [2] tank
+  scrub which pool #&gt; <span class="hl">2</span>
+  start scrub on 'tank'? [y/N]&gt; <span class="hl">y</span>
+  <span class="g">✔</span> scrub started — 12.4% done, ETA 00:18:40  <span class="c">(Ctrl-C = ปล่อยวิ่งต่อ)</span></pre>
+
+    <h3><span class="badge b-green">[2]</span> trim — คืน block ว่างให้ SSD</h3>
+    <p>บอก SSD ว่า block ไหนเลิกใช้แล้ว ช่วยยืดอายุ + คงความเร็ว. ทำเองเมื่อ <code class="inl">autotrim=off</code> (ค่าเริ่มต้น — <b>ไม่มี trim timer</b> อีกต่อไปตั้งแต่ v0.18.0). CLI: <code class="inl">b2ctl maint trim &lt;pool&gt;</code> หรือ <code class="inl">b2ctl trim &lt;pool&gt;</code></p>
+
+    <h3><span class="badge b-blue">[3]</span> health-check — ทดสอบดิสก์ (คือ burn-in เดิม)</h3>
+    <p>ก่อนเชื่อใจดิสก์ใหม่/มือสอง รันทดสอบเพื่อคัดตัวใกล้ตายออกก่อนเข้า pool — ได้ผล <b>PASS / WARN / FAIL</b>. เลือกหลายลูกพร้อมกันได้ รันเบื้องหลัง. <b>ทำได้เฉพาะดิสก์ว่าง</b> (ไม่ใช่สมาชิก pool — ถ้าจะ self-test สมาชิก ใช้ <code class="inl">smartctl -t long</code> ตรง ๆ). CLI: <code class="inl">b2ctl maint health &lt;dev …&gt; [--scan] [--short]</code></p>
+<pre><span class="p">b2ctl&gt;</span> m
+  action&gt; <span class="hl">3</span>
     [1] /dev/sdb (bay 32:4) Samsung SSD 870 EVO 1TB
     [2] /dev/sda (bay 32:5) Samsung SSD 870 EVO 1TB
-  burn in which #&gt; (space-separated) <span class="hl">1 2</span>
-  burn-in 2 disk(s) (long self-test)? [y/N]&gt; <span class="hl">y</span>
+  health-check which #&gt; (space-separated) <span class="hl">1 2</span>
+  health-check 2 disk(s) (long self-test)? [y/N]&gt; <span class="hl">y</span>
   also run a full read-surface scan (badblocks, read-only, hours)? [y/N]&gt; <span class="hl">y</span>
 
  BAY    DISK   SELF-TEST                    SURFACE SCAN (badblocks)
  32:4   sdb    [########------] 62%  ~1h10m  [###-----------] 18%  ~4h30m
  32:5   sda    [##########----] 74%  ~40m    [####----------] 22%  ~4h05m</pre>
 
-    <span class="see">แปลผล</span>
+    <span class="see">แปลผล health-check</span>
     <ul class="clean">
       <li><span class="badge b-green">PASS</span> สะอาด ใช้ได้เลย</li>
       <li><span class="badge b-amber">WARN</span> ใช้ได้แต่เก่า (POH &gt; 40,000 ชม., มี grown defect, หรือ scan เจอ bad block) → จัด priority ต่ำ</li>
       <li><span class="badge b-red">FAIL</span> มี uncorrected error หรือ self-test ไม่ผ่าน → <b>อย่าเอาเข้า pool</b></li>
     </ul>
 
-    <div class="ok"><b>ปลอดภัย = อ่านอย่างเดียว:</b> burn-in สั่งแค่ self-test และ (ถ้าเลือก) <code class="inl">badblocks</code> แบบ read-only — <b>ไม่เขียนทับดิสก์</b>.
-    กด <kbd>Ctrl-C</kbd> เพื่อออกได้ โดยงานยังรันต่อเบื้องหลัง — กลับเข้ามาดูใหม่ด้วย <code class="inl">b2ctl burnin --status</code> หรือกด <kbd>b</kbd> อีกครั้ง</div>
+    <div class="ok"><b>ปลอดภัย = อ่านอย่างเดียว:</b> health-check สั่งแค่ self-test และ (ถ้าเลือก) <code class="inl">badblocks</code> แบบ read-only — <b>ไม่เขียนทับดิสก์</b>.
+    กด <kbd>Ctrl-C</kbd> เพื่อออกได้ โดยงานยังรันต่อเบื้องหลัง — กลับเข้ามาดูใหม่ด้วย <code class="inl">b2ctl maint health --status</code></div>
+    <div class="info"><b>ประวัติการบำรุงรักษา:</b> ทุก scrub/trim/health-check บันทึกลง <code class="inl">maint.jsonl</code> — ดูย้อนหลังด้วย <code class="inl">b2ctl maint --log</code></div>
   </section>
 
   <!-- ===== 09 DRY-RUN ===== -->
@@ -796,8 +826,12 @@ Proceed? [y/N]:</pre>
         <tr><td class="mono">b2ctl watch</td><td>⭐ เข้าโหมดเฝ้าดู (แนะนำ)</td></tr>
         <tr><td class="mono">b2ctl --dry-run watch</td><td>เข้าโหมดเฝ้าดูแบบ dry-run</td></tr>
         <tr><td class="mono">b2ctl locate &lt;bay/serial/sdX&gt; [วินาที]</td><td>กะพริบไฟหาดิสก์</td></tr>
-        <tr><td class="mono">b2ctl burnin &lt;dev …&gt; [--scan]</td><td>ทดสอบดิสก์ก่อนใช้ (หลายลูกได้)</td></tr>
-        <tr><td class="mono">b2ctl burnin --status</td><td>กลับเข้าดู burn-in ที่รันอยู่</td></tr>
+        <tr><td class="mono">b2ctl scrub &lt;pool&gt;</td><td>สั่ง scrub ด้วยมือ (= <code class="inl">maint scrub</code>)</td></tr>
+        <tr><td class="mono">b2ctl trim &lt;pool&gt;</td><td>สั่ง TRIM ด้วยมือ (= <code class="inl">maint trim</code>)</td></tr>
+        <tr><td class="mono">b2ctl maint health &lt;dev …&gt; [--scan]</td><td>ทดสอบดิสก์ว่างก่อนใช้ (หลายลูกได้)</td></tr>
+        <tr><td class="mono">b2ctl maint health --status</td><td>กลับเข้าดู health-check ที่รันอยู่</td></tr>
+        <tr><td class="mono">b2ctl maint --log</td><td>ดูประวัติ scrub/trim/health</td></tr>
+        <tr><td class="mono">b2ctl replace</td><td>จำลองดิสก์เสียแล้ว replace ไป spare</td></tr>
         <tr><td class="mono">b2ctl check</td><td>ตรวจสภาพระบบ / tool ครบไหม</td></tr>
         <tr><td class="mono">b2ctl log [--last N]</td><td>ดู operation ล่าสุดจาก audit trail</td></tr>
         <tr><td class="mono">b2ctl rollback &lt;op_id&gt;</td><td>ย้อน operation ก่อนหน้า (มี confirm)</td></tr>
@@ -816,7 +850,7 @@ Proceed? [y/N]:</pre>
         <tr><td><kbd>d</kbd></td><td>demote</td><td>ลด mirror leg ลงเป็น spare</td></tr>
         <tr><td><kbd>n</kbd></td><td>new-pool</td><td>สร้าง pool ใหม่</td></tr>
         <tr><td><kbd>e</kbd></td><td>extend</td><td>เพิ่ม cache / log ให้ pool</td></tr>
-        <tr><td><kbd>b</kbd></td><td>burnin</td><td>ทดสอบดิสก์ก่อนใช้</td></tr>
+        <tr><td><kbd>m</kbd></td><td>maint</td><td>scrub / trim / health-check (ทดสอบดิสก์)</td></tr>
         <tr><td><kbd>t</kbd></td><td>toggle dry-run</td><td>สลับโหมดซ้อม</td></tr>
         <tr><td><kbd>l</kbd></td><td>locate</td><td>กะพริบไฟหาดิสก์</td></tr>
         <tr><td><kbd>u</kbd></td><td>udev-rescue</td><td>กู้ดิสก์ที่ OS ปฏิเสธ (GHOST)</td></tr>

@@ -8,6 +8,7 @@ front-panel drives, the remaining front drives as Unconfigured-Good, plus the
 Serials come from the shared sim state so `smartctl -d megaraid,<DID>` lines up.
 """
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -15,12 +16,96 @@ import _simstate as S  # noqa: E402
 
 
 def _pd_row(idx, d, member):
-    """One 'EID:Slt DID State DG ... Model Sp' PD table row (>=12 tokens, Sp last)."""
+    """One 'EID:Slt DID State DG ... Model Sp' PD table row (>=12 tokens, Sp last).
+
+    A foreign drive keeps State=UGood and marks DG=F — the two columns are
+    independent axes on real firmware, which is exactly what b2ctl reads (F-135).
+    """
     state = "Onln" if member else "UGood"
-    dg = "0" if member else "-"
+    dg = "0" if member else ("F" if d.get("foreign") else "-")
     med = "SSD" if d.get("rota", 0) == 0 else "HDD"
     return (f"{d['enc']}:{d['slot']}  {idx:>3} {state:<5} {dg:>2} 931.0 GB "
             f"SATA {med} N   N 512B {d['model']} U")
+
+
+def _foreign_pds(state):
+    return [d for d in S.raid_pds(state) if d.get("foreign")]
+
+
+def _fall_show(state):
+    """`/cN/fall show`. With no foreign config, real perccli answers
+    Status = Failure — so b2ctl must key on the ROWS, not the status (F-135)."""
+    pds = _foreign_pds(state)
+    print("Controller = 0")
+    if not pds:
+        print("Status = Failure")
+        print("Description = Operation on foreign configuration Failed")
+        print("")
+        print("Detailed Status :")
+        print("===============")
+        print("There is no foreign configuration present on the controller.")
+        return 0
+    print("Status = Success")
+    print("Description = Operation on foreign configuration Succeeded")
+    print("")
+    print("FOREIGN CONFIGURATION :")
+    print("=====================")
+    print("")
+    print("DG EID:Slt Type  State Status Size     Name")
+    print("-------------------------------------------------")
+    for i, d in enumerate(pds):
+        print(f" {i} {d['enc']}:{d['slot']}     RAID0 Optl  Frgn   931.0 GB")
+    print("-------------------------------------------------")
+    return 0
+
+
+def _fall_mutate(state, verb):
+    """`/cN/fall import|del` — CONTROLLER-WIDE, like the real tool."""
+    pds = _foreign_pds(state)
+    print("Controller = 0")
+    if not pds:
+        print("Status = Failure")
+        print("Description = Operation on foreign configuration Failed")
+        return 1
+    for d in pds:
+        d["foreign"] = False
+    S.save(state)
+    print("Status = Success")
+    print(f"Description = Successfully {'imported' if verb == 'import' else 'deleted'} "
+          f"foreign configuration")
+    return 0
+
+
+def _ctrl_show_all():
+    """`/cN show all` — only the JBOD policy fields b2ctl reads (F-135)."""
+    print("Controller = 0")
+    print("Status = Success")
+    print("")
+    print("Supported Adapter Operations :")
+    print("===========================")
+    print("Support JBOD = Yes")
+    print("")
+    print("Controller Properties :")
+    print("=====================")
+    print("JBOD = ON")
+    return 0
+
+
+def _refuse(pd_sel):
+    """The refusal real firmware returns for any transition on a foreign drive."""
+    print("Controller = 0")
+    print("Status = Failure")
+    print("Description = Set Drive JBOD Failed.")
+    print("")
+    print("Detailed Status :")
+    print("===============")
+    print("")
+    print("------------------------------------------------")
+    print("Drive      Status  ErrCd ErrMsg                 ")
+    print("------------------------------------------------")
+    print(f"{pd_sel} Failure   255 Operation not allowed. ")
+    print("------------------------------------------------")
+    return 1
 
 
 def _vall(state):
@@ -98,11 +183,31 @@ def main():
         # it is answered with the VD/PD listing and progress parses as 0 (F-115).
         if argv[-1] == "rebuild":
             return _rebuild()
+        # Same ordering trap for /cN/fall: the generic show branch below would
+        # answer it with the PD table (F-135).
+        if argv[0].endswith("/fall"):
+            if "show" in argv:
+                return _fall_show(state)
+            if "import" in argv or "del" in argv:
+                return _fall_mutate(state, "import" if "import" in argv else "del")
+            return 0
+        # Controller properties. ONLY a bare controller selector: `/c0/eall/sall
+        # show all` ends in the same two tokens and must still reach the PD
+        # table. Bare `/cN show` also falls through, which is what the
+        # personality probe expects from this fake (F-133).
+        if re.fullmatch(r"/c\d+", argv[0]) and argv[1:] == ["show", "all"]:
+            return _ctrl_show_all()
         if "show" in argv:
             if "vall" in argv[0]:
                 return _vall(state)
             # eall/sall (or any other enc:slot show) -> PD table + attributes
             return _eall_sall(state)
+        # A transition on a FOREIGN drive is refused by the firmware, not by the
+        # tool — model it so the whole pre-flight/refusal path is exercised.
+        if argv[-1] in ("jbod", "hotsparedrive") or argv[-2:] == ["add", "vd"]:
+            for d in _foreign_pds(state):
+                if argv[0].endswith(f"/e{d['enc']}/s{d['slot']}"):
+                    return _refuse(argv[0])
 
     return 0   # set offline/missing/locate/rebuild/add/del -> succeed silently
 

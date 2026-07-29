@@ -327,6 +327,13 @@ def _raid_del(args) -> int:
     return raid_actions.delete_vd(args.vd)
 
 
+def _raid_foreign(args) -> int:
+    from . import raid_actions
+    action = ("import" if getattr(args, "do_import", False)
+              else "clear" if getattr(args, "clear", False) else "show")
+    return raid_actions.foreign(action, getattr(args, "controller", None))
+
+
 def _check(_args) -> int:
     """Check all required tools and show environment summary."""
     ok_mark = f"{G}[✔]{N}"
@@ -847,20 +854,38 @@ def build_parser() -> argparse.ArgumentParser:
     rd_p.add_argument("vd", type=int, help="virtual disk number, e.g. 0")
     rd_p.set_defaults(func=_raid_del)
 
+    rf_p = sub.add_parser("raid-foreign",
+                          help="show / import / clear a PERC foreign configuration "
+                               "(a foreign drive is refused JBOD, hot-spare and "
+                               "volume-create until it is resolved)")
+    rf_act = rf_p.add_mutually_exclusive_group()
+    rf_act.add_argument("--import", dest="do_import", action="store_true",
+                        help="import the foreign config — CONTROLLER-WIDE")
+    rf_act.add_argument("--clear", action="store_true",
+                        help="discard the foreign config — CONTROLLER-WIDE, DESTRUCTIVE")
+    rf_p.add_argument("-c", "--controller", type=int, default=None,
+                      help="controller index (default 0)")
+    rf_p.set_defaults(func=_raid_foreign)
+
     return p
 
 
 _ROOT_EXEMPT = ("version", "check", "config", "log", "rollback",
-                "install", "update", "maint")
+                "install", "update", "maint", "raid-foreign")
 
 
 def _needs_root(args) -> bool:
     """Read-only commands run without root. `maint` is special: the bare history
     view (no subcommand / --log) and `maint health --status` are read-only; the
-    mutating subcommands (scrub / trim / health <dev>) need root."""
+    mutating subcommands (scrub / trim / health <dev>) need root.
+    `raid-foreign` is the same shape: bare = `perccli /cN/fall show` (read-only),
+    --import/--clear mutate the controller."""
     cmd = getattr(args, "cmd", None)
     if cmd not in _ROOT_EXEMPT:
         return True
+    if cmd == "raid-foreign":
+        return bool(getattr(args, "do_import", False)
+                    or getattr(args, "clear", False))
     if cmd != "maint":
         return False                          # other exempt cmds never need root
     mc = getattr(args, "maint_cmd", None)

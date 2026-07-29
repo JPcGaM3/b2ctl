@@ -1036,6 +1036,8 @@ tool ไหนทำให้ไฟ drive ที่ healthy ติดนิ่�
 | `sudo b2ctl scrub [<pool>]` / `sudo b2ctl trim [<pool>]` | alias เดิมของ `b2ctl maint scrub` / `maint trim` |
 | `sudo b2ctl log-add <pool> <dev…> [--mirror\|--raid10] [--size 32G]` | เพิ่ม SLOG; บังคับ topology + over-provision |
 | `sudo b2ctl cache-add <pool> <dev…> [--size 512G]` | เพิ่ม L2ARC cache; over-provision ด้วย `--size` |
+| `b2ctl raid-foreign` | ดู foreign configuration ของ PERC (read-only ไม่ต้อง root) |
+| `sudo b2ctl raid-foreign --import\|--clear [-c N]` | import / ทิ้ง — **ทั้ง controller**, ยืนยันสองชั้น |
 | `sudo b2ctl log` | ดู 20 operation ล่าสุดจาก audit trail |
 | `sudo b2ctl log --last N` | ดู N operation ล่าสุด |
 | `sudo b2ctl rollback <op_id>` | ย้อนกลับ operation ก่อนหน้า (พร้อม confirm) |
@@ -1137,6 +1139,73 @@ controller **rebuild** พร้อมแถบความคืบหน้า
 > [สถานการณ์ 7](#-สถานการณ์-7-ตารางขึ้นดิสก์ซ้ำเป็น-2-เท่า-การ์ด-hba330--h330)) กลับกัน
 > ถ้าเป็น PERC RAID จริงแต่ **ยังไม่มี virtual disk** และคำสั่ง `raid-*` ตอบว่า
 > `This box is IT/HBA` ให้บังคับ `"controller": {"mode": "raid"}` ใน `/etc/b2ctl/config.json`
+
+### ดิสก์ที่ติด FOREIGN config (v0.20.0)
+
+ดิสก์ที่เคยอยู่กับ **controller อื่น หรือ array อื่น** จะพก metadata ของ array เก่ามาด้วย
+PERC เรียกสิ่งนี้ว่า **foreign configuration** แล้วปฏิเสธทุกคำสั่งกับดิสก์ลูกนั้น — ตั้ง JBOD
+ไม่ได้ ทำ hot spare ไม่ได้ ใส่ volume ไม่ได้ จนกว่าจะจัดการมันก่อน `b2ctl status` จะบอกว่า:
+
+```
+- bay 32:7 /dev/sda (SAMSUNG MZ7LH1T9HMLT-00003, SN S4F2NY0KA04123) [CONFIG]
+    - FOREIGN config on this drive — the controller refuses JBOD / hot-spare /
+      volume-create until it is imported or cleared (assign -> [5], or perccli /cN/fall)
+```
+
+ใน `watch` กด `[a]ssign` เลือกดิสก์ลูกนั้น เมนูจะเพิ่มข้อ `[5]` ขึ้นมา และข้อ 2/3/4 จะ
+**ปฏิเสธตั้งแต่ต้นพร้อมบอกเหตุผล** แทนที่จะปล่อยให้ controller ตอบ `ErrCd 255 Operation
+not allowed` แบบอ่านไม่รู้เรื่อง:
+
+```
+  PERC drive (32:7) SAMSUNG MZ7LH1T9HMLT-00003 (S4F2NY0KA04123) [UGood, FOREIGN]
+    [1] Locate LED (blink the bay)
+    [2] Use for ZFS / software RAID  (set JBOD — exposes it as /dev/sdX)
+    [3] CREATE a hardware RAID volume (perccli)
+    [4] Add as hardware HOT SPARE
+    [5] Foreign config on this controller — import or clear it (REQUIRED before 2/3/4)
+```
+
+กด `[5]` จะ **โชว์ก่อนว่า foreign config นั้นคืออะไร** แล้วค่อยถาม:
+
+```
+  FOREIGN CONFIG on /c0:
+    DG EID:Slot Type   State  Size
+     0 32:7     RAID0  Optl   1.746 TB
+  WARNING: perccli /c0/fall acts on the WHOLE controller — there is no
+  per-drive form. Both actions below hit all 1 drive(s) listed above.
+    [i] import — bring that foreign array back online on this controller
+    [c] clear  — DISCARD it; its drives drop to Unconfigured-Good
+    [s] skip / decide later
+```
+
+- **import** — อยากได้ array เก่ากลับมา (เช่นย้ายชุดดิสก์ที่ยังใช้งานได้มาทั้งชุด)
+- **clear** — อยากได้แค่ตัวดิสก์ ไม่เอา array เก่า หลังจากนี้ array นั้น import กลับไม่ได้แล้ว
+  ยืนยันสองชั้น: ตอบ `[y/N]` แล้วพิมพ์เลข controller ซ้ำ
+
+⚠️ **อ่านตารางให้จบก่อนเลือก** คำสั่งนี้ไม่มีแบบรายลูก — `/c0/fall` = foreign config
+**ทุกอัน** บน controller 0 ถ้าในตารางมีดิสก์ที่ไม่คาดคิด ให้หยุดแล้วไปหาที่มาก่อน
+
+สั่งจาก command line ได้เหมือนกัน:
+
+```
+b2ctl raid-foreign                 # ดูอย่างเดียว — read-only ไม่ต้อง root
+b2ctl raid-foreign --import        # import (ทั้ง controller)
+b2ctl raid-foreign --clear         # ทิ้ง (ทั้ง controller, อันตราย)
+b2ctl raid-foreign --clear -c 1    # ... บน controller 1
+```
+
+เคลียร์เสร็จกด `[r]efresh` ดิสก์จะกลับเป็น `Unconfigured Good` ธรรมดา แล้ว `[2] set JBOD`
+จะทำงานได้
+
+> ถ้าโดนปฏิเสธ **ทั้งที่ไม่ได้ติด foreign** b2ctl จะพิมพ์ว่าตรวจอะไรไปบ้าง เห็นสาเหตุอีกทางได้:
+>
+> ```
+>   why: the PERC refuses this transition. Checked:
+>     - foreign config on 32:7    -> no
+>     - controller 0 JBOD policy  -> OFF  <-- this
+>     - Support JBOD              -> Yes
+>   fix: `perccli /c0 set jbod=on` (controller-wide policy — b2ctl will not flip it for you)
+> ```
 
 ---
 

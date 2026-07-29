@@ -836,5 +836,267 @@ class TestActionController(unittest.TestCase):
         self.assertEqual(seen["cmd"], ["perccli", "/c1/e32/s2", "set", "offline"])
 
 
+# ========================================================================== #
+# F-135 — foreign configs. perccli's State and DG columns are INDEPENDENT: a
+# foreign drive still reads 'UGood' but the firmware refuses every transition
+# on it. b2ctl parsed DG and threw it away, so it advertised a locked drive as
+# ready and answered the refusal with a raw vendor dump.
+# ========================================================================== #
+
+# `perccli /c0/eall/sall show all` with one foreign (DG=F) drive at 32:7
+# alongside a VD member and a genuinely free drive.
+_EALL_FOREIGN = """\
+Drive Information :
+EID:Slt DID State DG     Size Intf Med SED PI SeSz Model                Sp
+--------------------------------------------------------------------------
+32:0      0 Onln   0 931.0 GB SATA SSD N   N 512B Samsung SSD 870 EVO 1TB U
+32:6      8 UGood  - 931.0 GB SATA SSD N   N 512B Samsung SSD 870 EVO 1TB U
+32:7      9 UGood  F 1.746 TB SATA SSD N   N 512B SAMSUNG MZ7LH1T9HMLT-00003 U
+--------------------------------------------------------------------------
+
+Drive /c0/e32/s0 Device attributes :
+====================================
+SN = S8C5NS0L103617H
+
+Drive /c0/e32/s6 Device attributes :
+====================================
+SN = S74ZNS0W582278Y
+
+Drive /c0/e32/s7 Device attributes :
+====================================
+SN = S4F2NY0KA04123
+"""
+
+# `perccli /c0/fall show` — DID column present, size on the row, Name empty.
+_FALL = """\
+Controller = 0
+Status = Success
+Description = Operation on foreign configuration Succeeded
+
+
+FOREIGN CONFIGURATION :
+=====================
+
+--------------------------------------------------------------
+DG EID:Slt DID Type  State Status Size      Name
+--------------------------------------------------------------
+ 0 32:7      9 RAID0 Optl  Frgn   1.746 TB
+--------------------------------------------------------------
+"""
+
+# Several perccli builds report "no foreign config" as a FAILURE, so keying on
+# the Status line would claim a foreign config on every healthy controller.
+_FALL_NONE = """\
+Controller = 0
+Status = Failure
+Description = Operation on foreign configuration Failed
+
+Detailed Status :
+===============
+There is no foreign configuration present on the controller.
+"""
+
+_JBOD_CAP = """\
+Supported Adapter Operations :
+===========================
+Support JBOD = Yes
+
+Controller Properties :
+=====================
+JBOD = OFF
+"""
+
+_NOT_ALLOWED_OUT = """\
+Controller = 0
+Status = Failure
+Description = Set Drive JBOD Failed.
+
+------------------------------------------------
+Drive      Status  ErrCd ErrMsg
+------------------------------------------------
+/c0/e32/s7 Failure   255 Operation not allowed.
+------------------------------------------------
+"""
+
+
+class TestIsForeign(unittest.TestCase):
+
+    def test_dg_f_is_foreign(self):
+        self.assertTrue(raid._is_foreign({"dg": "F"}))
+        self.assertTrue(raid._is_foreign({"dg": " f "}))
+
+    def test_dg_group_or_dash_is_not(self):
+        for dg in ("-", "0", "12", "", None):
+            self.assertFalse(raid._is_foreign({"dg": dg}), dg)
+        self.assertFalse(raid._is_foreign({}))
+
+    def test_parse_pd_rows_keeps_dg(self):
+        rows = {r["bay"]: r for r in raid._parse_pd_rows(_EALL_FOREIGN)}
+        self.assertEqual(rows["32:7"]["dg"], "F")
+        self.assertEqual(rows["32:7"]["state"], "UGood")   # independent axes
+        self.assertEqual(rows["32:6"]["dg"], "-")
+
+
+class TestForeignConfigParse(unittest.TestCase):
+
+    def _rows(self, text):
+        with patch.object(raid, "run", return_value=text), \
+             patch("b2ctl.config.tool", side_effect=lambda n: n):
+            raid._tool_cache = "perccli"
+            try:
+                return raid.foreign_config(0)
+            finally:
+                raid._tool_cache = None
+
+    def test_parses_row(self):
+        rows = self._rows(_FALL)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["bay"], "32:7")
+        self.assertEqual(rows[0]["dg"], "0")
+        self.assertEqual(rows[0]["type"], "RAID0")
+        self.assertEqual(rows[0]["state"], "Optl")
+        self.assertEqual(rows[0]["size"], "1.746 TB")
+
+    def test_status_failure_with_no_rows_is_empty(self):
+        self.assertEqual(self._rows(_FALL_NONE), [])
+
+    def test_no_tool_output_is_empty(self):
+        self.assertEqual(self._rows(""), [])
+
+    def test_foreign_bays_collects_enc_slots(self):
+        with patch.object(raid, "foreign_config", return_value=[{"bay": "32:7"}]), \
+             patch.object(raid, "_ctrl_indices", return_value=[0]):
+            self.assertEqual(raid.foreign_bays(0), {"32:7"})
+
+
+class TestJbodCapability(unittest.TestCase):
+
+    def _cap(self, text):
+        with patch.object(raid, "run", return_value=text), \
+             patch("b2ctl.config.tool", side_effect=lambda n: n):
+            raid._tool_cache = "perccli"
+            try:
+                return raid.jbod_capability(0)
+            finally:
+                raid._tool_cache = None
+
+    def test_parses_both_fields(self):
+        cap = self._cap(_JBOD_CAP)
+        self.assertIs(cap["supported"], True)
+        self.assertIs(cap["enabled"], False)      # 'Support JBOD' must not win here
+
+    def test_enable_jbod_spelling(self):
+        self.assertIs(self._cap("Enable JBOD = Yes\n")["enabled"], True)
+
+    def test_absent_fields_are_none(self):
+        cap = self._cap("Product Name = Dell HBA330 Mini\n")
+        self.assertIsNone(cap["supported"])
+        self.assertIsNone(cap["enabled"])
+
+
+class TestExplainError(unittest.TestCase):
+
+    def test_unrelated_output_explains_nothing(self):
+        self.assertEqual(raid.explain_error("Status = Success"), "")
+
+    def test_names_the_foreign_cause(self):
+        from b2ctl.common import Disk
+        d = Disk(dev="/dev/sda", ctrl=0)
+        d.ctrl_slot = "32:7"
+        d.pd_foreign = True
+        with patch.object(raid, "foreign_bays", return_value={"32:7"}), \
+             patch.object(raid, "jbod_capability",
+                          return_value={"supported": True, "enabled": True}):
+            why = raid.explain_error(_NOT_ALLOWED_OUT, d=d)
+        self.assertIn("32:7", why)
+        self.assertIn("YES", why)
+        self.assertIn("/c0/fall", why)
+
+    def test_falls_back_to_the_controller_probe(self):
+        """A perccli build that prints no DG column leaves pd_foreign False, so
+        the diagnosis has to come from `/cN/fall show` instead."""
+        from b2ctl.common import Disk
+        d = Disk(dev="/dev/sda", ctrl=0)
+        d.ctrl_slot = "32:7"
+        self.assertFalse(d.pd_foreign)
+        with patch.object(raid, "foreign_bays", return_value={"32:7"}), \
+             patch.object(raid, "jbod_capability",
+                          return_value={"supported": True, "enabled": True}):
+            why = raid.explain_error(_NOT_ALLOWED_OUT, d=d)
+        self.assertIn("YES", why)
+        self.assertIn("/c0/fall", why)
+
+    def test_jbod_policy_off_is_the_named_cause(self):
+        with patch.object(raid, "foreign_bays", return_value=set()), \
+             patch.object(raid, "jbod_capability",
+                          return_value={"supported": True, "enabled": False}):
+            why = raid.explain_error(_NOT_ALLOWED_OUT, controller=0)
+        self.assertIn("set jbod=on", why)
+        self.assertNotIn("/c0/fall show`", why)
+
+    def test_unsupported_controller_is_the_named_cause(self):
+        with patch.object(raid, "foreign_bays", return_value=set()), \
+             patch.object(raid, "jbod_capability",
+                          return_value={"supported": False, "enabled": None}):
+            why = raid.explain_error(_NOT_ALLOWED_OUT, controller=0)
+        self.assertIn("no JBOD/non-RAID mode", why)
+
+
+class TestForeignCommands(unittest.TestCase):
+
+    def _capture(self, fn):
+        seen = []
+        with patch.object(raid, "run_check",
+                          side_effect=lambda c, **k: (seen.append(c), (True, ""))[1]), \
+             patch("b2ctl.config.tool", side_effect=lambda n: n):
+            raid._tool_cache = "perccli"
+            fn()
+        raid._tool_cache = None
+        return seen[0]
+
+    def test_import_foreign_cmd(self):
+        self.assertEqual(self._capture(lambda: raid.import_foreign(0)),
+                         ["perccli", "/c0/fall", "import"])
+
+    def test_clear_foreign_cmd(self):
+        self.assertEqual(self._capture(lambda: raid.clear_foreign(1)),
+                         ["perccli", "/c1/fall", "del"])
+
+
+class TestEnumerateSetsPdForeign(unittest.TestCase):
+    """The bug itself: DG=F reached the parser and stopped there, so `status`
+    graded a locked drive 'available (Unconfigured Good) — set JBOD for ZFS'."""
+
+    def _enumerate(self, os_disks):
+        from b2ctl import blockdev
+        with patch.object(raid, "_vall_data", return_value=([], [])), \
+             patch.object(raid, "_ctrl_indices", return_value=[0]), \
+             patch.object(raid, "run", return_value=_EALL_FOREIGN), \
+             patch.object(raid, "have_tool", return_value=True), \
+             patch("b2ctl.hba.enumerate_disks", return_value=os_disks), \
+             patch.object(blockdev, "vd_usage", return_value={}), \
+             patch("b2ctl.config.tool", side_effect=lambda n: n):
+            raid._tool_cache = "perccli"
+            try:
+                return {d.bay: d for d in raid.enumerate_disks() if d.bay}
+            finally:
+                raid._tool_cache = None
+
+    def test_hidden_drive_is_flagged(self):
+        disks = self._enumerate([])
+        self.assertTrue(disks["32:7"].pd_foreign)
+        self.assertFalse(disks["32:6"].pd_foreign)
+
+    def test_os_exposed_drive_is_flagged_too(self):
+        """A foreign drive the OS already sees is tagged in PASS 1, a different
+        code path from the synthesised one above — both must set the flag."""
+        from helpers import _disk
+        exposed = _disk(dev="/dev/sdb", serial="S4F2NY0KA04123",
+                        model="SAMSUNG MZ7LH1T9HMLT-00003")
+        disks = self._enumerate([exposed])
+        self.assertTrue(disks["32:7"].pd_foreign)
+        self.assertEqual(disks["32:7"].dev, "/dev/sdb")
+
+
 if __name__ == "__main__":
     unittest.main()

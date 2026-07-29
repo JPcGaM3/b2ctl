@@ -398,5 +398,176 @@ class TestAssignPercBatch(unittest.TestCase):
         mock_cv.assert_not_called()                       # no destructive VD build
 
 
+# ========================================================================== #
+# F-135 — foreign configs. The firmware refuses every transition on a foreign
+# drive, so b2ctl refuses it FIRST (and says why) instead of forwarding the
+# perccli dump. /cN/fall has no per-drive form, hence the controller-scoped
+# confirms (ADR-006).
+# ========================================================================== #
+
+def _foreign_disk(bay="32:7", ctrl=0):
+    d = _disk(dev="/dev/sda", serial="S4F2NY0KA04123")
+    d.bay = bay; d.ctrl_slot = bay; d.ctrl = ctrl
+    d.smart_dtype = "megaraid,9"; d.pd_state = "UGood"; d.pd_foreign = True
+    return d
+
+
+def _clean_disk(bay="32:6", ctrl=0):
+    d = _foreign_disk(bay, ctrl)
+    d.pd_foreign = False
+    d.serial = "S74ZNS0W582278Y"
+    return d
+
+
+_FALL_ROWS = [{"dg": "0", "bay": "32:7", "type": "RAID0",
+               "state": "Optl", "size": "1.746 TB"}]
+
+
+class TestAssignPercForeignRefusal(unittest.TestCase):
+
+    @patch("b2ctl.raid_actions.hba_raid")
+    @patch("b2ctl.raid_actions._confirm", return_value=True)
+    @patch("b2ctl.raid_actions._require_raid", return_value=True)
+    @patch("builtins.input", return_value="2")            # [2] set JBOD
+    def test_jbod_refused_before_perccli(self, _inp, _req, _cf, mock_hba):
+        rc = ra.assign_perc(_foreign_disk(), [])
+        mock_hba.set_jbod.assert_not_called()
+        self.assertEqual(rc, 1)
+
+    @patch("b2ctl.raid_actions.create_vd", return_value=0)
+    @patch("b2ctl.raid_actions._require_raid", return_value=True)
+    @patch("builtins.input", side_effect=["3", ""])       # [3] create vd, no extra picks
+    def test_create_vd_refused(self, _inp, _req, mock_cv):
+        rc = ra.assign_perc(_foreign_disk(), [])
+        mock_cv.assert_not_called()
+        self.assertEqual(rc, 1)
+
+    @patch("b2ctl.raid_actions.hba_raid")
+    @patch("b2ctl.raid_actions._confirm", return_value=True)
+    @patch("b2ctl.raid_actions._require_raid", return_value=True)
+    @patch("builtins.input", side_effect=["4", ""])       # [4] hot spare, global
+    def test_hotspare_refused(self, _inp, _req, _cf, mock_hba):
+        rc = ra.assign_perc(_foreign_disk(), [])
+        mock_hba.add_hotspare.assert_not_called()
+        self.assertEqual(rc, 1)
+
+    @patch("b2ctl.raid_actions.safety")
+    @patch("b2ctl.raid_actions.hba_raid")
+    @patch("b2ctl.raid_actions._confirm", return_value=True)
+    @patch("b2ctl.raid_actions._require_raid", return_value=True)
+    @patch("builtins.input", return_value="2")
+    def test_clean_disk_still_reaches_set_jbod(self, _inp, _req, _cf, mock_hba, _sf):
+        """The refusal must not swallow the happy path."""
+        mock_hba.set_jbod.return_value = (True, "")
+        common.set_dry_run(True)                          # skip udevadm settle
+        try:
+            rc = ra.assign_perc(_clean_disk(), [])
+        finally:
+            common.set_dry_run(False)
+        mock_hba.set_jbod.assert_called_once()
+        self.assertEqual(rc, 0)
+
+    @patch("b2ctl.raid_actions.hba_raid")
+    @patch("b2ctl.raid_actions._confirm", return_value=True)
+    @patch("b2ctl.raid_actions._require_raid", return_value=True)
+    @patch("builtins.input", return_value="2")
+    def test_batch_refuses_when_any_pick_is_foreign(self, _inp, _req, _cf, mock_hba):
+        picks = [_clean_disk("32:6"), _foreign_disk("32:7")]
+        rc = ra.assign_perc_batch(picks, picks)
+        mock_hba.set_jbod.assert_not_called()             # all-or-nothing, not partial
+        self.assertEqual(rc, 1)
+
+
+class TestForeignMenu(unittest.TestCase):
+
+    def _run(self, keys, rows=_FALL_ROWS, confirm=True):
+        """Drive assign_perc -> [5] with `keys` fed to input()."""
+        with patch("b2ctl.raid_actions.safety"), \
+             patch("b2ctl.raid_actions._require_raid", return_value=True), \
+             patch("b2ctl.raid_actions._confirm", return_value=confirm), \
+             patch("b2ctl.raid_actions.hba_raid") as mock_hba, \
+             patch("builtins.input", side_effect=keys):
+            mock_hba.foreign_config.return_value = rows
+            mock_hba.clear_foreign.return_value = (True, "")
+            mock_hba.import_foreign.return_value = (True, "")
+            mock_hba.build_cmd.side_effect = lambda *a: ["perccli", *a]
+            rc = ra.assign_perc(_foreign_disk(), [])
+        return rc, mock_hba
+
+    def test_clear_needs_the_controller_number_typed(self):
+        rc, hba = self._run(["5", "c", "0"])
+        hba.clear_foreign.assert_called_once_with(0, dry_run=False)
+        self.assertEqual(rc, 0)
+
+    def test_wrong_type_name_cancels(self):
+        rc, hba = self._run(["5", "c", "1"])              # typed the wrong number
+        hba.clear_foreign.assert_not_called()
+        self.assertEqual(rc, 1)
+
+    def test_declined_confirm_never_asks_for_the_number(self):
+        rc, hba = self._run(["5", "c"], confirm=False)
+        hba.clear_foreign.assert_not_called()
+        self.assertEqual(rc, 1)
+
+    def test_import_takes_one_confirm(self):
+        rc, hba = self._run(["5", "i"])
+        hba.import_foreign.assert_called_once_with(0, dry_run=False)
+        self.assertEqual(rc, 0)
+
+    def test_no_foreign_config_is_a_noop(self):
+        rc, hba = self._run(["5"], rows=[])
+        hba.clear_foreign.assert_not_called()
+        hba.import_foreign.assert_not_called()
+        self.assertEqual(rc, 0)
+
+    def test_skip_does_nothing(self):
+        rc, hba = self._run(["5", "s"])
+        hba.clear_foreign.assert_not_called()
+        self.assertEqual(rc, 0)
+
+
+class TestForeignCliEntry(unittest.TestCase):
+
+    def test_show_is_read_only_and_needs_no_raid_mode(self):
+        with patch("b2ctl.raid_actions.hba_raid") as mock_hba, \
+             patch("b2ctl.raid_actions._require_raid") as req:
+            mock_hba.foreign_config.return_value = _FALL_ROWS
+            rc = ra.foreign("show", 0)
+        req.assert_not_called()
+        mock_hba.clear_foreign.assert_not_called()
+        self.assertEqual(rc, 0)
+
+    def test_clear_goes_through_the_same_guards(self):
+        with patch("b2ctl.raid_actions.safety"), \
+             patch("b2ctl.raid_actions._require_raid", return_value=True), \
+             patch("b2ctl.raid_actions._confirm", return_value=True), \
+             patch("b2ctl.raid_actions.ask", return_value="0"), \
+             patch("b2ctl.raid_actions.hba_raid") as mock_hba:
+            mock_hba.foreign_config.return_value = _FALL_ROWS
+            mock_hba.clear_foreign.return_value = (True, "")
+            mock_hba.build_cmd.side_effect = lambda *a: ["perccli", *a]
+            rc = ra.foreign("clear", 0)
+        mock_hba.clear_foreign.assert_called_once_with(0, dry_run=False)
+        self.assertEqual(rc, 0)
+
+    def test_clear_with_nothing_foreign_is_a_noop(self):
+        with patch("b2ctl.raid_actions._require_raid", return_value=True), \
+             patch("b2ctl.raid_actions._confirm") as cf, \
+             patch("b2ctl.raid_actions.hba_raid") as mock_hba:
+            mock_hba.foreign_config.return_value = []
+            rc = ra.foreign("clear", 0)
+        cf.assert_not_called()
+        mock_hba.clear_foreign.assert_not_called()
+        self.assertEqual(rc, 0)
+
+    def test_mutating_form_requires_raid_mode(self):
+        with patch("b2ctl.raid_actions._require_raid", return_value=False), \
+             patch("b2ctl.raid_actions.hba_raid") as mock_hba:
+            mock_hba.foreign_config.return_value = _FALL_ROWS
+            rc = ra.foreign("clear", 0)
+        mock_hba.clear_foreign.assert_not_called()
+        self.assertEqual(rc, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -764,6 +764,35 @@ class TestMaintVerbs(unittest.TestCase):
                 ns = cli.build_parser().parse_args(argv)
                 self.assertEqual(cli._needs_root(ns), not exempt)
 
+    def test_raid_foreign_routes_to_raid_actions(self):
+        """F-135: `raid-foreign` maps to the show/import/clear contract."""
+        import b2ctl.cli as cli
+        for argv, action, ctrl in ((["raid-foreign"], "show", None),
+                                   (["raid-foreign", "--import"], "import", None),
+                                   (["raid-foreign", "--clear"], "clear", None),
+                                   (["raid-foreign", "--clear", "-c", "1"], "clear", 1)):
+            with self.subTest(argv=argv):
+                ns = cli.build_parser().parse_args(argv)
+                with patch("b2ctl.raid_actions.foreign", return_value=0) as fn:
+                    ns.func(ns)
+                fn.assert_called_once_with(action, ctrl)
+
+    def test_raid_foreign_import_and_clear_are_exclusive(self):
+        import b2ctl.cli as cli
+        with self.assertRaises(SystemExit):
+            cli.build_parser().parse_args(["raid-foreign", "--import", "--clear"])
+
+    def test_raid_foreign_root_gating(self):
+        """Bare `raid-foreign` is `perccli /cN/fall show` — read-only (§9)."""
+        import b2ctl.cli as cli
+        for argv, exempt in ((["raid-foreign"], True),
+                             (["raid-foreign", "-c", "1"], True),
+                             (["raid-foreign", "--import"], False),
+                             (["raid-foreign", "--clear"], False)):
+            with self.subTest(argv=argv):
+                ns = cli.build_parser().parse_args(argv)
+                self.assertEqual(cli._needs_root(ns), not exempt)
+
 
 if __name__ == "__main__":
     unittest.main()

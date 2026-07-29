@@ -6,6 +6,9 @@
   simctl pull <bay|dev>    remove a disk (auto-resilver onto spare if available)
   simctl insert <bay|dev>  re-insert a disk
   simctl dirty <bay|dev>   mark a disk as containing old data/labels
+  simctl foreign <bay|dev> [on|off]
+                           give a PERC drive a FOREIGN config (RAID mode): the
+                           controller then refuses set jbod / hotspare / add vd
   simctl show              print disks + pools + mode
 """
 import os
@@ -83,6 +86,24 @@ def cmd_dirty(args):
     print(f"[sim] marked {d['name']} dirty (has old data/labels)")
 
 
+def cmd_foreign(args):
+    """Flag a drive as carrying a foreign config (F-135).
+
+    The fake perccli then prints DG=F for it, lists it under /cN/fall show, and
+    refuses `set jbod` exactly like real firmware."""
+    if not args:
+        print("usage: simctl foreign <bay|dev> [on|off]", file=sys.stderr); return 1
+    state = S.load()
+    d = _find(state, args[0])
+    if not d:
+        print(f"[sim] no such disk: {args[0]}", file=sys.stderr); return 1
+    on = (args[1].lower() != "off") if len(args) > 1 else True
+    d["foreign"] = on
+    S.save(state)
+    print(f"[sim] {d['name']} (bay {_bay_label(d)}) foreign config "
+          f"{'SET' if on else 'cleared'}")
+
+
 def cmd_show(_):
     state = S.load()
     print(f"mode: {state.get('mode')}    state file: {S.STATE_PATH}")
@@ -90,7 +111,9 @@ def cmd_show(_):
     for d in state["disks"]:
         flag = "" if d["present"] else "  [PULLED]"
         dirty = "  (dirty)" if d.get("dirty") else ""
-        print(f"  {_bay_label(d):<8}  {d['name']:<4} {d['serial']:<16} {d['model']}{flag}{dirty}")
+        frn = "  (FOREIGN)" if d.get("foreign") else ""
+        print(f"  {_bay_label(d):<8}  {d['name']:<4} {d['serial']:<16} "
+              f"{d['model']}{flag}{dirty}{frn}")
     print("pools:")
     for p in state["pools"]:
         repl = "".join(f"  repl[{r['removed']}->{r['spare']}]" for r in p.get("replacements", []))
@@ -104,7 +127,7 @@ def main():
         print(__doc__); return 0
     table = {"init": cmd_init, "reset": cmd_init, "mode": cmd_mode,
              "pull": cmd_pull, "insert": cmd_insert, "dirty": cmd_dirty,
-             "show": cmd_show}
+             "foreign": cmd_foreign, "show": cmd_show}
     fn = table.get(argv[0])
     if not fn:
         print(__doc__); return 1

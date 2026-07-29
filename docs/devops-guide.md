@@ -947,6 +947,8 @@ are never touched by `install.sh`.
 | `raid-create` / `raid-del` / `raid-replace` refused with "hardware-RAID actions require RAID mode … This box is IT/HBA" on a real PERC | pre-fix `is_hba_personality()`: with no VD to look at (fresh box, or right after `raid-del`) it ignored its own `RAID-Mode` string and tie-broke on raw counts, letting NVMe/BOSS/USB disks that are not on the controller outvote the hidden PERC drives → classified HBA. Fixed in v0.19.0 — an explicit `RAID-Mode` now short-circuits to RAID and rung 4 resolves each PD individually (§9.1). If a controller reports neither a VD, a personality nor an unresolved PD, set `controller.mode = "raid"` in `/etc/b2ctl/config.json` — the probe is then skipped entirely |
 | a drive perccli lists (UGood/Failed) is missing from `b2ctl status` in RAID mode | pre-fix same-model refusal in `hba_raid.enumerate_disks()`: it fired for identified PDs and decided mid-loop, so with identical models the drop was enc:slot-order dependent. Fixed in v0.19.0 by the two-pass join (§9.3) — the refusal now only touches a PD perccli gave **no** `SN` and **no** `WWN` for. If a drive still vanishes, check that `perccli /c<n>/eall/sall show all` prints an `SN =`/`WWN =` line for that slot |
 | no GHOST row on a box whose drives report no lsblk `SERIAL` | the serial-domain guard in `hba.get_ghost_disks()` (§4) only suppresses when **no** bay-map serial matched **any** OS serial *and* `len(ghosts) <= ` the number of serial-less block devices — a scan-ordering artefact before SMART runs. A surplus is always reported. If the counts do balance and you still suspect a rejected drive, re-check after a full scan (`b2ctl status`, SMART has run by then) or compare the controller drive list against `lsblk` |
+| `set jbod` (or hot-spare / add-vd) fails: `ErrCd 255 Operation not allowed` | the PERC refuses the transition. Two causes share that message. **(a)** the drive carries a **foreign config** — perccli marks it `DG = F` while `State` still reads `UGood`; run `b2ctl raid-foreign` (or `perccli /cN/fall show`), then `--import` / `--clear` (§9.4). **(b)** the controller's JBOD policy is off or unsupported — `perccli /cN show all` → `JBOD = OFF` / `Support JBOD = No`; fix with `perccli /cN set jbod=on`, which b2ctl deliberately will not run for you (controller-wide policy). From v0.20.0 b2ctl refuses (a) up front and prints which of the two it found |
+| a drive reads "available (Unconfigured Good) — set JBOD for ZFS" but nothing works on it | pre-v0.20.0: `enumerate_disks()` copied `pd_state` but dropped the `DG` column, so a foreign drive was indistinguishable from a free one (F-135). Fixed by `Disk.pd_foreign` (§9.4). On an older build, check `perccli /cN/fall show` by hand |
 | BAY numbers wrong | edit `bay_map.json` (reverse rule or explicit map); recalibrate with `b2ctl locate <serial>` |
 | BAY all `-` on a SAS box with no vendor tool | the kernel fallback (§3.3a) needs `/sys/class/sas_device/end_device-*` — confirm `mpt3sas`/`mpt2sas` is loaded and that `bay_identifier` is readable and not the **same** value for every drive (a constant is rejected as a useless map). SATA-only and NVMe boxes have no SAS transport at all: bays there come from the vendor map / the `type:nvme` panel |
 | bays read `0:0 … 0:23` where perccli says `9:0 … 9:23` | the sysfs slots got the default enclosure prefix: the PD table named more than one enclosure, so `ITBackend.attach_bays()` refuses to guess (§3.3a step 3). Fix cosmetically with an explicit `map` in the front `type:sas` panel of `bay_map.json` |
@@ -1117,6 +1119,64 @@ The refusal itself was also narrowed, so it can only ever suppress *less*:
 `_size_match` returns **True** when either side is unknown — an unparseable size
 must never widen the suppression, only narrow it.
 
+### 9.4 Foreign configs (`Disk.pd_foreign`, v0.20.0 / F-135, ADR-006)
+
+perccli's PD table has two **independent** axes that b2ctl collapsed into one:
+
+| column | question it answers | values |
+|--------|---------------------|--------|
+| `State` | is the drive in a VD? | `Onln` / `Rbld` / `UGood` / `JBOD` / `Failed` … |
+| `DG`    | which drive group owns it? | a number, `-` (none), **`F` = foreign** |
+
+A **foreign** drive carries RAID metadata written by another controller/array. It
+still reports `State = UGood`, but the firmware refuses every transition on it —
+`set jbod`, `add hotsparedrive`, `add vd` — with the generic
+`ErrCd 255 Operation not allowed`.
+
+`_parse_pd_rows()` had always captured `dg`, but `enumerate_disks()` copied only
+`state` onto the `Disk`. The consequence chained all the way to the operator:
+`common.assess()` graded the drive *"available (Unconfigured Good) — set JBOD for
+ZFS"*, `watch._cmd_assign` listed it as assignable, `raid_actions.assign_perc`
+offered `[2] set JBOD`, and the refusal was printed as a raw vendor dump with no
+interpretation. b2ctl advertised a drive the controller considers locked.
+
+**Propagation.** `hba_raid._is_foreign(row)` (`dg.strip().upper() == "F"`) is the
+one authority, applied at all three sites that already copy `pd_state`: the VD
+member loop, the PASS 1 OS-exposed tagger, and the PASS 2 synthesiser. Zero extra
+subprocesses — `dg` is in text already fetched.
+
+**Probes** (all read-only, `run()` not `run_check()`, and never called from
+`core.scan()` — perccli is slow enough that its probes are memoised, F-040/F-041):
+
+| function | command | note |
+|----------|---------|------|
+| `foreign_config(c)` | `perccli /cN/fall show` | keyed on the presence of **enc:slot rows**, never the Status line: several builds answer "no foreign configuration present" with `Status = Failure`. Parsed by locating the enc:slot token, not by fixed column index — the DID column exists in some builds only |
+| `foreign_bays(c)` | ↑ across `_ctrl_indices()` | authoritative fallback when a build prints no DG column |
+| `jbod_capability(c)` | `perccli /cN show all` | `Support JBOD = Yes\|No` + `JBOD = ON\|OFF`. `None` = not printed (an HBA330 prints neither). **Reported only** — b2ctl never runs `set jbod=on` |
+| `explain_error(out, d=, controller=)` | — | matches `operation not allowed` / `errcd 255`, then prints the checked causes in the order they bite, marking the first hit `<-- this` |
+
+**Actions.** `import_foreign()` → `/cN/fall import`; `clear_foreign()` →
+`/cN/fall del`. Both via `build_cmd()` + `run_check()` so ops.jsonl records the
+real argv (F-089); `perccli`/`perccli64` were already in `safety.WRITE_CMDS`, so
+`--dry-run` gates them with no change there.
+
+**Scope.** MegaRAID exposes **no per-drive** import or clear — `/cN/fall` is the
+only selector, so a clear discards *every* foreign config on that controller. This
+is b2ctl's first action whose blast radius exceeds the target the operator picked,
+hence ADR-006: print the full affected set first, confirm at **controller** scope,
+and require a type-the-controller-number second confirm. `raid_actions._run_foreign()`
+is the single implementation, shared by watch's `[5]` and the CLI verb so the
+guards cannot drift apart.
+
+**Refusal is pre-flight and all-or-nothing.** `_refuse_foreign(targets, what)`
+rejects the *whole* selection if any pick is foreign, before perccli is called. A
+partial batch reporting "2 ok / 1 failed" reproduces exactly the ambiguity this
+fixes.
+
+**Root gating.** `raid-foreign` joins `_ROOT_EXEMPT` with the same shape as
+`maint`: the bare form is a read-only `fall show` (§9 read path), while
+`--import`/`--clear` require root.
+
 ---
 
 ## 10. Config file (`config.py`)
@@ -1213,6 +1273,8 @@ read as all-defaults), then clears `_cache`.
 | `perccli64 /c<n>/e<enc>/s<slot> set locate stop` | turn off locate LED for one drive slot |
 | `perccli64 show ctrlcount` | probe for RAID controller presence (also used in auto-detection) |
 | `perccli64 /c<n> show` | **v0.19.0** — controller personality (`Current Personality`) + `Driver Name`, rungs 2–3 of the HBA-vs-RAID decision (§9.1); run per controller in `_ctrl_indices()`, once per rung |
+| `perccli64 /c<n>/fall show` | **v0.20.0** — foreign-configuration listing (§9.4). Read-only; runs only on the assign pre-flight / error path, never in `core.scan()` |
+| `perccli64 /c<n> show all` | **v0.20.0** — `Support JBOD` / `JBOD` policy, for diagnosing `Operation not allowed` (§9.4). Read-only; b2ctl never writes this policy |
 | `sas2ircu list` | probe for IT/HBA controller presence (existing; now also used in auto-detection) |
 
 Two **non-subprocess** system reads join them (v0.19.0) — pure `glob` + `open()`,
@@ -1298,6 +1360,7 @@ python3 sim/run watch             # swap/replace/offload/create — state.json m
 python3 sim/simctl pull 1:5       # remove a disk (spare auto-resilvers if present)
 python3 sim/simctl insert 1:5     # re-insert → watch sees NEW DISK DETECTED
 python3 sim/simctl dirty 1:5      # mark old data/labels (create wipe-warning path)
+python3 sim/simctl foreign 1:7    # give a PERC drive a FOREIGN config (RAID mode)
 python3 sim/simctl mode it|raid   # switch backend (sas2ircu ↔ perccli)
 python3 sim/simctl show           # disks + pools + mode
 ```
@@ -1306,6 +1369,7 @@ python3 sim/simctl show           # disks + pools + mode
 |--------|------|
 | backends | both — `simctl mode it` (sas2ircu) / `mode raid` (perccli) |
 | audit isolation | sim writes `sim/var/ops.jsonl` + `sim/var/snapshots/`, **never** `/var/log/b2ctl/` → impossible to confuse with real ops; `b2ctl log`/`rollback` work in the sim |
+| failure paths (v0.20.0) | `simctl foreign <bay>` is the fake controller's **first modelled refusal**: the PD row gets `DG=F`, `/cN/fall show` lists it, and `set jbod` on that slot returns the real `ErrCd 255 Operation not allowed` text with exit 1 instead of the blanket success. `/cN/fall import\|del` clears the flag, controller-wide |
 | limitations | `by_id=""` (uses `/dev/sdX` tokens, not `ata-`/`wwn-`), LED locate = message only, models b2ctl logic/flow — **not** real ZFS (no checksum/scrub/real resilver timing) |
 | smoke test | `tests/test_sim_smoke.py` drives `sim/run` via subprocess |
 
@@ -1326,6 +1390,7 @@ gone (blind to a PERC). Enumeration + SMART:
 | members | `perccli /cN/vall show all` | VD row (raid/state/size/name) + `PDs for VD n` (EID:Slt, DID, State, Med, Model) |
 | bay→serial | `perccli /cN/eall/sall show all` | **any** `Drive /cN/eE/sS` header + `SN =` (v0.19.0: the header no longer has to say `Device attributes`) |
 | bay→WWN (v0.19.0) | same text, no extra command | `WWN =` per drive → the serial-independent PD↔block-device join (§9.3) |
+| foreign flag (v0.20.0) | same text, no extra command | the PD row's **DG** column: `F` → `Disk.pd_foreign` (§9.4) |
 | member SMART | `smartctl -a -d megaraid,<DID> /dev/sda` | ATA attrs (POH, LBAs written, wear), `test result: PASSED` |
 | VD block dev | `lsblk -dnb -P` MODEL contains `PERC` | which `/dev/sdX` is the virtual disk (dropped from rows, and excluded from every join table) |
 
@@ -1336,8 +1401,14 @@ Actions (each `[y/N]`-guarded + audited via `safety.begin_op/end_op`):
 | locate | `perccli /cN/eE/sS start|stop locate` (verb first) |
 | offline / missing | `perccli /cN/eE/sS set offline` → `set missing` |
 | rebuild | `perccli /cN/eE/sS start rebuild`; progress `… show rebuild` (`NN%`) |
+| set JBOD | `perccli /cN/eE/sS set jbod` — refused on a foreign drive, see §9.4 |
+| hot spare | `perccli /cN/eE/sS add hotsparedrive [DGs=n]` |
 | create VD | `perccli /cN add vd type=raidL drives=e:s,e:s` |
 | delete VD | `perccli /cN/vV del force` |
+| foreign show (v0.20.0) | `perccli /cN/fall show` — **read-only**, `run()` not `run_check()` |
+| foreign import (v0.20.0) | `perccli /cN/fall import` — CONTROLLER-WIDE |
+| foreign clear (v0.20.0) | `perccli /cN/fall del` — CONTROLLER-WIDE, destructive |
+| JBOD policy (v0.20.0) | `perccli /cN show all` — read-only; `Support JBOD =`, `JBOD =`. b2ctl **never** runs `set jbod=on` |
 
 > All perccli mutating actions honor `--dry-run` / the watch `[t]oggle` (preview
 > the command, no mutation) — the `dry_run` flag is threaded `raid_actions` →

@@ -154,6 +154,13 @@ class Disk:
     smart_dtype: str = ""          # smartctl -d arg, e.g. "megaraid,7"
     did: int | None = None         # megaraid device id
     pd_state: str = ""             # perccli PD state: Onln/Rbld/JBOD/UGood/Failed
+    pd_foreign: bool = False       # perccli DG column == "F": the drive carries a
+                                   # FOREIGN config (RAID metadata from another
+                                   # controller/array). An axis INDEPENDENT of
+                                   # pd_state — a foreign drive still reads UGood,
+                                   # but firmware refuses every transition (set
+                                   # jbod / hotspare / add vd) with 'Operation not
+                                   # allowed' until it is imported or cleared (F-135)
     ctrl_slot: str = ""            # raw controller enc:slot for perccli actions,
                                    # kept separate from the (possibly remapped) bay label
     ctrl: int | None = None        # perccli controller index this PD lives on;
@@ -259,6 +266,16 @@ def assess(d: Disk) -> None:
         if st and st not in ("ONLN", "ONLINE", "OPTL", "OPTIMAL"):
             sev = "WARNING" if st in ("RBLD", "REBUILD") else "CRITICAL"
             bump(sev, f"PD state={d.pd_state}")
+    elif d.pd_foreign:
+        # A FOREIGN physical drive is locked by the controller, and stays locked
+        # whether it is hidden behind the VD's block device or already exposed —
+        # so this is tested BEFORE the smart_dtype (hidden) branch. Reported as
+        # CONFIG, not CRITICAL: the drive is healthy, its configuration is what
+        # blocks it. Without this, perccli's DG=F was invisible and b2ctl offered
+        # a `set jbod` the firmware answers 'Operation not allowed' (F-135).
+        bump("CONFIG", "FOREIGN config on this drive — the controller refuses "
+                       "JBOD / hot-spare / volume-create until it is imported or "
+                       "cleared (assign -> [5], or perccli /cN/fall)")
     elif d.pd_state and d.smart_dtype:
         # A HIDDEN PERC physical drive (read via megaraid passthrough, shares the
         # VD's /dev/sdX): UGood/Failed/etc. — available, not a ghost. An EXPOSED

@@ -1045,6 +1045,8 @@ or fully dark.
 | `b2ctl scrub [<pool>]` / `b2ctl trim [<pool>]` | back-compat aliases of `b2ctl maint scrub` / `maint trim` |
 | `b2ctl log-add <pool> <dev…> [--mirror\|--raid10] [--size 32G]` | add a SLOG; force topology + over-provision |
 | `b2ctl cache-add <pool> <dev…> [--size 512G]` | add L2ARC cache; over-provision with `--size` |
+| `b2ctl raid-foreign` | show a PERC foreign configuration (read-only, no root) |
+| `b2ctl raid-foreign --import\|--clear [-c N]` | import / discard it — **CONTROLLER-WIDE**, double-confirmed |
 | `b2ctl log [--last N]` | show last N ops from audit trail (default 20) |
 | `b2ctl rollback <op_id>` | roll back a previous operation (with confirmation) |
 | `b2ctl check` | verify tools, show backend detected, config file status |
@@ -1088,6 +1090,11 @@ or fully dark.
 | `5` | add as single vdev — no redundancy ⚠ |
 | `6` | wipe all labels and data |
 | `s` | skip — decide later; come back with `a` |
+
+On a **PERC drive** (RAID mode) the same key opens the hardware menu instead:
+`1` locate, `2` set JBOD (hand it to ZFS), `3` create a volume, `4` hot spare —
+plus `5` **Foreign config** when the drive carries one, which is *required*
+before 2/3/4 will run.
 
 ### Audit trail
 
@@ -1168,6 +1175,76 @@ turned back off; there is no latched `on`/`off` form, by design), and
 
 > Note: on a 2×M.2 NVMe card, if only one NVMe shows, enable **PCIe bifurcation
 > (x4x4)** for that slot in the BIOS — that is a hardware setting, not b2ctl.
+
+### A drive with a FOREIGN config (v0.20.0)
+
+Put a disk in that once belonged to **another controller or another array** and it
+arrives carrying that array's metadata. The PERC calls this a **foreign
+configuration** and refuses to do *anything* with the drive — JBOD, hot spare,
+volume member — until you deal with it. `b2ctl status` flags it:
+
+```
+- bay 32:7 /dev/sda (SAMSUNG MZ7LH1T9HMLT-00003, SN S4F2NY0KA04123) [CONFIG]
+    - FOREIGN config on this drive — the controller refuses JBOD / hot-spare /
+      volume-create until it is imported or cleared (assign -> [5], or perccli /cN/fall)
+```
+
+In `watch`, `[a]ssign` that drive and the menu grows a fifth entry. Options 2/3/4
+refuse up front and tell you why, instead of letting the controller answer with
+`ErrCd 255 Operation not allowed`:
+
+```
+  PERC drive (32:7) SAMSUNG MZ7LH1T9HMLT-00003 (S4F2NY0KA04123) [UGood, FOREIGN]
+    [1] Locate LED (blink the bay)
+    [2] Use for ZFS / software RAID  (set JBOD — exposes it as /dev/sdX)
+    [3] CREATE a hardware RAID volume (perccli)
+    [4] Add as hardware HOT SPARE
+    [5] Foreign config on this controller — import or clear it (REQUIRED before 2/3/4)
+```
+
+Choosing `[5]` shows **what the foreign config actually is** before asking:
+
+```
+  FOREIGN CONFIG on /c0:
+    DG EID:Slot Type   State  Size
+     0 32:7     RAID0  Optl   1.746 TB
+  WARNING: perccli /c0/fall acts on the WHOLE controller — there is no
+  per-drive form. Both actions below hit all 1 drive(s) listed above.
+    [i] import — bring that foreign array back online on this controller
+    [c] clear  — DISCARD it; its drives drop to Unconfigured-Good
+    [s] skip / decide later
+```
+
+- **import** — you want that old array back (you moved a working set of disks).
+- **clear** — you want the disks, not the old array. The array becomes
+  unimportable. Double-confirmed: `[y/N]`, then type the controller number.
+
+⚠️ **Read the table before you choose.** There is no per-drive form of this
+command — `/c0/fall` means *every* foreign config on controller 0. If the table
+lists drives you did not expect, stop and work out where they came from first.
+
+Same thing from the command line:
+
+```
+b2ctl raid-foreign                 # show only — read-only, no root needed
+b2ctl raid-foreign --import        # import (CONTROLLER-WIDE)
+b2ctl raid-foreign --clear         # discard (CONTROLLER-WIDE, DESTRUCTIVE)
+b2ctl raid-foreign --clear -c 1    # ... on controller 1
+```
+
+After clearing, `[r]efresh` and the drive reads plain `Unconfigured Good` — then
+`[2] set JBOD` works.
+
+> If a drive is refused **without** being foreign, b2ctl now prints what it
+> checked, so the other cause is visible too:
+>
+> ```
+>   why: the PERC refuses this transition. Checked:
+>     - foreign config on 32:7    -> no
+>     - controller 0 JBOD policy  -> OFF  <-- this
+>     - Support JBOD              -> Yes
+>   fix: `perccli /c0 set jbod=on` (controller-wide policy — b2ctl will not flip it for you)
+> ```
 
 ### HBA330 / H330 boxes — perccli sees the card, the OS owns the disks (v0.19.0)
 

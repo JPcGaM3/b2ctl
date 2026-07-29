@@ -292,6 +292,19 @@ def _parse_pd_rows(text: str) -> list[dict]:
     return pds
 
 
+def _is_foreign(row: dict) -> bool:
+    """True when a parsed PD row carries a FOREIGN config (DG column == 'F').
+
+    perccli's State and DG columns are INDEPENDENT axes: State says whether the
+    drive belongs to a VD ('UGood' = it does not), DG says which drive group owns
+    it — and 'F' means "foreign metadata from some other controller/array". The
+    firmware refuses every transition on such a drive (set jbod / add
+    hotsparedrive / add vd) with 'Operation not allowed'. The one authority for
+    the test, so no enumerate path can forget it (F-135).
+    """
+    return (row.get("dg") or "").strip().upper() == "F"
+
+
 def _parse_vall(text: str) -> tuple[list[dict], list[dict]]:
     """Parse `perccli /cN/vall show all`.
 
@@ -551,6 +564,7 @@ def enumerate_disks() -> list[Disk]:
         d.array_type = "HW"
         d.array_name = f"vd{m['vd']}/{(m['raid'] or '').lower()}"
         d.pd_state = m["state"]
+        d.pd_foreign = _is_foreign(m)
         member_disks.append(d)
         member_bays.add(m["bay"])
 
@@ -584,6 +598,7 @@ def enumerate_disks() -> list[Disk]:
             target = _match_os_disk(sn, wwn, by_sn, by_wwn)
             if target is not None:              # OS-exposed JBOD: tag the real disk
                 target.bay, target.pd_state = pd["bay"], pd["state"]
+                target.pd_foreign = _is_foreign(pd)
                 target.ctrl_slot, target.ctrl = pd["bay"], idx
                 claimed.add(id(target))
                 continue
@@ -611,6 +626,7 @@ def enumerate_disks() -> list[Disk]:
         d.is_ssd = (pd["med"].upper() == "SSD")
         d.iface = pd["intf"]
         d.pd_state = pd["state"]                # array_type stays "" (not in an array)
+        d.pd_foreign = _is_foreign(pd)
         member_disks.append(d)
 
     # Keep lsblk disks that are NOT a PERC virtual disk (JBOD/non-RAID + NVMe).
@@ -728,6 +744,128 @@ def pd_state(enc_slot: str, controller: int = CONTROLLER) -> str:
     return ""
 
 
+# --------------------------------------------------------------------------- #
+# Foreign-config + JBOD-policy probes (READ-ONLY — run(), never run_check).
+#
+# A drive carrying a foreign config is refused EVERY state transition by the
+# firmware, so these answer "why did perccli say 'Operation not allowed'?" and
+# feed the assign pre-flight. Deliberately NOT called from core.scan(): perccli
+# is slow enough that its probes are already memoised (F-040/F-041), and the
+# enumerate path gets the same answer for free from the PD table's DG column.
+# --------------------------------------------------------------------------- #
+
+_SIZE_TOKEN = re.compile(r"([\d.]+\s*[KMGTP]B)", re.I)
+
+
+def foreign_config(controller: int = CONTROLLER) -> list[dict]:
+    """Parse `perccli /cN/fall show` -> [{"dg","bay","type","state","size"}].
+
+    The presence of enc:slot ROWS is the signal, never the Status line: several
+    perccli builds answer "no foreign configuration present" with
+    `Status = Failure`, so keying on that would report a foreign config on every
+    healthy controller.
+
+    Parsed by locating the enc:slot token rather than by fixed column index — the
+    DID column is present in some builds and absent in others.
+    """
+    out = run([_tool(), f"/c{controller}/fall", "show"])
+    rows: list[dict] = []
+    for line in out.splitlines():
+        tok = line.split()
+        idx = next((i for i, t in enumerate(tok) if re.fullmatch(r"\d+:\d+", t)), None)
+        if idx is None:
+            continue
+        rest = tok[idx + 1:]
+        ti = next((i for i, t in enumerate(rest) if t.upper().startswith("RAID")), None)
+        size = _SIZE_TOKEN.search(line)
+        rows.append({
+            "dg": tok[idx - 1] if idx else "",
+            "bay": tok[idx],
+            "type": rest[ti] if ti is not None else "",
+            "state": rest[ti + 1] if ti is not None and len(rest) > ti + 1 else "",
+            "size": size.group(1) if size else "",
+        })
+    return rows
+
+
+def foreign_bays(controller: int | None = None) -> set[str]:
+    """Every enc:slot holding a foreign config, across the configured controllers."""
+    bays: set[str] = set()
+    for idx in _ctrl_indices(controller):
+        bays.update(r["bay"] for r in foreign_config(idx))
+    return bays
+
+
+def jbod_capability(controller: int = CONTROLLER) -> dict:
+    """{"supported": bool|None, "enabled": bool|None} from `perccli /cN show all`.
+
+    Two different gates with the same failure message: a controller may not
+    support JBOD at all (PERC 11 in RAID personality), or support it with the
+    policy switched off. None means the field was not printed — an HBA330 prints
+    neither, because its drives are raw already. b2ctl only REPORTS this; it
+    never flips the policy, since that is controller-wide and the operator's call.
+    """
+    out = run([_tool(), f"/c{controller}", "show", "all"])
+    sup = re.search(r"Support\s+JBOD\s*=\s*(\S+)", out, re.I)
+    # '^\s*JBOD =' cannot match the 'Support JBOD =' line above: after the line
+    # start comes 'Support', not 'JBOD'.
+    ena = re.search(r"^\s*(?:Enable\s+)?JBOD\s*=\s*(\S+)", out, re.I | re.M)
+    return {"supported": _yes(sup), "enabled": _yes(ena)}
+
+
+def _yes(m) -> bool | None:
+    if not m:
+        return None
+    return m.group(1).strip().upper() in ("YES", "ON", "TRUE", "ENABLED")
+
+
+_NOT_ALLOWED = ("operation not allowed", "errcd 255")
+
+
+def explain_error(out: str, *, d=None, controller: int | None = None) -> str:
+    """Translate a perccli refusal into its real causes ('' when unrecognised).
+
+    perccli reports every policy refusal as the same opaque 'ErrCd 255 Operation
+    not allowed', which sent an operator off-tool to diagnose a foreign config by
+    hand (F-135). The causes are checked in the order they actually bite.
+    """
+    if not any(m in (out or "").lower() for m in _NOT_ALLOWED):
+        return ""
+    ctrl = controller
+    if ctrl is None:
+        ctrl = getattr(d, "ctrl", None)
+    if ctrl is None:
+        ctrl = CONTROLLER
+    bay = getattr(d, "ctrl_slot", "") or getattr(d, "bay", "") or "?"
+    foreign = bool(getattr(d, "pd_foreign", False)) or bay in foreign_bays(ctrl)
+    cap = jbod_capability(ctrl)
+    def _mark(v):                       # the first YES is the one to act on
+        return "  <-- this" if v else ""
+    lines = ["why: the PERC refuses this transition. Checked:",
+             f"  - foreign config on {bay:<10} -> "
+             f"{'YES' if foreign else 'no'}{_mark(foreign)}"]
+    if cap["enabled"] is not None:
+        off = cap["enabled"] is False
+        lines.append(f"  - controller {ctrl} JBOD policy  -> "
+                     f"{'ON' if cap['enabled'] else 'OFF'}{_mark(off and not foreign)}")
+    if cap["supported"] is not None:
+        unsup = cap["supported"] is False
+        lines.append(f"  - Support JBOD             -> "
+                     f"{'Yes' if cap['supported'] else 'No'}"
+                     f"{_mark(unsup and not foreign)}")
+    if foreign:
+        lines.append(f"  fix: assign -> [5] Foreign config, or "
+                     f"`perccli /c{ctrl}/fall show` then `... del`")
+    elif cap["supported"] is False:
+        lines.append("  fix: this controller has no JBOD/non-RAID mode — build a "
+                     "hardware volume instead, or switch its personality to HBA "
+                     "(DESTRUCTIVE, deletes every VD).")
+    elif cap["enabled"] is False:
+        lines.append(f"  fix: `perccli /c{ctrl} set jbod=on` (controller-wide "
+                     f"policy — b2ctl will not flip it for you)")
+    return "\n".join(lines)
+
+
 def rebuild_progress(enc_slot: str, controller: int = CONTROLLER) -> dict:
     """Parse `perccli /cC/eE/sS show rebuild`.
 
@@ -786,6 +924,28 @@ def set_jbod(enc_slot: str, controller: int = CONTROLLER, *,
     The drive leaves the controller's RAID management and appears as /dev/sdX.
     """
     return run_check(build_cmd(_pd(enc_slot, controller), "set", "jbod"), dry_run=dry_run)
+
+
+def import_foreign(controller: int = CONTROLLER, *,
+                   dry_run: bool = False) -> tuple[bool, str]:
+    """Import every foreign config on a controller: `perccli /cN/fall import`.
+
+    CONTROLLER-WIDE. MegaRAID exposes no per-drive form of this — /cN/fall is the
+    only selector — so the caller MUST confirm at controller scope and show the
+    full affected set first (ADR-006).
+    """
+    return run_check(build_cmd(f"/c{controller}/fall", "import"), dry_run=dry_run)
+
+
+def clear_foreign(controller: int = CONTROLLER, *,
+                  dry_run: bool = False) -> tuple[bool, str]:
+    """Discard every foreign config on a controller: `perccli /cN/fall del`.
+
+    CONTROLLER-WIDE and DESTRUCTIVE: the foreign array becomes unimportable and
+    its drives drop to plain Unconfigured-Good. Same scope caveat as
+    import_foreign — confirm at controller scope, never per drive (ADR-006).
+    """
+    return run_check(build_cmd(f"/c{controller}/fall", "del"), dry_run=dry_run)
 
 
 def del_vd(vd: int, controller: int = CONTROLLER, *,

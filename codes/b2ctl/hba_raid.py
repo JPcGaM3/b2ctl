@@ -24,13 +24,15 @@ _TOOL_CANDIDATES = ("perccli64", "perccli")
 
 _tool_cache: str | None = None
 _have_tool_cache: bool | None = None
+_hba_personality_cache: bool | None = None
 
 
 def _reset_caches() -> None:
     """Clear the per-process perccli memos (tests / a forced re-probe, F-040)."""
-    global _tool_cache, _have_tool_cache
+    global _tool_cache, _have_tool_cache, _hba_personality_cache
     _tool_cache = None
     _have_tool_cache = None
+    _hba_personality_cache = None
 
 
 def _ctrlcount(tool: str) -> int | None:
@@ -131,21 +133,131 @@ def bay_map(controller: int | None = None) -> dict:
     return mapping
 
 
-def _parse_bay_map(text: str, mapping: dict) -> None:
-    """Parse perccli `show all` output into {serial: 'enc:slot'}."""
-    # Pattern: "Drive /c<n>/e<enc>/s<slot> Device attributes"
-    # followed by "SN = <serial>"
+# Any per-drive section header, e.g. "Drive /c0/e9/s0 Device attributes :",
+# "Drive /c0/e9/s0 - Detailed Information :" or a bare "Drive /c0/e9/s0 :".
+# Deliberately loose: only SOME perccli builds label the section 'Device
+# attributes', and requiring that literal made every SN unreadable on a Dell
+# HBA330 — which is what left each PD looking 'hidden' (F-133).
+_DRIVE_HDR = re.compile(r"\s*Drive\s+/c\d+/e(\d+)/s(\d+)\b")
+
+
+def _parse_detail(text: str, mapping: dict, key: str, norm=None) -> None:
+    """Bind each `<key> = <value>` line to the nearest preceding Drive header.
+
+    Shared by the serial map and the WWN map: both walk the same
+    `/cX/eall/sall show all` detail sections, differing only in the field they
+    pick up. current_slot is cleared after a hit so a second value in the same
+    section cannot re-bind the slot.
+    """
+    field = re.compile(rf"\s*{key}\s*=\s*(\S+)")
     current_slot: str | None = None
     for line in text.splitlines():
-        m = re.match(r"\s*Drive\s+/c\d+/e(\d+)/s(\d+)\s+Device", line)
+        m = _DRIVE_HDR.match(line)
         if m:
             current_slot = f"{m.group(1)}:{m.group(2)}"
             continue
         if current_slot:
-            m2 = re.match(r"\s*SN\s*=\s*(\S+)", line)
+            m2 = field.match(line)
             if m2:
-                mapping[m2.group(1)] = current_slot
+                val = norm(m2.group(1)) if norm else m2.group(1)
+                if val:
+                    mapping[val] = current_slot
                 current_slot = None
+
+
+def enclosure_ids(controller: int | None = None) -> list[int]:
+    """Distinct enclosure numbers the controller reports for its physical drives.
+
+    Display only: used to prefix a sysfs-derived slot so the bay LABEL keeps the
+    enclosure the operator already sees ('9:0'), never to address anything —
+    perccli actions always take Disk.ctrl_slot, the raw locator (F-134).
+    """
+    encs = set()
+    for idx in _ctrl_indices(controller):
+        for pd in _parse_pd_rows(run([_tool(), f"/c{idx}/eall/sall", "show", "all"])):
+            enc, _, _slot = pd["bay"].partition(":")
+            if enc.isdigit():
+                encs.add(int(enc))
+    return sorted(encs)
+
+
+def _parse_bay_map(text: str, mapping: dict) -> None:
+    """Parse perccli `show all` output into {serial: 'enc:slot'}."""
+    _parse_detail(text, mapping, "SN")
+
+
+def _parse_wwn_map(text: str, mapping: dict) -> None:
+    """Parse perccli `show all` output into {normalised WWN: 'enc:slot'}.
+
+    A serial-independent join key. lsblk reports no SERIAL for enterprise SAS
+    drives until SMART runs, so serial alone cannot tell an exposed PD from a
+    hidden one on the scan path (F-133).
+    """
+    _parse_detail(text, mapping, "WWN", norm=_norm_wwn)
+
+
+def _norm_wwn(value: str) -> str:
+    """Normalise a WWN for cross-tool compare: lowercase hex, no '0x'/separators.
+
+    lsblk prints '0x5000c500a1b2c3d4'; perccli prints '5000C500A1B2C3D4'.
+    """
+    s = (value or "").strip().lower()
+    if s.startswith("0x"):
+        s = s[2:]
+    return re.sub(r"[^0-9a-f]", "", s)
+
+
+def _norm_model(model: str) -> str:
+    return re.sub(r"\s+", " ", (model or "").strip()).upper()
+
+
+_MODEL_MIN = 8          # shortest prefix allowed to claim two models are the same
+
+
+def _model_match(pd_model: str, dev_model: str) -> bool:
+    """True if two model strings describe the same drive.
+
+    perccli truncates its Model column ('Samsung SSD 860') while lsblk reports
+    the full string ('Samsung SSD 860 PRO 1TB'), so this is a prefix compare in
+    either direction — never plain equality. The _MODEL_MIN floor stops a
+    severely truncated column from matching everything: a bare prefix test made
+    ('S', 'Samsung SSD 870 EVO 1TB') True, which would suppress arbitrary drives.
+    """
+    a, b = _norm_model(pd_model), _norm_model(dev_model)
+    if not a or not b or min(len(a), len(b)) < _MODEL_MIN:
+        return False
+    return a.startswith(b) or b.startswith(a)
+
+
+# perccli prints BINARY units under decimal labels: an 860 PRO 1TB
+# (1_024_209_543_168 B) shows as '953.869 GB' = 953.869 GiB, and a 2.4 TB SAS HDD
+# (2_400_476_274_688 B) as '2.182 TB' = 2.182 TiB. Parse them as powers of 1024.
+_SIZE_RE = re.compile(r"([\d.]+)\s*([KMGTP])B", re.I)
+_SIZE_POW = {"K": 1, "M": 2, "G": 3, "T": 4, "P": 5}
+
+
+def _pd_size_bytes(size: str) -> int | None:
+    m = _SIZE_RE.search(size or "")
+    if not m:
+        return None
+    try:
+        return int(float(m.group(1)) * (1024 ** _SIZE_POW[m.group(2).upper()]))
+    except ValueError:
+        return None
+
+
+def _size_match(pd_size: str, dev_bytes) -> bool:
+    """True when a PD's size agrees with a block device's, within 10%.
+
+    Returns True when either side is unknown — this only ever NARROWS the
+    model-based suppression, it must never widen it. The tolerance absorbs
+    rounding and reserved-area differences while still separating a 960 GB SSD
+    from a 2.4 TB HDD.
+    """
+    a = _pd_size_bytes(pd_size)
+    if a is None or not dev_bytes:
+        return True
+    return abs(a - dev_bytes) <= 0.10 * max(a, dev_bytes)
 
 
 # (hba_raid._lsblk_pairs was a dead duplicate of hba._lsblk_pairs — removed,
@@ -241,6 +353,154 @@ def _vall_data() -> tuple[list[dict], list[dict]]:
     return vols_all, members_all
 
 
+# --------------------------------------------------------------------------- #
+# Controller personality — does the CONTROLLER own the storage, or the OS?
+# --------------------------------------------------------------------------- #
+
+def _megaraid_driver_present() -> bool:
+    """True when a megaraid_sas SCSI host exists.
+
+    `smartctl -d megaraid,<DID>` goes through the MegaRAID SAS ioctl, so it
+    works only against a megaraid_sas host. A Dell HBA330/H330 binds mpt3sas —
+    perccli still manages the card, but RAID-mode SMART is impossible there by
+    construction, which is the decisive (and free) personality signal.
+    """
+    for path in glob.glob("/sys/class/scsi_host/host*/proc_name"):
+        try:
+            with open(path) as f:
+                if f.read().strip() == "megaraid_sas":
+                    return True
+        except OSError:
+            continue
+    return False
+
+
+def _personality(controller: int = CONTROLLER) -> str:
+    """Controller personality from `perccli /cN show` ('' when not reported).
+
+    13G+ PERCs expose a switchable personality: 'RAID-Mode' / 'HBA-Mode'. A Dell
+    HBA330 Mini prints NO personality line at all — it has no switch, it is IT
+    firmware permanently — so '' is a normal answer here, not an error.
+    """
+    out = run([_tool(), f"/c{controller}", "show"])
+    m = (re.search(r"Current Personality\s*=\s*(\S+)", out)
+         or re.search(r"^\s*Personality\s*=\s*(\S+)", out, re.M))
+    return m.group(1).strip().upper() if m else ""
+
+
+def _driver_name(controller: int = CONTROLLER) -> str:
+    """Kernel driver the controller is bound to, as perccli itself reports it.
+
+    `perccli /c0 show` on a Dell HBA330 Mini prints `Driver Name = mpt3sas`;
+    a PERC in RAID mode prints `megaraid_sas`. Anything other than megaraid_sas
+    means the MegaRAID SAS ioctl does not exist for this card, so
+    `smartctl -d megaraid,<DID>` cannot work — the decisive personality signal,
+    and more portable than reading sysfs (F-133).
+    """
+    out = run([_tool(), f"/c{controller}", "show"])
+    m = re.search(r"^\s*Driver Name\s*=\s*(\S+)", out, re.M)
+    return m.group(1).strip() if m else ""
+
+
+def is_hba_personality() -> bool:
+    """True when perccli manages the card but the OS — not it — owns the disks.
+
+    That is a Dell HBA330/H330, or a PERC switched to HBA-Mode / with every
+    drive in JBOD. RAID-mode enumeration is wrong for such a card in two ways:
+    it synthesises one Disk per controller PD (which duplicates a block device
+    the OS already exposes) and reads each through a megaraid passthrough that
+    does not exist. On an HBA330 that turned 9 real drives into 18 rows, half of
+    them phantom `/dev/sda` entries with no serial and NOREAD health (F-133).
+
+    Memoized — the probe costs up to three perccli round-trips and perccli is
+    slow (F-040). Cleared by _reset_caches().
+    """
+    global _hba_personality_cache
+    if _hba_personality_cache is None:
+        _hba_personality_cache = _probe_hba_personality()
+    return _hba_personality_cache
+
+
+def _probe_hba_personality() -> bool:
+    if not have_tool():
+        return False
+    # A virtual disk is definitive and is checked FIRST: the sysfs driver probe
+    # below reads False wherever /sys is absent (a dev box, the sim harness), and
+    # a real RAID controller must never be misclassified there.
+    vols, _members = _vall_data()
+    if vols:
+        return False                    # the controller owns storage
+    idxs = _ctrl_indices()
+    # A controller that NAMES its own personality is authoritative in BOTH
+    # directions. Reading 'RAID-Mode' only as "not HBA" and then falling through
+    # to a heuristic classified a freshly-wiped H730P (no VD yet) as an HBA and
+    # locked the operator out of every raid-* verb (F-133 review).
+    pers = [_personality(i) for i in idxs]
+    if any(p.startswith("RAID") for p in pers):
+        return False
+    if any(p.startswith("HBA") for p in pers):
+        return True
+    named = [d for d in (_driver_name(i) for i in idxs) if d]
+    if named:
+        # perccli named the driver: trust it over sysfs. Anything but
+        # megaraid_sas (mpt3sas on an HBA330/HBA355) has no MegaRAID ioctl.
+        if all(d != "megaraid_sas" for d in named):
+            return True
+    elif not _megaraid_driver_present():
+        return True                     # no megaraid_sas host => no passthrough
+    # Last resort — a megaraid_sas card with no VD and no personality string.
+    # HBA-like only if EVERY physical drive it reports already resolves to an OS
+    # block device. Comparing raw counts instead (len(lsblk) >= len(pds)) let an
+    # unrelated BOSS mirror and two NVMe outvote two hidden PERC drives.
+    pds: list[dict] = []
+    bm: dict = {}
+    wm: dict = {}
+    for idx in idxs:
+        text = run([_tool(), f"/c{idx}/eall/sall", "show", "all"])
+        pds += _parse_pd_rows(text)
+        _parse_bay_map(text, bm)
+        _parse_wwn_map(text, wm)
+    if not pds:
+        return False
+    bay_to_sn = {bay: sn for sn, bay in bm.items()}
+    bay_to_wwn = {bay: w for w, bay in wm.items()}
+    from . import blockdev
+    from .baymap import serial_match
+    rows = [r for r in blockdev.lsblk_pairs("NAME,TYPE,SERIAL,WWN")
+            if r.get("TYPE") == "disk"
+            and not r.get("NAME", "").startswith(blockdev.EXCLUDE)]
+    os_sn = {(r.get("SERIAL") or "").strip() for r in rows} - {""}
+    os_wwn = {_norm_wwn(r.get("WWN") or "") for r in rows} - {""}
+    for pd in pds:
+        sn = bay_to_sn.get(pd["bay"], "")
+        wwn = bay_to_wwn.get(pd["bay"], "")
+        if sn and any(serial_match(sn, s) for s in os_sn):
+            continue
+        if wwn and wwn in os_wwn:
+            continue
+        return False                    # this PD is hidden => the controller owns it
+    return True
+
+
+def _match_os_disk(sn: str, wwn: str, by_sn: dict, by_wwn: dict) -> Disk | None:
+    """Resolve the block device a controller PD ALREADY appears as, or None.
+
+    Serial first (exact, then the project's fuzzy prefix rule), then WWN.
+    """
+    from .baymap import serial_match
+    if sn:
+        d = by_sn.get(sn)
+        if d is None:
+            d = next((x for s, x in by_sn.items() if serial_match(sn, s)), None)
+        if d is not None:
+            return d
+    if wwn:
+        d = by_wwn.get(wwn)
+        if d is not None:
+            return d
+    return None
+
+
 def enumerate_disks() -> list[Disk]:
     """Return Disks for PERC RAID members + JBOD/direct block devices.
 
@@ -268,9 +528,12 @@ def enumerate_disks() -> list[Disk]:
     eall_by_ctrl = {idx: run([t, f"/c{idx}/eall/sall", "show", "all"])
                     for idx in _ctrl_indices()}
     bm: dict = {}
+    wm: dict = {}
     for text in eall_by_ctrl.values():
         _parse_bay_map(text, bm)
+        _parse_wwn_map(text, wm)
     bay_to_sn = {bay: sn for sn, bay in bm.items()}
+    bay_to_wwn = {bay: w for w, bay in wm.items()}
 
     member_disks: list[Disk] = []
     member_bays = set()
@@ -291,33 +554,64 @@ def enumerate_disks() -> list[Disk]:
         member_disks.append(d)
         member_bays.add(m["bay"])
 
-    # Non-member physical drives the PERC sees (UGood/JBOD/Failed). These are NOT
-    # ghosts — the controller just hides them from the OS. Surface them as real
-    # disks (megaraid SMART) so they show health + state, not false GHOST rows.
-    raw_serials = {d.serial for d in raw if d.serial}
+    # Non-member physical drives the PERC sees (UGood/JBOD/Failed). A drive the
+    # OS ALREADY exposes must tag that block device; only a drive the controller
+    # genuinely hides is synthesised with megaraid SMART. Getting that test
+    # wrong duplicates the whole fleet (F-133), so it joins on serial, then WWN,
+    # then refuses to synthesise anything an OS disk could plausibly be.
+    # The VD's own block device is never a physical drive — keep it out of every
+    # join table so it can't absorb a PD.
+    os_disks = [d for d in raw if d.dev not in perc_dev_set]
+    by_sn = {d.serial: d for d in os_disks if d.serial}
+    by_wwn = {}
+    for d in os_disks:
+        w = _norm_wwn(d.wwn)
+        if w:
+            by_wwn[w] = d
+    claimed: set[int] = set()
+    pending: list[tuple] = []
+
+    # PASS 1 — join every non-member PD to the block device it already IS.
+    # This must finish before any suppression decision: `claimed` is only
+    # complete once every PD has had its turn, and deciding mid-loop made a
+    # drive's very existence depend on enc:slot iteration order (F-133 review).
     for idx in _ctrl_indices():
         for pd in _parse_pd_rows(eall_by_ctrl.get(idx, "")):
             if pd["bay"] in member_bays:
                 continue
             sn = bay_to_sn.get(pd["bay"], "")
-            if sn and sn in raw_serials:        # OS-exposed JBOD: tag the real disk
-                for r in raw:
-                    if r.serial == sn:
-                        r.bay, r.pd_state, r.ctrl_slot = pd["bay"], pd["state"], pd["bay"]
-                        r.ctrl = idx
+            wwn = bay_to_wwn.get(pd["bay"], "")
+            target = _match_os_disk(sn, wwn, by_sn, by_wwn)
+            if target is not None:              # OS-exposed JBOD: tag the real disk
+                target.bay, target.pd_state = pd["bay"], pd["state"]
+                target.ctrl_slot, target.ctrl = pd["bay"], idx
+                claimed.add(id(target))
                 continue
-            d = Disk(dev=ctrl_dev)              # hidden drive: synthesise + megaraid SMART
-            d.bay = pd["bay"]
-            d.ctrl_slot = pd["bay"]            # raw perccli enc:slot (never remapped)
-            d.ctrl = idx                       # which /cN this PD lives on (F-085)
-            d.did = int(pd["did"]) if str(pd["did"]).isdigit() else None
-            d.smart_dtype = f"megaraid,{pd['did']}"
-            d.model = pd["model"]
-            d.serial = sn
-            d.is_ssd = (pd["med"].upper() == "SSD")
-            d.iface = pd["intf"]
-            d.pd_state = pd["state"]            # array_type stays "" (not in an array)
-            member_disks.append(d)
+            pending.append((idx, pd, sn, wwn))
+
+    # PASS 2 — synthesise what stayed unmatched. The model/size refusal applies
+    # ONLY to a PD perccli could not identify at all (no SN and no WWN): that is
+    # the HBA330 case this exists for. A PD that HAS an identity which simply
+    # matches no OS disk is genuinely hidden behind the controller and must keep
+    # its row — dropping it removed real UGood/Failed drives from `status` and
+    # from the raid-create/hotspare pickers (F-133 review).
+    for idx, pd, sn, wwn in pending:
+        if not sn and not wwn and any(
+                id(r) not in claimed and _model_match(pd["model"], r.model)
+                and _size_match(pd["size"], r.size_bytes) for r in os_disks):
+            continue                            # this PD IS one of those OS disks
+        d = Disk(dev=ctrl_dev)                  # hidden drive: synthesise + megaraid SMART
+        d.bay = pd["bay"]
+        d.ctrl_slot = pd["bay"]                 # raw perccli enc:slot (never remapped)
+        d.ctrl = idx                            # which /cN this PD lives on (F-085)
+        d.did = int(pd["did"]) if str(pd["did"]).isdigit() else None
+        d.smart_dtype = f"megaraid,{pd['did']}"
+        d.model = pd["model"]
+        d.serial = sn
+        d.is_ssd = (pd["med"].upper() == "SSD")
+        d.iface = pd["intf"]
+        d.pd_state = pd["state"]                # array_type stays "" (not in an array)
+        member_disks.append(d)
 
     # Keep lsblk disks that are NOT a PERC virtual disk (JBOD/non-RAID + NVMe).
     raw_kept = [d for d in raw if d.dev not in perc_dev_set]

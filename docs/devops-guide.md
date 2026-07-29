@@ -32,6 +32,14 @@ the R620s.
 
 - PERC H710 mini crossflashed to **IT mode** → LSI SAS9207-8i (SAS2308),
   firmware `0x2214` IT. No RAID controller CLI; disks are raw `/dev/sd*`.
+- **Dell HBA330/H330 Mini** (LSI SAS3008, IT firmware, kernel driver `mpt3sas`) —
+  a third box shape, supported since **v0.19.0**. `sas2ircu` speaks SAS2 only and
+  is **blind** to a SAS3 chip, but `perccli` manages the card, so auto-detect must
+  not read "sas2ircu sees nothing" as "therefore this is a PERC RAID box". The OS,
+  not the controller, owns the disks: they are raw `/dev/sd*` and are read with
+  plain `smartctl -a /dev/sdX`, **never** through `-d megaraid` (mpt3sas exposes no
+  MegaRAID ioctl, so the passthrough cannot work there by construction). Only the
+  bay map comes from perccli — see §9.1/§9.2.
 - Proxmox VE on ZFS-on-root (`rpool` mirror) + a data pool (`tank`, **raidz1** =
   RAID5, 3× Samsung 870 EVO 1TB + 1 hot spare). Pools created with
   `/dev/disk/by-id/ata-*` members, `ashift=12`, `compression=lz4`, `atime=off`,
@@ -41,6 +49,8 @@ the R620s.
 - Required binaries: `smartctl`, `zpool`, `lsblk`. Optional: `sas2ircu`
   (bay numbers only), `ledmon`/`ledctl` (nicer locate LEDs), `wipefs`/`sgdisk`
   (wipe action). LED locate works without any of them via the dd fallback.
+  Since **v0.19.0** a SAS backplane needs *no* vendor tool for bays either — the
+  kernel's SAS transport class reports them (§3.3a), at zero subprocess cost.
 
 Only **storcli** was removed entirely (an LSI tool blind to a PERC — it caused
 false detection). `perccli` + `smartctl -d megaraid,<DID>` still drive b2ctl's
@@ -57,6 +67,10 @@ IT/HBA box neither is needed, because the disks are raw and read directly with
 | `common.py` | colours, `run()`/`run_check()`, `Disk` model, `assess()`, `selftest_passed()` (v0.18.0 shared ATA/SAS/NVMe self-test grader) | none |
 | `spec.py` | load/lookup TBW ratings (`ssd_spec.json`) | none |
 | `hba.py` | enumerate disks, by-id index, bay map + **remap** | `lsblk`, `sas2ircu` |
+| `blockdev.py` | shared block listing (`lsblk_pairs`, `EXCLUDE`, `vd_usage`) + `sas_bay_slots()` — kernel bay→device map, **no subprocess** (v0.19.0) | `lsblk` |
+| `baymap.py` | `bay_map.json` panels, shared serial-match bay loop, `assign_sysfs_bays()` fallback (v0.19.0) | none |
+| `backend.py` | auto-detect + dispatch `ITBackend`/`RaidBackend`; `ITBackend.bay_source` (v0.19.0) | `sas2ircu`, `perccli` |
+| `hba_raid.py` | RAID backend: PERC enumeration/actions, controller personality probe (v0.19.0) | `perccli`, `smartctl` |
 | `locate.py` | LED locate: perccli (PERC PD) / ledctl → dd (raw), timed | `perccli`, `ledctl`, `dd` |
 | `smart.py` | direct SMART read + parse, endurance | `smartctl` |
 | `zfs.py` | pool/topology parse, membership, actions, scrub/trim, partition, timers | `zpool`, `wipefs`, `sgdisk`, `udevadm`, `systemctl` |
@@ -80,7 +94,7 @@ Read commands still run in dry-run mode.
 
 ### 3.1 Disk enumeration — `hba.enumerate_disks()`
 ```
-lsblk -dnb -P -o NAME,SIZE,SERIAL,MODEL,TRAN,ROTA,TYPE
+lsblk -dnb -P -o NAME,SIZE,SERIAL,MODEL,TRAN,ROTA,TYPE,WWN
 ```
 - `-P` emits `KEY="value"` pairs; parsed with `(\w+)="(.*?)"`. **This is
   deliberate** — positional parsing breaks because MODEL contains spaces
@@ -88,6 +102,12 @@ lsblk -dnb -P -o NAME,SIZE,SERIAL,MODEL,TRAN,ROTA,TYPE
 - Keep rows where `TYPE=disk`; drop names starting with
   `loop/sr/ram/zd/dm-/md`.
 - `ROTA=0` ⇒ SSD. `SIZE` is bytes. `TRAN` ⇒ iface (SATA/SAS).
+- `WWN` (added **v0.19.0**) ⇒ `Disk.wwn`, e.g. `0x5000c500a1b2c3d4`. A
+  **serial-independent** join key: enterprise SAS drives report no `SERIAL` to
+  lsblk until `smart.read()` fills it in, so the RAID backend's PD→block-device
+  match cannot rely on serial alone (§9.3). Compared after
+  `hba_raid._norm_wwn()` (lowercase hex, `0x`/separators stripped) because perccli
+  prints the same value as `5000C500A1B2C3D4`.
 
 ### 3.2 Stable names — `hba._by_id_index()`
 Walks `/dev/disk/by-id`, `realpath`s each link, and keeps the
@@ -114,7 +134,22 @@ takes either an explicit `{"map": {"1:0":"1:7", ...}}` (raw->physical) or a rule
 is **display-only** (LEDs key off the device, not the slot), so a wrong map is
 cosmetic, never dangerous. Calibrate with `b2ctl locate <serial>`.
 
-If `sas2ircu list` returns nothing the step is skipped and `bay` stays `None`.
+If `sas2ircu list` returns nothing, `bm` is `{}` — since **v0.19.0**
+`attach_bays()` no longer returns early (`hba.py:213-216`), because the kernel
+fallback in §3.3a still knows every slot. `bay` stays `None` only when that is
+empty too (pure SATA/NVMe box).
+
+**Bays without sas2ircu (v0.19.0).** On an HBA330/H330 `sas2ircu` is blind to the
+SAS3008, so `ITBackend(bay_source="perccli")` sources the same
+`serial -> "enc:slot"` map from
+```
+perccli /c<n>/eall/sall show all
+```
+via `hba_raid.bay_map()` instead. Everything downstream is unchanged — serial
+match, `bay_map.json` remap, and locate, because each drive still has its own
+block device. `ITBackend.attach_bays()` / `get_ghost_disks()` pre-fill `bm`
+themselves in that mode (`backend.py:107-127`) so `hba` never probes sas2ircu
+behind the backend's back.
 
 **NVMe bays — `baymap.remap_nvme()`.** NVMe has no enc:slot; its raw bay is the
 PCIe BDF (`hba._nvme_pcie()` reads `/sys/class/nvme/<ctrl>/address`, drops the
@@ -123,6 +158,72 @@ PCIe BDF (`hba._nvme_pcie()` reads `/sys/class/nvme/<ctrl>/address`, drops the
 `bdf`, matched in **precedence by-id > serial > bdf**. Remap runs even when the
 BDF is unavailable, so a by-id/serial entry still labels the drive. `hba_raid`
 reuses `hba.enumerate_disks`, so NVMe in RAID mode is covered with no extra code.
+
+### 3.3a Bay fallback — kernel SAS transport class (v0.19.0)
+
+Two sysfs reads, **no subprocess at all** — `blockdev.sas_bay_slots()`
+(`blockdev.SAS_DEVICE_DIR = /sys/class/sas_device`):
+
+```
+/sys/class/sas_device/end_device-*/bay_identifier             -> slot number
+/sys/class/sas_device/end_device-*/device/target*/*/block/*   -> sdX
+```
+
+`bay_identifier` is the slot the **expander** reports for that end device, and
+the block device hangs off the *same* sysfs node, so the result is an exact
+`{"/dev/sdX": slot}` map with **no serial anywhere**. That sidesteps the whole
+failure class a serial-keyed bay map has: lsblk publishes no `SERIAL` for
+enterprise SAS drives until `smart.read()` runs (§3.1), and each tool truncates
+serials differently (F-134).
+
+Field evidence, HBA330 box (`bkp02`) — an exact 1:1 with the perccli PD table:
+
+| `bay_identifier` | block device under the node | perccli EID:Slt |
+|---|---|---|
+| 0 … 6 | `sda` … `sdg` | `9:0` … `9:6` |
+| 22 | `sdh` | `9:22` |
+| 23 | `sdi` | `9:23` |
+| 24 | *(none)* | *(no PD — SES enclosure processor)* |
+
+Parsing rules:
+
+- Unreadable nodes and a non-numeric `bay_identifier` are skipped.
+- A node with **no** block device drops out on its own — that is how the SES
+  enclosure processor (bay 24 above) excludes itself. Structural, not a special
+  case: the same phantom-row hazard needed an explicit filter for sas2ircu
+  (F-036).
+- `{}` is returned when there is no SAS transport (pure SATA/NVMe box) **or**
+  when more than one device is found and they all report the *same* bay — a
+  backplane that reports a constant would otherwise label the whole chassis `0:0`.
+- `/sys/class/enclosure/` is deliberately **not** read: on the field box the SES
+  driver is not bound and that tree is empty, so `sas_device` is the only usable
+  path.
+
+**Bay-source precedence** — `hba.attach_bays()` (`hba.py:209-216`):
+
+1. **Vendor map first.** `baymap.assign_bays(disks, bm, panels)` runs first and
+   its labels always win, whether `bm` came from `sas2ircu DISPLAY` or from
+   `perccli … eall/sall`. An R620's sas2ircu + `reverse_slots` output is
+   unchanged from v0.18.0.
+2. **sysfs fills the remainder, never replaces.** `baymap.assign_sysfs_bays()`
+   skips any disk that already has a `bay` (`baymap.py:120-123`), so it only
+   covers what the serial join could not reach: a SAS drive before SMART
+   published its serial, or a perccli build that prints no per-drive detail
+   section. No existing box's labels change.
+3. **Enclosure prefix is borrowed, not invented.** The kernel reports a bare
+   slot. `hba._enc_hint(bm, override)` takes the enclosure from the first vendor
+   map value (`enc:slot`), else the backend's hint, else `"0"` — so a disk that
+   switches from a vendor bay to a sysfs bay never changes the number the
+   operator reads. `ITBackend.attach_bays()` supplies that hint from
+   `hba_raid.enclosure_ids()` when `bay_source="perccli"` **and** the serial map
+   came back empty, and only when the PD table names exactly one enclosure
+   (`backend.py:114-120`) — an ambiguous multi-enclosure chassis falls back to
+   `"0"` rather than guessing. Result on `bkp02`: `9:0 … 9:23`, not `0:0 … 0:23`.
+
+The composed `enc:slot` then goes through the **same** `baymap.remap_slot()`
+front-panel rule as every vendor bay, so `bay_map.json` keeps working unchanged.
+`enclosure_ids()` is display-only — perccli *actions* still address a drive by
+`Disk.ctrl_slot`, the raw locator (§9.2).
 
 ### 3.4 SMART — `smart.read()`
 ```
@@ -181,6 +282,16 @@ slow disks exceed `smart.timeout` (default 10 s) → the probe times out → `NO
 A megaraid timeout is **retried once** (usually just queueing behind siblings); an
 IT-mode timeout is not (F-049). Both knobs live in `config['smart']` — raise the
 timeout / lower the workers on a box with slow or dying SAS disks.
+
+**Never `-d megaraid` on an HBA330/H330 (v0.19.0).** The megaraid pool only ever
+holds rows `RaidBackend` synthesised (`smart_dtype = "megaraid,<DID>"`). A Dell
+HBA330/H330 binds **mpt3sas**, which implements no MegaRAID ioctl, so
+`smartctl -a -d megaraid,<DID> /dev/sdX` cannot succeed there — every probe returns
+`NOREAD` ⇒ `CRITICAL`. That is precisely the field bug F-133 fixes (9 physical
+drives, 18 rows, 9 phantom `/dev/sda` rows). Such a box now runs `ITBackend`, so
+`smart_dtype` stays empty and every disk is read with plain
+`smartctl -a /dev/sdX` on its own block device — the same direct path as a
+crossflashed H710.
 
 ### 3.5 ZFS topology — `zfs.topology()`
 ```
@@ -447,7 +558,8 @@ LED off.**
 
 ```
 enumerate_disks (lsblk -P)
-  → attach_bays (sas2ircu DISPLAY, by serial; remapped via bay_map.json)
+  → attach_bays (sas2ircu DISPLAY — or perccli eall/sall when bay_source='perccli', §9.2; by serial;
+                 then /sys/class/sas_device for whatever is still bay-less, §3.3a; remapped via bay_map.json)
   → smart.read per disk (smartctl direct)
   → attach_membership (zpool status -P, by by-id/dev/realpath)
   → spares_replacing (zpool status -P -v, per pool with INUSE spares — sets Disk.spare_replacing to bay of replaced disk)
@@ -462,6 +574,31 @@ wear<10% or health="GHOST" (OS rejected device) ⇒ **CRITICAL**; vdev DEGRADED 
 Thresholds: `END_WARN=30`, `END_CRIT=10` in `common.py`.
 
 Ghost disks are detected by `hba.get_ghost_disks()`. They are drives seen by the HBA but rejected by the OS (no `/dev/sdX` node). They are tagged with `dev="-"` and `health="GHOST"`.
+
+**Serial-domain guard (v0.19.0, `hba.py:244-256`).** Enterprise SAS drives expose
+no lsblk `SERIAL` until `smart.read()` runs, and `scan()` computes ghosts *before*
+the SMART fan-out — so on the first pass a serial-keyed bay map can match nothing
+and every entry looks like a rejected disk. The guard fires only when **both** hold:
+
+1. `_matched_any(bm, os_serials)` is false — **no** bay-map serial lines up with
+   **any** OS disk serial. One hit proves the two tools agree on the serial
+   format, which makes the remaining misses trustworthy as real ghosts.
+2. The serial-less block devices already present can account for all of them:
+   `unidentified = len([d for d in disks if d.dev != "-" and not d.serial])` is
+   non-zero **and** `len(ghosts) <= unidentified`.
+
+Then it is a scan-ordering artefact and `[]` is returned. A **surplus** —
+more would-be ghosts than unidentified disks — cannot be explained away, so the
+whole list is reported rather than hiding a real OS_REJECTED drive.
+
+> The first cut of this guard blanked the ghost list outright whenever condition 1
+> held plus *any* serial-less disk existed, which permanently disabled
+> OS_REJECTED detection on every box whose drives publish no lsblk serial (F-133
+> review). It is now the narrow artefact filter described above: a drive the OS
+> genuinely rejected (foreign RAID metadata — the reason the ghost concept exists)
+> still raises its GHOST/CRITICAL row and the `[u]dev rescue` prompt whenever any
+> serial did line up, no serial-less disk is left to explain it, or the ghosts
+> outnumber the serial-less disks.
 
 ---
 
@@ -806,7 +943,13 @@ are never touched by `install.sh`.
 | table empty, pools show | `lsblk` not in `-P` mode or MODEL spaces — confirm `enumerate_disks` uses `-P`; check `lsblk -dnb -P -o NAME,...` by hand |
 | BAY all `-` | `sas2ircu` missing or can't execute; bays are optional (locate still works by serial/dev). If `b2ctl check` shows "binary exists but won't execute", run `apt-get install -y libc6-i386` — sas2ircu is a 32-bit ELF |
 | BAY all `-` (RAID-mode detected despite IT HBA) | a crossflashed PERC H710 may still answer `perccli show ctrlcount`, so auto-detect can pick RaidBackend if sas2ircu can't run. Fix: `apt-get install libc6-i386` so sas2ircu executes (→ forces IT), or set `controller.mode = "it"` in `/etc/b2ctl/config.json` |
+| 18 rows for 9 drives — half claim `DEV=/dev/sda`, `SERIAL N/A`, `HEALTH NOREAD`, `LEVEL CRITICAL` | pre-v0.19.0 on a Dell HBA330/H330: sas2ircu is blind to the SAS3008, so auto-detect fell through to `RaidBackend`, which synthesised one row per controller PD and read it through a megaraid passthrough mpt3sas does not implement (F-133). Fix: upgrade to ≥ v0.19.0 — `is_hba_personality()` (§9.1) now gates the choice; stop-gap on an old build: `controller.mode = "it"` |
+| `raid-create` / `raid-del` / `raid-replace` refused with "hardware-RAID actions require RAID mode … This box is IT/HBA" on a real PERC | pre-fix `is_hba_personality()`: with no VD to look at (fresh box, or right after `raid-del`) it ignored its own `RAID-Mode` string and tie-broke on raw counts, letting NVMe/BOSS/USB disks that are not on the controller outvote the hidden PERC drives → classified HBA. Fixed in v0.19.0 — an explicit `RAID-Mode` now short-circuits to RAID and rung 4 resolves each PD individually (§9.1). If a controller reports neither a VD, a personality nor an unresolved PD, set `controller.mode = "raid"` in `/etc/b2ctl/config.json` — the probe is then skipped entirely |
+| a drive perccli lists (UGood/Failed) is missing from `b2ctl status` in RAID mode | pre-fix same-model refusal in `hba_raid.enumerate_disks()`: it fired for identified PDs and decided mid-loop, so with identical models the drop was enc:slot-order dependent. Fixed in v0.19.0 by the two-pass join (§9.3) — the refusal now only touches a PD perccli gave **no** `SN` and **no** `WWN` for. If a drive still vanishes, check that `perccli /c<n>/eall/sall show all` prints an `SN =`/`WWN =` line for that slot |
+| no GHOST row on a box whose drives report no lsblk `SERIAL` | the serial-domain guard in `hba.get_ghost_disks()` (§4) only suppresses when **no** bay-map serial matched **any** OS serial *and* `len(ghosts) <= ` the number of serial-less block devices — a scan-ordering artefact before SMART runs. A surplus is always reported. If the counts do balance and you still suspect a rejected drive, re-check after a full scan (`b2ctl status`, SMART has run by then) or compare the controller drive list against `lsblk` |
 | BAY numbers wrong | edit `bay_map.json` (reverse rule or explicit map); recalibrate with `b2ctl locate <serial>` |
+| BAY all `-` on a SAS box with no vendor tool | the kernel fallback (§3.3a) needs `/sys/class/sas_device/end_device-*` — confirm `mpt3sas`/`mpt2sas` is loaded and that `bay_identifier` is readable and not the **same** value for every drive (a constant is rejected as a useless map). SATA-only and NVMe boxes have no SAS transport at all: bays there come from the vendor map / the `type:nvme` panel |
+| bays read `0:0 … 0:23` where perccli says `9:0 … 9:23` | the sysfs slots got the default enclosure prefix: the PD table named more than one enclosure, so `ITBackend.attach_bays()` refuses to guess (§3.3a step 3). Fix cosmetically with an explicit `map` in the front `type:sas` panel of `bay_map.json` |
 | BAY mapping works in one directory but not another (raw BDF elsewhere) | pre-v0.8.5 `python -m` cwd-shadowing: running from the source checkout loaded that copy's `bay_map.json`. Fix: `sudo b2ctl update` (bind `/etc/b2ctl/bay_map.json` in config) and redeploy so the launcher has `PYTHONSAFEPATH=1` |
 | locate lights many bays | you're on old sas2ircu-slot locate; this build uses device-based locate — rebuild/redeploy |
 | POOL `-` for in-pool disk | by-id/dev mismatch — verify `zpool status -P` leaf paths resolve (`realpath`) to the same `/dev/sdX` lsblk reports |
@@ -827,17 +970,18 @@ are never touched by `install.sh`.
 
 | `controller.mode` config value | result |
 |-------------------------------|--------|
-| `"it"` | `ITBackend()` — no subprocess run |
+| `"it"` | `ITBackend()` — no subprocess run (the bay source can still flip, §9.2) |
 | `"raid"` | `RaidBackend()` — no subprocess run |
 | `"auto"` (default) | probe order below |
 
 **Auto-detection probe order:**
 
-1. `sas2ircu list` — if stdout is non-empty → `ITBackend`.
-2. sas2ircu binary exists but failed to execute → warn stderr ("apt-get install -y libc6-i386") and **force `ITBackend`** (prevents false RAID detection on crossflashed H710).
-3. `perccli64 show ctrlcount` → non-empty → `RaidBackend`.
-4. `perccli show ctrlcount` → non-empty → `RaidBackend`.
-5. None found → `die()` with an install hint.
+1. `sas2ircu list` — a real controller table (`^\s*\d+\s+SAS`) → `ITBackend()`. (Merely non-empty stdout is not enough: sas2ircu on a RAID box prints its banner + `MPTLib2 Error 1`, which the pre-F-010 truthy test misread as IT.)
+2. sas2ircu binary exists but produced no output at all (failed to execute) → warn on stderr ("apt-get install -y libc6-i386") and **force `ITBackend()`** (prevents false RAID detection on a crossflashed H710).
+3. `perccli64 show ctrlcount` / `perccli show ctrlcount` → `Controller Count = N` with N > 0 (`hba_raid.have_tool()`, memoized) → ask **`hba_raid.is_hba_personality()`** (§9.1), because "perccli answers" is **not** the same as "the controller owns the disks":
+   - `True` → `ITBackend(bay_source="perccli")` — a Dell HBA330/H330, or a PERC in HBA-Mode.
+   - `False` → `RaidBackend()`.
+4. None found → `die()` with an install hint.
 
 (storcli is never probed — it was dropped because it responds to a crossflashed PERC and caused false RAID detection.)
 
@@ -845,7 +989,133 @@ are never touched by `install.sh`.
 `bk_mod._backend_cache = None` to keep tests isolated.
 
 Each backend's `name` attribute is `"it"` or `"raid"` and is used by
-`b2ctl check` to report which backend was detected.
+`b2ctl check` to report which backend was detected. `ITBackend(bay_source=
+"perccli")` still reports `"it"`, so `raid_actions._require_raid()` refuses the
+PERC lifecycle verbs on such a box — correct for a real HBA330 (there is no array
+to manage), but see the caveat under §9.1.
+
+### 9.1 Controller personality — `hba_raid.is_hba_personality()` (v0.19.0)
+
+Answers one question: **does the controller own the storage, or does the OS?**
+Treating "perccli replies" as "hardware RAID" is what turned 9 drives into 18 rows
+on an HBA330 (F-133) — `hba_raid.enumerate_disks()` synthesised one `Disk` per
+controller PD on top of the block devices lsblk already listed, and read each of
+them through a megaraid passthrough that does not exist on mpt3sas.
+`_probe_hba_personality()` walks four signals; the first rung that decides wins,
+and every perccli read covers **all** `_ctrl_indices()`, never a hardcoded `/c0`:
+
+| # | signal | command / read | verdict |
+|---|--------|----------------|---------|
+| 1 | virtual disks | `perccli /c<n>/vall show all` (every controller, `_vall_data()`) | any VD → **RAID**. Checked **first** so a host without `/sys` (dev laptop, sim harness) can never misclassify a real RAID controller |
+| 2 | personality | `perccli /c<n> show` → `Current Personality = …` (or `Personality = …`) | starts with `RAID` → **RAID**; starts with `HBA` → **HBA**. **Authoritative in both directions**: a controller that names its own personality is believed and the probe stops there. A Dell HBA330 prints no personality line at all — it has no switch, it is IT firmware permanently — so `''` is a normal answer, not an error |
+| 3 | kernel driver | `perccli /c<n> show` → `Driver Name = …`; if perccli names none anywhere, glob `/sys/class/scsi_host/host*/proc_name` and look for `megaraid_sas` | every named driver ≠ `megaraid_sas` (i.e. `mpt3sas` on an HBA330/HBA355) → **HBA**; no `Driver Name` **and** no `megaraid_sas` host in sysfs → **HBA**. No MegaRAID ioctl ⇒ `-d megaraid` is impossible ⇒ the controller cannot be driven as RAID |
+| 4 | per-PD resolution | PDs + `SN =`/`WWN =` maps from `perccli /c<n>/eall/sall show all` vs `lsblk -dnb -P -o NAME,TYPE,SERIAL,WWN` (`blockdev.lsblk_pairs`, `TYPE=disk` minus `blockdev.EXCLUDE` = `loop/sr/ram/zd/dm-/md`) | no PDs at all → **RAID**; else **every** PD must resolve to an OS block device, by fuzzy serial (`baymap.serial_match`) or normalised WWN → **HBA**. A single unresolved PD ⇒ the controller is hiding that drive ⇒ **RAID** |
+
+The verdict is memoized in `_hba_personality_cache` — perccli is slow (F-040) and
+the probe costs one `vall` per controller, up to two `/c<n> show` calls per
+controller (rungs 2 and 3 do not share the output), plus one `eall/sall` per
+controller if it reaches rung 4. `hba_raid._reset_caches()` clears it together
+with `_tool_cache`/`_have_tool_cache`; tests call it in `setup_method`.
+
+> **Two rungs were rebuilt after the F-133 review** — the first cut read rung 2
+> only *positively* (`startswith("HBA")`) and tie-broke on raw counts
+> (`len(os_disks) >= len(pds)`), which locked an operator out of a real PERC. A
+> freshly-wiped H730P in **RAID-Mode with no VD** (new box, or straight after
+> `b2ctl raid-del`) fell past its own explicit `RAID-Mode` string into the tie-break,
+> where an unrelated BOSS-S1 mirror + 2 NVMe — block devices that are not on the
+> controller at all — outvoted the hidden PERC drives. `_detect_backend()` returned
+> `ITBackend(bay_source="perccli")`, so `raid_actions._require_raid()` refused
+> `raid-create`, `raid-del`, `raid-replace`, `raid-offline` **and** watch's
+> `[a]ssign` → `assign_perc` menu (locate / set JBOD / create volume / hot spare)
+> with "hardware-RAID actions require RAID mode (perccli). This box is IT/HBA" —
+> precisely the actions needed in that state. Rung 2 now vetoes, and rung 4 counts
+> only drives the controller itself reports.
+
+> **Residual limitation — rung 4 reads a hidden drive as RAID, whatever hid it.**
+> On a PERC in HBA-Mode whose firmware prints no personality string and binds
+> `megaraid_sas`, a drive the OS genuinely rejected (foreign RAID metadata) leaves
+> one PD unresolved, so the box is classified RAID. That is the safe direction —
+> RAID mode still shows the drive — but if it is wrong for your box, set
+> `controller.mode = "raid"` (or `"it"`) in `/etc/b2ctl/config.json`:
+> `_detect_backend()` then returns the backend directly and never probes.
+
+### 9.2 `ITBackend.bay_source` (v0.19.0)
+
+`bay_source` selects only **who answers "which bay is this drive in"**. Disk
+enumeration, SMART, ZFS lifecycle and LEDs are identical in both modes, because in
+both the OS owns raw block devices:
+
+| `bay_source` | chosen when | bay map from | enumeration + SMART |
+|--------------|-------------|--------------|---------------------|
+| `"sas2ircu"` (default) | `sas2ircu list` showed a controller table, or `controller.mode="it"` on a box where sas2ircu runs | `sas2ircu <c> DISPLAY` → `hba.bay_map()` | `lsblk` + direct `smartctl -a /dev/sdX` |
+| `"perccli"` | auto-detect got `is_hba_personality() == True`, or `have_tool()` flipped it (below) | `perccli /c<n>/eall/sall show all` → `hba_raid.bay_map()` | identical — `lsblk` + direct `smartctl -a /dev/sdX`, **never** `-d megaraid` |
+
+`ITBackend.have_tool()` (`backend.py:68-81`) flips `bay_source` to `"perccli"` on
+the fly when `hba.have_sas2ircu()` is false but `hba_raid.have_tool()` is true.
+That rescues an operator who forced `controller.mode = "it"` on an HBA330, who
+would otherwise lose bays entirely; both probes are memoized, so it costs nothing
+after the first scan. LEDs need no special-casing — every drive has its own block
+device, so `locate.py`'s ledctl → dd path blinks the right bay.
+
+**Neither source is required (v0.19.0, F-134).** Whatever the chosen `bay_source`
+leaves unlabelled is filled from the kernel SAS transport class (§3.3a) — that
+runs after `assign_bays()` in both rows above, so a vendor label always wins and no
+existing box's numbers move. With `bay_source="perccli"` and an **empty** serial
+map, `ITBackend.attach_bays()` also borrows the enclosure number from
+`hba_raid.enclosure_ids()` (used only when the PD table names exactly one
+enclosure) so the sysfs slots render as `9:0 … 9:23`, matching what
+`perccli /c<n>/eall/sall show all` prints. `enclosure_ids()` never addresses
+anything — perccli actions keep using `Disk.ctrl_slot`, the raw locator.
+
+### 9.3 PD → OS block device join (`hba_raid.enumerate_disks()`, v0.19.0)
+
+RAID mode still synthesises a `Disk` per **hidden** controller PD (`dev = ctrl_dev`,
+`smart_dtype = "megaraid,<DID>"`), but a PD the OS already exposes (JBOD) must
+**tag that block device** instead. The old test was `if sn and sn in raw_serials`,
+with `raw_serials` coming from lsblk — it never fired when lsblk had no serial yet,
+which is how one phantom row per drive appeared. `_match_os_disk(sn, wwn, by_sn,
+by_wwn)` now joins in this order:
+
+1. exact serial → 2. `baymap.serial_match()` fuzzy prefix → 3. normalised WWN
+   (`_norm_wwn`, from `_parse_wwn_map`).
+
+The VD's own block device (`perc_dev_set`) is excluded from every join table so it
+cannot absorb a PD. Both maps are parsed from the SAME
+`perccli /c<n>/eall/sall show all` text already fetched once per controller
+(F-040/F-041): `_parse_detail()` binds `SN = …` / `WWN = …` to the nearest preceding
+`Drive /cN/eE/sS` header, and `_DRIVE_HDR` now matches **any** such header —
+requiring the literal `Device attributes` made every SN unreadable on an HBA330,
+which is what left each PD looking "hidden" in the first place.
+
+**Two passes, not one (F-133 review).** The non-member PD loop is split, because a
+suppression decision needs the *complete* set of claims:
+
+- **Pass 1** — join every non-member PD via `_match_os_disk()`. A hit tags the real
+  block device (`bay`, `pd_state`, `ctrl_slot`, `ctrl`) and records `id(target)` in
+  `claimed`. Nothing is synthesised and nothing is dropped in this pass.
+- **Pass 2** — synthesise a `Disk` for everything left in `pending`. Only here does
+  the model/size refusal apply, and only to a PD perccli could **not identify at
+  all** (no `SN` *and* no `WWN`) — the HBA330 case this guard exists for. A PD that
+  *has* an identity which simply matches no OS disk is definitively hidden behind
+  the controller and always keeps its row.
+
+The first cut decided mid-loop and fired for identified PDs too, which deleted real
+Unconfigured-Good / Failed drives from `b2ctl status`, from `b2ctl check` and from
+watch's `[a]ssign` PERC list (`raid_avail`, filtered on `smart_dtype` + `pd_state`)
+— so set JBOD / add hot spare could not reach them. Because `claimed` was
+incomplete while the loop ran, a drive's very existence depended on enc:slot
+iteration order. The real layout that hit it is one b2ctl's own `assign_perc` set-JBOD
+flow creates: one drive JBOD-exposed, an identical-model sibling still hidden.
+
+The refusal itself was also narrowed, so it can only ever suppress *less*:
+
+| guard | rule | why |
+|-------|------|-----|
+| `_model_match(pd_model, dev_model)` | prefix compare in **either** direction on `_norm_model` (upper, whitespace-collapsed), plus a `_MODEL_MIN = 8` floor on the shorter string | perccli truncates its Model column (`Samsung SSD 860` vs lsblk's `Samsung SSD 860 PRO 1TB`), so equality is wrong — but a bare prefix test made `("S", "Samsung SSD 870 EVO 1TB")` true, i.e. one severely truncated column suppressing arbitrary drives |
+| `_size_match(pd_size, dev_bytes)` | `_pd_size_bytes()` parses perccli's size as **powers of 1024** and compares within **10 %** | perccli prints BINARY sizes under decimal labels: `953.869 GB` = 953.869 GiB for an 860 PRO 1TB (1 024 209 543 168 B), `2.182 TB` = 2.182 TiB for a 2 400 476 274 688 B SAS drive. The tolerance absorbs rounding/reserved areas while still separating a 960 GB SSD from a 2.4 TB HDD |
+
+`_size_match` returns **True** when either side is unknown — an unparseable size
+must never widen the suppression, only narrow it.
 
 ---
 
@@ -938,11 +1208,20 @@ read as all-defaults), then clears `_cache`.
 
 | command | purpose |
 |---------|---------|
-| `perccli64 /c<n>/eall/sall show all` | enumerate all drives and their EID:Slot for the bay map (also works with `perccli`) |
+| `perccli64 /c<n>/eall/sall show all` | enumerate all drives and their EID:Slot for the bay map (also works with `perccli`); since v0.19.0 the same text also yields the `WWN =` map, the enclosure numbers `hba_raid.enclosure_ids()` lends to a sysfs-derived bay (§3.3a), and is the bay source for `ITBackend(bay_source="perccli")` |
 | `perccli64 /c<n>/e<enc>/s<slot> set locate start` | turn on locate LED for one drive slot |
 | `perccli64 /c<n>/e<enc>/s<slot> set locate stop` | turn off locate LED for one drive slot |
 | `perccli64 show ctrlcount` | probe for RAID controller presence (also used in auto-detection) |
+| `perccli64 /c<n> show` | **v0.19.0** — controller personality (`Current Personality`) + `Driver Name`, rungs 2–3 of the HBA-vs-RAID decision (§9.1); run per controller in `_ctrl_indices()`, once per rung |
 | `sas2ircu list` | probe for IT/HBA controller presence (existing; now also used in auto-detection) |
+
+Two **non-subprocess** system reads join them (v0.19.0) — pure `glob` + `open()`,
+no fork, no tool required:
+
+| read | function | used for |
+|------|----------|----------|
+| `/sys/class/scsi_host/host*/proc_name` | `hba_raid._megaraid_driver_present()` | looks for `megaraid_sas`; the rung-3 fallback when perccli prints no `Driver Name` (§9.1). Reads `False` wherever `/sys` is absent (dev laptop, sim harness) — which is why the VD check runs first |
+| `/sys/class/sas_device/end_device-*/bay_identifier` + `…/device/target*/*/block/*` | `blockdev.sas_bay_slots()` | the kernel bay→device map that fills any bay the vendor map left empty (§3.3a). Costs nothing per scan and needs neither sas2ircu nor perccli |
 
 ---
 
@@ -1043,10 +1322,12 @@ gone (blind to a PERC). Enumeration + SMART:
 | step | command | parsed for |
 |------|---------|-----------|
 | tool pick | `perccli show ctrlcount` | `Controller Count = N` (>0 wins) |
+| personality (v0.19.0) | `perccli /cN show` (every controller) | `Current Personality = RAID-Mode\|HBA-Mode` — believed in **both** directions, `RAID-Mode` alone keeps the box on this backend; else `Driver Name = megaraid_sas\|mpt3sas`. The §9.1 gate that decides RAID vs IT before this table is used at all |
 | members | `perccli /cN/vall show all` | VD row (raid/state/size/name) + `PDs for VD n` (EID:Slt, DID, State, Med, Model) |
-| bay→serial | `perccli /cN/eall/sall show all` | `Drive /cN/eE/sS` + `SN =` |
+| bay→serial | `perccli /cN/eall/sall show all` | **any** `Drive /cN/eE/sS` header + `SN =` (v0.19.0: the header no longer has to say `Device attributes`) |
+| bay→WWN (v0.19.0) | same text, no extra command | `WWN =` per drive → the serial-independent PD↔block-device join (§9.3) |
 | member SMART | `smartctl -a -d megaraid,<DID> /dev/sda` | ATA attrs (POH, LBAs written, wear), `test result: PASSED` |
-| VD block dev | `lsblk -dnb -P` MODEL contains `PERC` | which `/dev/sdX` is the virtual disk (dropped from rows) |
+| VD block dev | `lsblk -dnb -P` MODEL contains `PERC` | which `/dev/sdX` is the virtual disk (dropped from rows, and excluded from every join table) |
 
 Actions (each `[y/N]`-guarded + audited via `safety.begin_op/end_op`):
 
@@ -1067,6 +1348,11 @@ Actions (each `[y/N]`-guarded + audited via `safety.begin_op/end_op`):
 > perccli + `smartctl -d megaraid`). On HW RAID the **controller** owns the
 > array, so lifecycle is perccli-driven, not ZFS — that is why the old IT-only
 > ban on `perccli`/`-d megaraid` was lifted.
+>
+> **v0.19.0:** answering perccli no longer implies RAID. A Dell HBA330/H330 (or a
+> PERC in HBA-Mode) runs the **IT** backend with perccli as the bay source only
+> (§9.1/§9.2) — none of the commands in this section apply there, and its disks are
+> read with plain `smartctl -a /dev/sdX`, never `-d megaraid`.
 
 ### Install profiles
 
@@ -1169,7 +1455,9 @@ from `zpool list`; guarded so a transient `zpool list` failure disables nothing)
 `hba_raid`). `bay_map.json` is a **list of panels**:
 
 - `type: sas` (front) — `enc:slot` remap via `reverse_slots`/`slots_per_enclosure`
-  or an explicit `map` dict; from `sas2ircu DISPLAY` / `perccli … show all`.
+  or an explicit `map` dict; from `sas2ircu DISPLAY` / `perccli … show all`, and
+  since v0.19.0 also from `/sys/class/sas_device/…/bay_identifier` for any disk
+  those two left without a bay (§3.3a — same panel, same remap, vendor wins).
 - `type: nvme` (back, 1+) — `map: [{bdf, bay}]`; the raw bay is the PCIe BDF read
   from `/sys/class/nvme/<ctrl>/address` (domain stripped), set in
   `hba.enumerate_disks`.

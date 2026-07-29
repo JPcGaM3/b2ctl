@@ -123,6 +123,11 @@ class Disk:
     size_bytes: int | None = None
     model: str = ""
     serial: str = ""
+    wwn: str = ""                  # lsblk/controller WWN, e.g. "0x5000c500a1b2c3d4".
+                                   # A serial-INDEPENDENT join key: enterprise SAS
+                                   # drives report no SERIAL to lsblk until SMART
+                                   # runs, which broke every serial-only PD match
+                                   # against the OS's block devices (F-133).
     iface: str = ""                # SATA / SAS
     is_ssd: bool = True
     readable: bool = False         # SMART responded

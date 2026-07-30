@@ -117,7 +117,10 @@ def confirm(msg: str) -> bool:
 # --------------------------------------------------------------------------- #
 @dataclass
 class Disk:
-    dev: str                       # /dev/sdX
+    dev: str                       # /dev/sdX, or "-" when the OS cannot see this
+                                   # disk at all (a PERC PD behind a virtual disk,
+                                   # or a ghost). Display identity ONLY — never a
+                                   # SMART target for such a disk, see ctrl_dev.
     by_id: str = ""                # /dev/disk/by-id/ata-... (stable)
     bay: str | None = None         # enclosure:slot from sas2ircu, e.g. "1:4"
     size_bytes: int | None = None
@@ -161,6 +164,15 @@ class Disk:
                                    # but firmware refuses every transition (set
                                    # jbod / hotspare / add vd) with 'Operation not
                                    # allowed' until it is imported or cleared (F-135)
+    ctrl_dev: str = ""             # megaraid ioctl HANDLE — the file smartctl opens
+                                   # for `-d megaraid,<DID>`. Any block device on
+                                   # the same controller works, so this is NOT this
+                                   # disk's device node: a PD behind a VD has none.
+                                   # Kept apart from `dev` because one field
+                                   # carrying both meanings printed the same
+                                   # /dev/sdX on every hardware row and made two
+                                   # VDs resolve to one filesystem (F-136).
+                                   # Set per-VD where the volume can be resolved.
     ctrl_slot: str = ""            # raw controller enc:slot for perccli actions,
                                    # kept separate from the (possibly remapped) bay label
     ctrl: int | None = None        # perccli controller index this PD lives on;

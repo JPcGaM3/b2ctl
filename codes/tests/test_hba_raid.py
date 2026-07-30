@@ -108,7 +108,9 @@ class TestEnumerate(unittest.TestCase):
         hw = [d for d in disks if d.array_type == "HW"]
         self.assertEqual(len(hw), 2)
         self.assertEqual(hw[0].smart_dtype, "megaraid,0")
-        self.assertEqual(hw[0].dev, "/dev/sda")          # megaraid target
+        # F-136: a VD member has no device node; the megaraid handle is ctrl_dev.
+        self.assertEqual(hw[0].dev, "-")
+        self.assertEqual(hw[0].ctrl_dev, "/dev/sda")     # megaraid target
         self.assertEqual(hw[0].array_name, "vd0/raid1")
         self.assertIn("/dev/nvme0n1", devs)
 
@@ -140,7 +142,8 @@ class TestEnumerate(unittest.TestCase):
         for d in ugood:
             self.assertEqual(d.array_type, "")          # available, not a member
             self.assertIn(d.smart_dtype, ("megaraid,4", "megaraid,5"))
-            self.assertEqual(d.dev, "/dev/sda")          # megaraid target
+            self.assertEqual(d.dev, "-")                 # hidden: no device node
+            self.assertEqual(d.ctrl_dev, "/dev/sda")     # megaraid target (F-136)
         # no ghosts in RAID mode
         self.assertEqual(raid.get_ghost_disks(disks), [])
 
@@ -1096,6 +1099,156 @@ class TestEnumerateSetsPdForeign(unittest.TestCase):
         disks = self._enumerate([exposed])
         self.assertTrue(disks["32:7"].pd_foreign)
         self.assertEqual(disks["32:7"].dev, "/dev/sdb")
+
+
+# ========================================================================== #
+# F-136 — one ctrl_dev was resolved from perc_devs[0] and stamped on every
+# member of every VD, so a two-volume box printed the same /dev/sdX on every
+# hardware row AND made both volumes measure one filesystem.
+# ========================================================================== #
+
+_VALL_TWO_VDS = """\
+/c0/v0 :
+======
+
+DG/VD TYPE  State Access Consist Cache Cac sCC     Size Name
+----------------------------------------------------------------
+0/0   RAID1 Optl  RW     Yes     RWBD  -   OFF 430.0 GB MainSSD
+----------------------------------------------------------------
+
+PDs for VD 0 :
+============
+
+EID:Slt DID State DG     Size Intf Med SED PI SeSz Model                Sp
+--------------------------------------------------------------------------
+32:22    22 Onln   0 430.0 GB SATA SSD N   N 512B SSDSC2KG480G8R       U
+--------------------------------------------------------------------------
+
+VD0 Properties :
+==============
+Strip Size = 64 KB
+SCSI NAA Id = 6d0946606a1b2c3d0000000000000000
+
+/c0/v1 :
+======
+
+DG/VD TYPE  State Access Consist Cache Cac sCC     Size Name
+----------------------------------------------------------------
+1/1   RAID10 Optl RW     Yes     RWBD  -   OFF 6.399 TB SAS-SSD
+----------------------------------------------------------------
+
+PDs for VD 1 :
+============
+
+EID:Slt DID State DG     Size Intf Med SED PI SeSz Model                Sp
+--------------------------------------------------------------------------
+32:12    12 Onln   1 3.492 TB SAS  SSD N   N 512B X357_S164A3T8ATE     U
+--------------------------------------------------------------------------
+
+VD1 Properties :
+==============
+Strip Size = 64 KB
+SCSI NAA Id = 6d0946606a1b2c3d1111111111111111
+"""
+
+
+def _vd_blockdev(dev, wwn="", size=None):
+    from b2ctl.common import Disk
+    d = Disk(dev=dev)
+    d.model = "PERC H730P Mini"
+    d.wwn = wwn
+    d.size_bytes = size
+    return d
+
+
+class TestParseVallNaa(unittest.TestCase):
+
+    def test_naa_captured_per_vd(self):
+        vols, members = raid._parse_vall(_VALL_TWO_VDS)
+        naa = {v["vd"]: v["naa"] for v in vols}
+        self.assertEqual(naa["0"], "6d0946606a1b2c3d0000000000000000")
+        self.assertEqual(naa["1"], "6d0946606a1b2c3d1111111111111111")
+        self.assertEqual({m["vd"] for m in members}, {"0", "1"})
+
+    def test_absent_naa_is_empty_not_missing(self):
+        vols, _ = raid._parse_vall(_VALL)          # fixture has no Properties block
+        self.assertTrue(vols)
+        self.assertEqual(vols[0]["naa"], "")
+
+
+class TestVdDevMap(unittest.TestCase):
+
+    def _vols(self):
+        vols, _ = raid._parse_vall(_VALL_TWO_VDS)
+        for v in vols:
+            v["controller"] = 0
+        return vols
+
+    def test_naa_join_wins(self):
+        devs = [_vd_blockdev("/dev/sdq", wwn="0x6d0946606a1b2c3d0000000000000000"),
+                _vd_blockdev("/dev/sdr", wwn="0x6D0946606A1B2C3D1111111111111111")]
+        m = raid._vd_dev_map(self._vols(), devs)
+        self.assertEqual(m["0:0"], "/dev/sdq")
+        self.assertEqual(m["0:1"], "/dev/sdr")     # case/0x differences absorbed
+
+    def test_size_join_when_no_naa(self):
+        vols = self._vols()
+        for v in vols:
+            v["naa"] = ""
+        # 430.0 GB and 6.399 TB as perccli means them: BINARY under decimal labels.
+        devs = [_vd_blockdev("/dev/sdq", size=int(6.399 * 1024 ** 4)),
+                _vd_blockdev("/dev/sdr", size=int(430.0 * 1024 ** 3))]
+        m = raid._vd_dev_map(vols, devs)
+        self.assertEqual(m["0:0"], "/dev/sdr")     # 430 GB volume -> 430 GB device
+        self.assertEqual(m["0:1"], "/dev/sdq")
+
+    def test_no_key_at_all_maps_nothing(self):
+        """Neither NAA nor size: return empty so the caller keeps its
+        controller-wide fallback rather than guessing a device."""
+        vols = self._vols()
+        for v in vols:
+            v["naa"], v["size"] = "", "??"
+        m = raid._vd_dev_map(vols, [_vd_blockdev("/dev/sdq")])
+        self.assertEqual(m, {})
+
+    def test_a_device_is_claimed_only_once(self):
+        vols = self._vols()
+        for v in vols:
+            v["naa"], v["size"] = "", "430.0 GB"   # both volumes the same size
+        devs = [_vd_blockdev("/dev/sdq", size=int(430.0 * 1024 ** 3)),
+                _vd_blockdev("/dev/sdr", size=int(430.0 * 1024 ** 3))]
+        m = raid._vd_dev_map(vols, devs)
+        self.assertEqual(len(set(m.values())), 2)  # never the same dev twice
+
+    def test_vd_key_is_controller_scoped(self):
+        """Two controllers can each own a v0 — the map key must not collide."""
+        a = {"controller": 0, "vd": "0"}
+        b = {"controller": 1, "vd": "0"}
+        self.assertNotEqual(raid._vd_key(a), raid._vd_key(b))
+
+
+class TestEnumeratePerVdCtrlDev(unittest.TestCase):
+
+    def test_two_vds_get_two_handles_and_no_device_node(self):
+        from b2ctl import blockdev
+        sdq = _vd_blockdev("/dev/sdq", wwn="0x6d0946606a1b2c3d0000000000000000")
+        sdr = _vd_blockdev("/dev/sdr", wwn="0x6d0946606a1b2c3d1111111111111111")
+        vols, members = raid._parse_vall(_VALL_TWO_VDS)
+        with patch.object(raid, "_vall_data", return_value=(vols, members)), \
+             patch.object(raid, "_ctrl_indices", return_value=[0]), \
+             patch.object(raid, "run", return_value=""), \
+             patch.object(raid, "have_tool", return_value=True), \
+             patch.object(raid, "_tool", return_value="perccli"), \
+             patch("b2ctl.hba.enumerate_disks", return_value=[sdq, sdr]), \
+             patch.object(blockdev, "vd_usage", return_value=None):
+            disks = raid.enumerate_disks()
+        hw = {d.array_name: d for d in disks if d.array_type == "HW"}
+        self.assertEqual(len(hw), 2)
+        # The field bug: every hardware row reported one and the same device.
+        self.assertEqual({d.ctrl_dev for d in hw.values()},
+                         {"/dev/sdq", "/dev/sdr"})
+        for d in hw.values():
+            self.assertEqual(d.dev, "-")           # hidden: no device node
 
 
 if __name__ == "__main__":

@@ -235,6 +235,39 @@ def raid_pds(state: dict) -> list:
 # the rest surface as Unconfigured-Good so both PD paths get exercised (F-115).
 RAID_VD_SIZE = 3
 
+# TWO synthetic virtual disks, because with only one the F-136 bug is invisible:
+# every member resolved to the same block device and nothing looked wrong. Each
+# VD carries the `SCSI NAA Id` perccli prints and the WWN + byte size the fake
+# lsblk reports for its /dev/sdX, so both join paths (NAA, then size) are real.
+# `bytes` is deliberately within 10% of `size` so the size fallback also works.
+# Each VD also carries a DISTINCT mounted filesystem: before F-136 both volumes
+# resolved to one block device and the storage summary printed identical
+# used/free for them, so different numbers here are what proves the fix.
+RAID_VDS = [
+    {"vd": "0", "raid": "RAID5", "name": "vd0", "members": RAID_VD_SIZE,
+     "size": "2.727 TB", "dev": "sdz", "bytes": 2_998_000_000_000,
+     "naa": "6d0946606a1b2c3d4e5f000000000000",
+     "mount": "/", "fssize": 100_000_000_000, "fsused": 7_600_000_000},
+    {"vd": "1", "raid": "RAID1", "name": "vd1", "members": 2,
+     "size": "931.0 GB", "dev": "sdy", "bytes": 999_653_638_144,
+     "naa": "6d0946606a1b2c3d4e5f111111111111",
+     "mount": "/mnt/data", "fssize": 900_000_000_000, "fsused": 450_000_000_000},
+]
+
+
+def vd_members(state: dict) -> tuple[list, list]:
+    """([(vd, [pds])], leftover_ugood) — which PDs each synthetic VD owns.
+
+    Split in raid_pds order so the megaraid DID (the list index) stays stable
+    for the fake smartctl."""
+    pds = raid_pds(state)
+    out: list = []
+    i = 0
+    for v in RAID_VDS:
+        out.append((v, pds[i:i + v["members"]]))
+        i += v["members"]
+    return out, pds[i:]
+
 
 def raid10_groups(pool: dict) -> list:
     """Mirror groups of a raid10 pool: stored 'groups', else members paired in

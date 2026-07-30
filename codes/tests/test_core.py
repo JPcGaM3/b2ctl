@@ -131,7 +131,8 @@ class TestAssembleStorage:
 
     def test_hw_above_sw_with_usage_and_names(self):
         from b2ctl.common import Disk
-        hw = Disk(dev="/dev/sdb"); hw.array_type = "HW"; hw.array_name = "vd0/raid1"
+        hw = Disk(dev="-"); hw.ctrl_dev = "/dev/sdb"     # F-136: handle, not node
+        hw.array_type = "HW"; hw.array_name = "vd0/raid1"
         vols = [{"vd": "0", "raid": "RAID1", "state": "Optl",
                  "size": "640.0 GB", "name": "MainSSD", "members": 2}]
         pools = [{"name": "tank", "size": "928G", "alloc": "598M",
@@ -147,9 +148,35 @@ class TestAssembleStorage:
         assert sw_row["name"] == "tank" and sw_row["level"] == "mirror"
         assert sw_row["used"] == "598M"
 
+    def test_two_vds_measure_their_own_block_device(self):
+        """F-136 field bug: every HW member reported the same `dev`, so both
+        volumes resolved to one device and printed identical used/free."""
+        from b2ctl.common import Disk
+        a = Disk(dev="-"); a.ctrl_dev = "/dev/sdq"
+        a.array_type = "HW"; a.array_name = "vd0/raid1"
+        b = Disk(dev="-"); b.ctrl_dev = "/dev/sdr"
+        b.array_type = "HW"; b.array_name = "vd1/raid10"
+        vols = [{"vd": "0", "raid": "RAID1", "state": "Optl",
+                 "size": "430.0 GB", "name": "MainSSD"},
+                {"vd": "1", "raid": "RAID10", "state": "Optl",
+                 "size": "6.399 TB", "name": "SAS-SSD"}]
+        seen = []
+
+        def _usage(dev):
+            seen.append(dev)
+            return (10 * 2**30, 100 * 2**30) if dev == "/dev/sdq" \
+                else (500 * 2**30, 900 * 2**30)
+
+        with patch("b2ctl.blockdev.vd_usage", side_effect=_usage):
+            rows = _core_mod.assemble_storage([a, b], [], vols)
+        assert seen == ["/dev/sdq", "/dev/sdr"]      # each volume, its own device
+        assert rows[0]["used"] != rows[1]["used"]
+        assert rows[0]["free"] != rows[1]["free"]
+
     def test_hw_usage_dash_when_unmounted(self):
         from b2ctl.common import Disk
-        hw = Disk(dev="/dev/sdb"); hw.array_type = "HW"; hw.array_name = "vd0/raid1"
+        hw = Disk(dev="-"); hw.ctrl_dev = "/dev/sdb"     # F-136: handle, not node
+        hw.array_type = "HW"; hw.array_name = "vd0/raid1"
         vols = [{"vd": "0", "raid": "RAID1", "state": "Optl", "size": "640.0 GB",
                  "name": "MainSSD"}]
         with patch("b2ctl.blockdev.vd_usage", return_value=None):

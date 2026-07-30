@@ -15,17 +15,25 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import _simstate as S  # noqa: E402
 
 
-def _pd_row(idx, d, member):
+def _pd_row(idx, d, dg=None):
     """One 'EID:Slt DID State DG ... Model Sp' PD table row (>=12 tokens, Sp last).
 
-    A foreign drive keeps State=UGood and marks DG=F — the two columns are
-    independent axes on real firmware, which is exactly what b2ctl reads (F-135).
+    `dg` = the owning drive group (a VD member), else None. A foreign drive keeps
+    State=UGood and marks DG=F — the two columns are independent axes on real
+    firmware, which is exactly what b2ctl reads (F-135).
     """
+    member = dg is not None
     state = "Onln" if member else "UGood"
-    dg = "0" if member else ("F" if d.get("foreign") else "-")
+    col = str(dg) if member else ("F" if d.get("foreign") else "-")
     med = "SSD" if d.get("rota", 0) == 0 else "HDD"
-    return (f"{d['enc']}:{d['slot']}  {idx:>3} {state:<5} {dg:>2} 931.0 GB "
+    return (f"{d['enc']}:{d['slot']}  {idx:>3} {state:<5} {col:>2} 931.0 GB "
             f"SATA {med} N   N 512B {d['model']} U")
+
+
+def _dg_of(state):
+    """{pd name: drive-group number} for every PD owned by a synthetic VD."""
+    owned, _free = S.vd_members(state)
+    return {d["name"]: v["vd"] for v, pds in owned for d in pds}
 
 
 def _foreign_pds(state):
@@ -109,37 +117,48 @@ def _refuse(pd_sel):
 
 
 def _vall(state):
+    """`/cN/vall show all` — one block per synthetic VD, each ending in a
+    'VDn Properties' section carrying SCSI NAA Id (the exact key b2ctl uses to
+    map a volume to its /dev/sdX, F-136)."""
     pds = S.raid_pds(state)
-    members = pds[:S.RAID_VD_SIZE]
-    print("/c0/v0 :")
-    print("======")
-    print("")
-    print("DG/VD TYPE  State Access Consist Cache Cac sCC     Size Name")
-    print("----------------------------------------------------------------")
-    print("0/0   RAID5 Optl  RW     Yes     RWBD  -   ON  2.727 TB vd0")
-    print("----------------------------------------------------------------")
-    print("")
-    print("PDs for VD 0 :")
-    print("============")
-    print("")
-    print("EID:Slt DID State DG     Size Intf Med SED PI SeSz Model                Sp")
-    print("--------------------------------------------------------------------------")
-    for i, d in enumerate(pds):
-        if d in members:
-            print(_pd_row(i, d, member=True))
-    print("--------------------------------------------------------------------------")
+    owned, _free = S.vd_members(state)
+    for v, members in owned:
+        vd = v["vd"]
+        print(f"/c0/v{vd} :")
+        print("======")
+        print("")
+        print("DG/VD TYPE  State Access Consist Cache Cac sCC     Size Name")
+        print("----------------------------------------------------------------")
+        print(f"{vd}/{vd}   {v['raid']} Optl  RW     Yes     RWBD  -   ON  "
+              f"{v['size']} {v['name']}")
+        print("----------------------------------------------------------------")
+        print("")
+        print(f"PDs for VD {vd} :")
+        print("============")
+        print("")
+        print("EID:Slt DID State DG     Size Intf Med SED PI SeSz Model                Sp")
+        print("--------------------------------------------------------------------------")
+        for d in members:
+            print(_pd_row(pds.index(d), d, dg=vd))
+        print("--------------------------------------------------------------------------")
+        print("")
+        print(f"VD{vd} Properties :")
+        print("==============")
+        print("Strip Size = 64 KB")
+        print(f"SCSI NAA Id = {v['naa']}")
+        print("")
     return 0
 
 
 def _eall_sall(state):
     pds = S.raid_pds(state)
-    members = pds[:S.RAID_VD_SIZE]
+    dgs = _dg_of(state)
     # PD table (parsed by hba_raid._parse_pd_rows for UGood/JBOD surfacing).
     print("Drive Information :")
     print("EID:Slt DID State DG     Size Intf Med SED PI SeSz Model                Sp")
     print("--------------------------------------------------------------------------")
     for i, d in enumerate(pds):
-        print(_pd_row(i, d, member=(d in members)))
+        print(_pd_row(i, d, dg=dgs.get(d["name"])))
     print("--------------------------------------------------------------------------")
     print("")
     # Drive attribute + SN sections (parsed by hba_raid._parse_bay_map for the

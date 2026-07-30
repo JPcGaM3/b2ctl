@@ -7,12 +7,17 @@ their reasons. Colour follows the level (green/cyan/yellow/red).
 
 from __future__ import annotations
 
+import os
+import shutil
+import sys
+
 from .common import Disk, R, Y, G, C, N, LEVEL_COLOR, selftest_passed
 
-# Total rule width of the per-disk table. Bumped from 184 -> 196 when the
-# HEALTH_CHK column (12 wide) was added (v0.17.0); keep the rules/sub-headers in
-# lockstep with the header/row format strings below.
-TABLE_W = 196
+# Widest the table can ever be — the sum of every column's width, computed from
+# _COLUMNS below so it can never drift from the header/row formats again. It used
+# to be a hand-maintained constant (196) that had to be bumped by hand whenever a
+# column was added (F-137).
+TABLE_W = 0                                     # filled in after _COLUMNS
 
 
 def fmt_poh(poh) -> str:
@@ -88,55 +93,139 @@ def _health_chk_cell(d: Disk) -> str:
     return (G if ok else R) + f"{(tag + age)[:12]:<12}" + N
 
 
-def _disk_row(d: Disk) -> str:
-    wear_used = "N/A" if d.wear_val is None else f"{100 - d.wear_val}%"
-    end_left = "N/A" if d.end_left is None else f"{d.end_left:.1f}%"
+def _dev_cell(d: Disk) -> str:
+    """Device node, or '-' when the OS cannot see this disk at all.
+
+    A PERC PD behind a virtual disk has no device node; its megaraid handle lives
+    in `ctrl_dev` and must never be shown here — printing it put the SAME
+    /dev/sdX on every hardware row (F-136)."""
+    return (d.dev or "-").replace("/dev/", "")
+
+
+def _written_cell(d: Disk) -> str:
     if d.written_tb is None:
-        written = "N/A"
-    elif d.is_ssd:
+        return "N/A"
+    if d.is_ssd:
         cap = f"/{d.tbw_rating:.0f}TBW" if d.tbw_rating else "/?"
-        written = f"{d.written_tb:.2f}TB{cap}"
-    else:
-        written = f"{d.written_tb:.2f}TB (HDD)"
-    # POOL cell encodes the array type: SW = ZFS, HW = PERC virtual disk.
+        return f"{d.written_tb:.2f}TB{cap}"
+    return f"{d.written_tb:.2f}TB (HDD)"
+
+
+def _pool_cell(d: Disk) -> str:
+    """POOL cell encodes the array type: SW = ZFS, HW = PERC virtual disk."""
     if d.pool:
-        pool = f"SW:{d.pool}" + (f"/{d.vdev}" if d.vdev else "")
-    elif d.array_type == "HW":
-        pool = f"HW:{d.array_name}"
-    else:
-        pool = "-"
-    return (
-        f"{(d.bay or '-'):<8}{d.dev.replace('/dev/',''):<10}"
-        f"{(d.iface or '?'):<5}{(d.model or '?')[:23]:<24}"
-        f"{(d.serial or 'N/A')[:17]:<18}{fmt_poh(d.poh):<14}"
-        f"{wear_used:<11}{end_left:<11}{written:<19}{d.realloc:<6}"
-        f"{d.health:<9}{pool[:20]:<21}{_status_cell(d)}"
-        f"{_health_chk_cell(d)}{color_level(d.level)}")
+        return f"SW:{d.pool}" + (f"/{d.vdev}" if d.vdev else "")
+    if d.array_type == "HW":
+        return f"HW:{d.array_name}"
+    return "-"
 
 
-def _subhdr(label: str) -> str:
+# One authority for the table's shape: (key, header, width, render, drop_rank).
+#
+# `render` returns the FINISHED cell, already padded to `width` VISIBLE chars —
+# so the colour-wrapped cells (STATUS / HEALTH_CHK / LEVEL) can pad themselves and
+# the layout engine never has to len() a string containing ANSI escapes. Header
+# and row can no longer disagree: they read the same widths from this list, which
+# two hand-maintained format strings could not guarantee.
+#
+# drop_rank 0 = never dropped (identity + verdict: which disk, and is it OK).
+# Anything else is shed in ascending order when the terminal is too narrow.
+_COLUMNS = [
+    ("bay",     "BAY",         8, lambda d: f"{(d.bay or '-'):<8}",          0),
+    ("dev",     "DEV",        10, lambda d: f"{_dev_cell(d):<10}",           9),
+    ("iface",   "IF",          5, lambda d: f"{(d.iface or '?'):<5}",        6),
+    ("model",   "MODEL",      24, lambda d: f"{(d.model or '?')[:23]:<24}",  0),
+    ("serial",  "SERIAL",     18, lambda d: f"{(d.serial or 'N/A')[:17]:<18}", 0),
+    ("poh",     "POWER_ON",   14, lambda d: f"{fmt_poh(d.poh):<14}",         2),
+    ("wear",    "WEAR(used)", 11,
+     lambda d: f"{('N/A' if d.wear_val is None else f'{100 - d.wear_val}%'):<11}", 4),
+    ("end",     "END(left)",  11,
+     lambda d: f"{('N/A' if d.end_left is None else f'{d.end_left:.1f}%'):<11}", 3),
+    ("written", "WRITTEN",    19, lambda d: f"{_written_cell(d):<19}",       1),
+    ("bad",     "BAD",         6, lambda d: f"{d.realloc:<6}",               8),
+    ("health",  "HEALTH",      9, lambda d: f"{d.health:<9}",                0),
+    ("pool",    "POOL/ARRAY", 21, lambda d: f"{_pool_cell(d)[:20]:<21}",     0),
+    ("status",  "STATUS",     10, _status_cell,                              7),
+    ("hchk",    "HEALTH_CHK", 12, _health_chk_cell,                          5),
+    ("level",   "LEVEL",       8, lambda d: color_level(d.level),            0),
+]
+
+TABLE_W = sum(c[2] for c in _COLUMNS)
+
+
+def auto_width() -> int | None:
+    """Usable terminal width, or None when the width is irrelevant/unlimited.
+
+    None whenever stdout is NOT a tty: shutil.get_terminal_size() answers its
+    (80, 24) fallback for a pipe or a file, and honouring that would silently
+    shrink `b2ctl status > report.txt` (F-137). $COLUMNS still wins when set, so
+    the behaviour is testable and scriptable.
+    """
+    env = os.environ.get("COLUMNS")
+    if env and env.isdigit():
+        return int(env)
+    try:
+        if not sys.stdout.isatty():
+            return None
+    except (AttributeError, ValueError):
+        return None
+    return shutil.get_terminal_size().columns
+
+
+def fit_columns(max_width: int | None = None) -> tuple[list, int]:
+    """(columns that fit, number hidden). None/0 = every column."""
+    cols = list(_COLUMNS)
+    if not max_width or max_width >= TABLE_W:
+        return cols, 0
+    # Shed the least useful column still present until it fits. Identity and
+    # verdict columns (rank 0) are never candidates, so a very narrow terminal
+    # overflows slightly rather than losing which disk a row is about.
+    hidden = 0
+    while sum(c[2] for c in cols) > max_width:
+        droppable = [c for c in cols if c[4]]
+        if not droppable:
+            break
+        cols.remove(min(droppable, key=lambda c: c[4]))   # rank 1 goes first
+        hidden += 1
+    return cols, hidden
+
+
+def _subhdr(label: str, width: int) -> str:
     s = f"--- {label} "
-    return C + s + "-" * max(0, TABLE_W - len(s)) + N
+    return C + s + "-" * max(0, width - len(s)) + N
 
 
-def render_table(disks: list[Disk]) -> str:
-    hdr = (f"{'BAY':<8}{'DEV':<10}{'IF':<5}{'MODEL':<24}{'SERIAL':<18}"
-           f"{'POWER_ON':<14}{'WEAR(used)':<11}{'END(left)':<11}"
-           f"{'WRITTEN':<19}{'BAD':<6}{'HEALTH':<9}{'POOL/ARRAY':<21}{'STATUS':<10}"
-           f"{'HEALTH_CHK':<12}{'LEVEL'}")
-    lines = ["=" * TABLE_W, hdr, "-" * TABLE_W]
+def render_table(disks: list[Disk], max_width: int | None = None) -> str:
+    """Render the per-disk table, shedding columns to fit `max_width`.
+
+    `max_width=None` means unlimited (every column) — callers that want terminal
+    fitting pass `ui.auto_width()`. Kept out of this function so rendering stays
+    pure and testable, and so `--full` is a caller-side decision.
+    """
+    cols, hidden = fit_columns(max_width)
+    width = sum(c[2] for c in cols)
+    hdr = "".join(f"{c[1][:c[2] - 1]:<{c[2]}}" for c in cols).rstrip()
+    lines = ["=" * width, hdr, "-" * width]
     # Group hardware (PERC RAID volume members) above software (ZFS + free),
     # but only when both kinds are present — single-type boxes stay flat.
     hw = [d for d in disks if d.array_type == "HW"]
     sw = [d for d in disks if d.array_type != "HW"]
+
+    def row(d):
+        return "".join(c[3](d) for c in cols)
+
     if hw and sw:
-        lines.append(_subhdr("Hardware (PERC RAID)"))
-        lines += [_disk_row(d) for d in hw]
-        lines.append(_subhdr("Software (ZFS / unassigned)"))
-        lines += [_disk_row(d) for d in sw]
+        lines.append(_subhdr("Hardware (PERC RAID)", width))
+        lines += [row(d) for d in hw]
+        lines.append(_subhdr("Software (ZFS / unassigned)", width))
+        lines += [row(d) for d in sw]
     else:
-        lines += [_disk_row(d) for d in hw + sw]
-    lines.append("=" * TABLE_W)
+        lines += [row(d) for d in hw + sw]
+    lines.append("=" * width)
+    if hidden:
+        lines.append(f"{Y}[!] {hidden} column(s) hidden (terminal {max_width} < "
+                     f"{TABLE_W}) — widen the window or use "
+                     f"`b2ctl status --full`{N}")
     return "\n".join(lines)
 
 

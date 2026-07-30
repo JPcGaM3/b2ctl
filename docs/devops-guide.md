@@ -949,6 +949,9 @@ are never touched by `install.sh`.
 | no GHOST row on a box whose drives report no lsblk `SERIAL` | the serial-domain guard in `hba.get_ghost_disks()` (§4) only suppresses when **no** bay-map serial matched **any** OS serial *and* `len(ghosts) <= ` the number of serial-less block devices — a scan-ordering artefact before SMART runs. A surplus is always reported. If the counts do balance and you still suspect a rejected drive, re-check after a full scan (`b2ctl status`, SMART has run by then) or compare the controller drive list against `lsblk` |
 | `set jbod` (or hot-spare / add-vd) fails: `ErrCd 255 Operation not allowed` | the PERC refuses the transition. Two causes share that message. **(a)** the drive carries a **foreign config** — perccli marks it `DG = F` while `State` still reads `UGood`; run `b2ctl raid-foreign` (or `perccli /cN/fall show`), then `--import` / `--clear` (§9.4). **(b)** the controller's JBOD policy is off or unsupported — `perccli /cN show all` → `JBOD = OFF` / `Support JBOD = No`; fix with `perccli /cN set jbod=on`, which b2ctl deliberately will not run for you (controller-wide policy). From v0.20.0 b2ctl refuses (a) up front and prints which of the two it found |
 | a drive reads "available (Unconfigured Good) — set JBOD for ZFS" but nothing works on it | pre-v0.20.0: `enumerate_disks()` copied `pd_state` but dropped the `DG` column, so a foreign drive was indistinguishable from a free one (F-135). Fixed by `Disk.pd_foreign` (§9.4). On an older build, check `perccli /cN/fall show` by hand |
+| every hardware-RAID row shows the SAME `DEV`, and two VDs report identical `USED`/`FREE` | pre-v0.21.0: one `ctrl_dev` was resolved from `perc_devs[0]` and stamped on every member of every volume, so `assemble_storage` measured one filesystem twice (F-136, §9.5). Fixed by `Disk.ctrl_dev` + the NAA/size VD→device join. On an older build, cross-check by hand: `perccli /c0/vall show all \| grep -i 'naa\|Name'` against `lsblk -o NAME,WWN,SIZE,MODEL` |
+| hardware-RAID rows show `DEV = -` | **expected from v0.21.0** — a PD behind a virtual disk has no device node. Identify it by BAY, which every b2ctl action uses anyway (§9.5) |
+| table wraps into unreadable stripes, or scrolls off the top | pre-v0.21.0 the width was a hardcoded 196 with no terminal awareness (F-137, §9.6). From v0.21.0 columns are shed to fit and `status` pages through `less`. If a *piped* run looks truncated, check for an exported `COLUMNS` — `ui.auto_width()` honours it ahead of the isatty check |
 | BAY numbers wrong | edit `bay_map.json` (reverse rule or explicit map); recalibrate with `b2ctl locate <serial>` |
 | BAY all `-` on a SAS box with no vendor tool | the kernel fallback (§3.3a) needs `/sys/class/sas_device/end_device-*` — confirm `mpt3sas`/`mpt2sas` is loaded and that `bay_identifier` is readable and not the **same** value for every drive (a constant is rejected as a useless map). SATA-only and NVMe boxes have no SAS transport at all: bays there come from the vendor map / the `type:nvme` panel |
 | bays read `0:0 … 0:23` where perccli says `9:0 … 9:23` | the sysfs slots got the default enclosure prefix: the PD table named more than one enclosure, so `ITBackend.attach_bays()` refuses to guess (§3.3a step 3). Fix cosmetically with an explicit `map` in the front `type:sas` panel of `bay_map.json` |
@@ -1177,6 +1180,81 @@ fixes.
 `maint`: the bare form is a read-only `fall show` (§9 read path), while
 `--import`/`--clear` require root.
 
+### 9.5 VD → block device, and what `Disk.dev` means (v0.21.0 / F-136)
+
+`Disk.dev` used to carry two meanings at once — the device node to *display*, and
+the file `smartctl -d megaraid,<DID>` opens. For a PD behind a virtual disk only
+the second exists, and `enumerate_disks` resolved it **once**:
+
+```python
+ctrl_dev = perc_devs[0].dev          # first PERC block device found
+...
+d = Disk(dev=ctrl_dev)               # ...stamped on every member of every VD
+```
+
+On a two-volume box that printed the same `/dev/sdq` on every hardware row and —
+worse — made `core.assemble_storage` resolve both volumes to one block device, so
+`vd_usage()` measured one filesystem twice and both volumes reported identical
+`USED`/`FREE`.
+
+**The split.** `Disk.dev` is now the OS device node or `"-"` when there is none;
+`Disk.ctrl_dev` is the megaraid ioctl handle. Consumers follow the meaning they
+actually want:
+
+| consumer | field | why |
+|---|---|---|
+| `ui` DEV column | `dev` | `-` is the truth for a hidden PD; identify it by BAY |
+| `smart.read()` | `ctrl_dev` when `smart_dtype` is set | passing `dev` would hand smartctl a literal `-` |
+| `core.assemble_storage()` | `ctrl_dev` | per-volume, so each VD measures its own filesystem |
+| `locate.blink_disk()` | neither | PERC PDs return via the perccli/enc:slot path first |
+| `cli._status --locate` | `dev` **or** `is_perc_pd(d)` | the ghost filter (`dev not in ('-','')`) would otherwise skip every failing hardware member |
+
+**The join** (`_vd_dev_map`, keyed `"<controller>:<vd>"` because two controllers
+can each own a `v0`), in order of certainty:
+
+1. **`SCSI NAA Id` ↔ lsblk `WWN`**, both through `_norm_wwn` — exact. The NAA is
+   parsed out of the `VDn Properties` block of `perccli /cN/vall show all`, text
+   `_vall_data()` already fetches, so this costs no extra subprocess.
+2. **Size** — `_pd_size_bytes` + `_size_match` (v0.19). Note the guard: those
+   answer *True when either side is unknown*, which is right where they narrow
+   F-133's suppression but wrong here, where an unparseable size would let a VD
+   claim the first free device at random. `_vd_dev_map` therefore requires **both**
+   sizes to be known before trusting a size match.
+3. **Nothing** — the caller keeps the controller-wide `ctrl_dev`, so a single-VD
+   box behaves exactly as before.
+
+A device is claimed at most once, so two same-size volumes cannot both grab it.
+
+### 9.6 Terminal-aware table (v0.21.0 / F-137)
+
+`ui.TABLE_W` was a hand-maintained `196` and nothing in b2ctl had ever called
+`get_terminal_size()` or `isatty()`. A 24-disk box overflowed both axes.
+
+- **One column spec.** `ui._COLUMNS` is a list of
+  `(key, header, width, render, drop_rank)`. The header and the row are generated
+  from the same list, replacing two independent format strings that had to agree
+  on fifteen widths by hand. `TABLE_W` is now `sum(width)`.
+- **`render` returns the finished cell**, already padded to `width` *visible*
+  chars. That is deliberate: `_status_cell` / `_health_chk_cell` / `color_level`
+  embed ANSI escapes, so the layout engine must never `len()` a rendered cell.
+- **`drop_rank`** — `0` = never dropped (BAY, MODEL, SERIAL, HEALTH, POOL/ARRAY,
+  LEVEL: which disk, and is it OK). Others shed in ascending order:
+  WRITTEN → POWER_ON → END(left) → WEAR(used) → HEALTH_CHK → IF → STATUS → BAD →
+  DEV. A very narrow terminal overflows slightly rather than losing identity.
+- **`ui.auto_width()`** returns `$COLUMNS`, else the terminal width, else **None
+  when stdout is not a tty**. That last guard matters: `get_terminal_size()`
+  answers its `(80, 24)` fallback for a pipe, so honouring it would silently
+  reshape `b2ctl status > report.txt`.
+- **`render_table(disks, max_width=None)`** stays pure — `None` = unlimited.
+  Callers decide; `--full` is a caller-side choice.
+- **`cli._page()`** pipes to `$PAGER`, else `less -SRFX`, only when stdout is a
+  tty *and* the output is taller than the screen. `-S` chops long lines so the
+  wide table scrolls sideways instead of wrapping; `-R` keeps the level colours;
+  `-F` quits if it fits; `-X` leaves the output on screen. A missing or
+  unspawnable pager falls back to `print` — output is never lost.
+- **`watch` never pages.** It owns the terminal for its `select()` hotplug loop;
+  handing that to `less` would freeze the poll. It gets column fitting only.
+
 ---
 
 ## 10. Config file (`config.py`)
@@ -1369,6 +1447,7 @@ python3 sim/simctl show           # disks + pools + mode
 |--------|------|
 | backends | both — `simctl mode it` (sas2ircu) / `mode raid` (perccli) |
 | audit isolation | sim writes `sim/var/ops.jsonl` + `sim/var/snapshots/`, **never** `/var/log/b2ctl/` → impossible to confuse with real ops; `b2ctl log`/`rollback` work in the sim |
+| two virtual disks (v0.21.0) | the fake perccli builds **vd0 + vd1** (`_simstate.RAID_VDS`), each with a `SCSI NAA Id`, a matching lsblk `WWN`, its own byte size and its own mounted filesystem. With a single VD the F-136 bug is invisible — every member resolved to the same device and nothing looked wrong; two volumes with different `USED`/`FREE` are what proves the fix |
 | failure paths (v0.20.0) | `simctl foreign <bay>` is the fake controller's **first modelled refusal**: the PD row gets `DG=F`, `/cN/fall show` lists it, and `set jbod` on that slot returns the real `ErrCd 255 Operation not allowed` text with exit 1 instead of the blanket success. `/cN/fall import\|del` clears the flag, controller-wide |
 | limitations | `by_id=""` (uses `/dev/sdX` tokens, not `ata-`/`wwn-`), LED locate = message only, models b2ctl logic/flow — **not** real ZFS (no checksum/scrub/real resilver timing) |
 | smoke test | `tests/test_sim_smoke.py` drives `sim/run` via subprocess |
@@ -1391,6 +1470,7 @@ gone (blind to a PERC). Enumeration + SMART:
 | bay→serial | `perccli /cN/eall/sall show all` | **any** `Drive /cN/eE/sS` header + `SN =` (v0.19.0: the header no longer has to say `Device attributes`) |
 | bay→WWN (v0.19.0) | same text, no extra command | `WWN =` per drive → the serial-independent PD↔block-device join (§9.3) |
 | foreign flag (v0.20.0) | same text, no extra command | the PD row's **DG** column: `F` → `Disk.pd_foreign` (§9.4) |
+| VD → block device (v0.21.0) | `perccli /cN/vall show all`, already fetched | `SCSI NAA Id` per VD → joined to lsblk `WWN` so each volume gets its own `Disk.ctrl_dev` (§9.5) |
 | member SMART | `smartctl -a -d megaraid,<DID> /dev/sda` | ATA attrs (POH, LBAs written, wear), `test result: PASSED` |
 | VD block dev | `lsblk -dnb -P` MODEL contains `PERC` | which `/dev/sdX` is the virtual disk (dropped from rows, and excluded from every join table) |
 

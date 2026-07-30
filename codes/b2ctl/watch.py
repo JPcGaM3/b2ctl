@@ -535,7 +535,9 @@ def _cmd_refresh(tbw) -> None:
     _reconcile_scrub_history()      # sync background scrub completions (mutating, watch-only)
     disks = core.scan(tbw)
     pools = zfs.list_pools()
-    print("\n" + ui.render_table(disks))
+    # Auto-fit only — watch NEVER pages. It owns the terminal for its select()
+    # hotplug loop, and handing that to `less` would freeze the poll (F-137).
+    print("\n" + ui.render_table(disks, ui.auto_width()))
     vols = _backend.get_backend().raid_volumes()
     print(ui.render_storage(core.assemble_storage(disks, pools, vols)))
     print(ui.render_details(disks, pools))

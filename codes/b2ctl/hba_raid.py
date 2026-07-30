@@ -309,7 +309,7 @@ def _parse_vall(text: str) -> tuple[list[dict], list[dict]]:
     """Parse `perccli /cN/vall show all`.
 
     Returns (volumes, members):
-      volumes: {"vd","raid","state","size","name"}
+      volumes: {"vd","raid","state","size","name","naa"}
       members: {"bay","did","state","dg","size","intf","med","model","vd","raid"}
 
     Member rows come from the per-VD 'PDs for VD N' table, e.g.::
@@ -319,9 +319,14 @@ def _parse_vall(text: str) -> tuple[list[dict], list[dict]]:
 
     Model is multi-word; parse positionally (4 fixed cols, size = 2 tokens,
     model = middle, Sp = last token).
+
+    `naa` is the `SCSI NAA Id` from that VD's 'VDn Properties' block — the exact
+    key that maps a volume to the /dev/sdX the OS gave it (F-136). '' when the
+    build does not print it; the caller falls back to a size match.
     """
     vols: list[dict] = []
     members: list[dict] = []
+    by_vd: dict[str, dict] = {}
     cur_vd: str | None = None
     cur_raid: str | None = None
     for line in text.splitlines():
@@ -330,15 +335,28 @@ def _parse_vall(text: str) -> tuple[list[dict], list[dict]]:
         if mv:
             cur_vd = mv.group(1)
             continue
+        # 'VD0 Properties :' — the block that carries SCSI NAA Id. Set cur_vd from
+        # it explicitly rather than trusting the preceding '/cN/vX :' header to
+        # still be in scope.
+        mp = re.match(r"VD(\d+)\s+Properties", s, re.I)
+        if mp:
+            cur_vd = mp.group(1)
+            continue
+        mn = re.match(r"SCSI\s+NAA\s+Id\s*=\s*(\S+)", s, re.I)
+        if mn and cur_vd in by_vd:
+            by_vd[cur_vd]["naa"] = mn.group(1)
+            continue
         tok = s.split()
         # VD summary row: "0/0 RAID1 Optl RW Yes RWBD - OFF 640.0 GB MainSSD"
         if (len(tok) >= 10 and re.match(r"^\d+/\d+$", tok[0])
                 and tok[1].upper().startswith("RAID")):
             vd = tok[0].split("/")[1]
             cur_raid = tok[1]
-            vols.append({"vd": vd, "raid": tok[1], "state": tok[2],
-                         "size": f"{tok[8]} {tok[9]}",
-                         "name": " ".join(tok[10:])})
+            row = {"vd": vd, "raid": tok[1], "state": tok[2],
+                   "size": f"{tok[8]} {tok[9]}",
+                   "name": " ".join(tok[10:]), "naa": ""}
+            vols.append(row)
+            by_vd[vd] = row
             continue
         # PD row: starts "EID:Slt DID State DG  Size Unit Intf Med ..."
         if len(tok) >= 12 and re.match(r"^\d+:\d+$", tok[0]):
@@ -348,6 +366,65 @@ def _parse_vall(text: str) -> tuple[list[dict], list[dict]]:
                 "model": " ".join(tok[11:-1]), "vd": cur_vd, "raid": cur_raid,
             })
     return vols, members
+
+
+def _vd_key(v: dict) -> str:
+    """Map key for a volume: '<controller>:<vd>'. Two controllers can each own a
+    v0, so the vd number alone is not unique."""
+    return f"{v.get('controller', CONTROLLER)}:{v.get('vd')}"
+
+
+def _vd_dev_map(vols: list[dict], perc_devs: list) -> dict[str, str]:
+    """Map each virtual disk to the block device the OS gave IT.
+
+    Before this, one `ctrl_dev` was resolved from `perc_devs[0]` and stamped on
+    every member of every VD. On a box with two volumes that printed the same
+    /dev/sdX on six hardware rows and — worse — made `core.assemble_storage`
+    measure ONE filesystem twice, so both volumes reported identical used/free
+    (F-136).
+
+    Joined in order of certainty:
+
+      1. perccli's `SCSI NAA Id` against the block device's lsblk WWN, through
+         the shared `_norm_wwn` (both sides print the same NAA in different
+         punctuation/case). Exact.
+      2. VD size against the device's byte size, via `_pd_size_bytes` +
+         `_size_match` — perccli prints BINARY sizes under decimal labels, which
+         those already handle. Only same-size volumes can tie.
+      3. Nothing: the caller keeps the old controller-wide fallback, so a
+         single-VD box behaves exactly as before.
+
+    A device is claimed at most once, so two same-size VDs cannot both grab it.
+    """
+    out: dict[str, str] = {}
+    taken: set[str] = set()
+    by_wwn = {}
+    for d in perc_devs:
+        w = _norm_wwn(getattr(d, "wwn", ""))
+        if w:
+            by_wwn[w] = d.dev
+    for v in vols:
+        dev = by_wwn.get(_norm_wwn(v.get("naa", "")))
+        if dev and dev not in taken:
+            out[_vd_key(v)] = dev
+            taken.add(dev)
+    for v in vols:                      # pass 2: size, only for what NAA missed
+        key = _vd_key(v)
+        if key in out:
+            continue
+        # _size_match answers True when EITHER side is unknown — correct where it
+        # narrows F-133's suppression, wrong here, where an unparseable size would
+        # let a VD claim the first free device at random. Demand both sizes.
+        if _pd_size_bytes(v.get("size", "")) is None:
+            continue
+        for d in perc_devs:
+            if d.dev in taken or not getattr(d, "size_bytes", None):
+                continue
+            if _size_match(v.get("size", ""), d.size_bytes):
+                out[key] = d.dev
+                taken.add(d.dev)
+                break
+    return out
 
 
 def _vall_data() -> tuple[list[dict], list[dict]]:
@@ -528,12 +605,15 @@ def enumerate_disks() -> list[Disk]:
     if not have_tool():
         return raw
 
-    _vols, members = _vall_data()
+    vols, members = _vall_data()
     perc_devs = [d for d in raw if _is_perc_vd(d.model)]
     perc_dev_set = {d.dev for d in perc_devs}
-    # Any block device on the controller is a valid megaraid SMART target.
+    # Any block device on the controller is a valid megaraid SMART target, so this
+    # is the fallback ioctl handle. It is NOT a member's device node — resolving
+    # it once and stamping it on every row is exactly the F-136 bug.
     ctrl_dev = (perc_devs[0].dev if perc_devs
                 else (raw[0].dev if raw else "/dev/sda"))
+    vd_dev = _vd_dev_map(vols, perc_devs)   # per-VD handle where resolvable (F-136)
     # Fetch eall/sall ONCE per controller and reuse the text for both the
     # serial map and the non-member PD pass — the old code ran it twice, plus a
     # third time inside bay_map() (F-040/F-041).
@@ -551,7 +631,11 @@ def enumerate_disks() -> list[Disk]:
     member_disks: list[Disk] = []
     member_bays = set()
     for m in members:
-        d = Disk(dev=ctrl_dev)
+        # dev='-' : a VD member is invisible to the OS, it HAS no device node.
+        # The megaraid handle lives in ctrl_dev, per-VD so two volumes can never
+        # collapse onto one filesystem in the storage summary (F-136).
+        d = Disk(dev="-")
+        d.ctrl_dev = vd_dev.get(_vd_key(m)) or ctrl_dev
         d.bay = m["bay"]
         d.ctrl_slot = m["bay"]          # raw perccli enc:slot (never remapped)
         d.ctrl = m.get("controller")    # which /cN this PD lives on (F-085)
@@ -615,7 +699,10 @@ def enumerate_disks() -> list[Disk]:
                 id(r) not in claimed and _model_match(pd["model"], r.model)
                 and _size_match(pd["size"], r.size_bytes) for r in os_disks):
             continue                            # this PD IS one of those OS disks
-        d = Disk(dev=ctrl_dev)                  # hidden drive: synthesise + megaraid SMART
+        # Hidden drive: synthesise + megaraid SMART. It belongs to no VD, so it
+        # keeps the controller-wide handle — and, like a member, no device node.
+        d = Disk(dev="-")
+        d.ctrl_dev = ctrl_dev
         d.bay = pd["bay"]
         d.ctrl_slot = pd["bay"]                 # raw perccli enc:slot (never remapped)
         d.ctrl = idx                            # which /cN this PD lives on (F-085)

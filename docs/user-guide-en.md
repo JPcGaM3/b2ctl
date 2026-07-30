@@ -981,6 +981,30 @@ state was reached. If something looks wrong:
 
 ## 8. Warnings
 
+### The table adapts to your terminal (v0.21.0)
+
+On a box with many disks the table used to run off the screen in both directions.
+It now fits itself to the window:
+
+- **Too narrow?** The least important columns are dropped, least-useful first
+  (`WRITTEN` → `POWER_ON` → `END(left)` → `WEAR(used)` → `HEALTH_CHK` → …), and a
+  note says how many were hidden. **BAY, MODEL, SERIAL, HEALTH, POOL/ARRAY and
+  LEVEL are never dropped** — you can always tell which disk a row is and whether
+  it is healthy.
+- **Too tall?** `b2ctl status` opens a pager (`less`), so nothing scrolls away.
+  Arrow keys scroll, including sideways for any column that was chopped; `q` quits.
+
+```
+[!] 5 column(s) hidden (terminal 120 < 186) — widen the window or use `b2ctl status --full`
+```
+
+Nothing changes when you pipe or redirect: `b2ctl status > report.txt` and
+`b2ctl status | grep …` always get the full table and never a pager. `--full`
+forces every column, `--no-pager` disables paging, and `PAGER=cat` does too.
+
+`watch` fits its columns the same way but **never** pages — it needs the terminal
+for hot-plug detection.
+
 ### Bay numbers may be scrambled
 
 On this Dell 12G backplane in IT mode, the controller reports scrambled slot
@@ -1023,6 +1047,8 @@ ESP partition **manually**. b2ctl does not touch Proxmox boot config.
 | `b2ctl status` | health table + pool summary + details block |
 | `b2ctl status --locate` | same + blink LEDs on WARNING/CRITICAL disks |
 | `b2ctl status --json` | JSON output |
+| `b2ctl status --full` | every column at full width, no pager (for copy/paste) |
+| `b2ctl status --no-pager` | never page, even when taller than the screen |
 | `b2ctl --dry-run <cmd>` | preview what commands would run — no writes |
 | `b2ctl locate <bay\|serial\|dev> [secs]` | blink one disk's LED (~5s) |
 
@@ -1158,6 +1184,26 @@ Storage summary:
 - **USED/FREE** — for software, from the pool; for hardware, read from the
   volume's **mounted filesystem** via `lsblk`. If the hardware volume is raw or
   not mounted, USED/FREE show `-` (there's no filesystem to measure).
+
+### Why hardware-RAID rows show `DEV = -` (v0.21.0)
+
+A drive that lives *behind* a PERC virtual disk is invisible to the operating
+system — it has no `/dev/sdX` of its own. The DEV column says so:
+
+```
+BAY     DEV    IF   MODEL              ... POOL/ARRAY
+32:12   -      SAS  X357_S164A3T8ATE   ... HW:vd1/raid10
+32:22   -      SATA SSDSC2KG480G8R     ... HW:vd0/raid1
+32:0    sda    SAS  DL2400MM0159       ... SW:tank/mirror-0
+```
+
+Before v0.21.0 the column printed the *virtual disk's* device (`sdq`) on every
+hardware row — the same value for every drive, and the same value even across two
+different volumes. Identify these drives by their **BAY**, which is what every
+b2ctl action uses anyway.
+
+The side effect worth knowing: with two hardware volumes, the storage summary now
+measures each one separately. It used to report identical `USED`/`FREE` for both.
 
 ### Replacing a failed RAID disk
 

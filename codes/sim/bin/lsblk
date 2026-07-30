@@ -12,17 +12,27 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import _simstate as S  # noqa: E402
 
-# Synthetic PERC virtual-disk block device (name chosen to avoid colliding with
-# any real sim disk); model triggers hba_raid._is_perc_vd.
-_VD = {"name": "sdz", "size": 2_000_000_000_000, "serial": "", "tran": "sas",
-       "rota": 0, "model": "PERC H730P Mini"}
+def _vd_blockdevs():
+    """One block device per synthetic VD (names chosen not to collide with a real
+    sim disk); model triggers hba_raid._is_perc_vd, WWN carries the VD's NAA so
+    the per-VD device map can join them (F-136)."""
+    return [{"name": v["dev"], "size": v["bytes"], "serial": "", "tran": "sas",
+             "rota": 0, "model": "PERC H730P Mini", "wwn": "0x" + v["naa"],
+             "mount": v.get("mount", ""), "fssize": v.get("fssize"),
+             "fsused": v.get("fsused")}
+            for v in S.RAID_VDS]
 
 
 def _emit(d, fields):
     vals = {
         "NAME": d["name"], "SIZE": str(d["size"]), "SERIAL": d.get("serial", ""),
         "MODEL": d["model"], "TRAN": d["tran"], "ROTA": str(d["rota"]),
-        "TYPE": "disk",
+        "TYPE": "disk", "WWN": d.get("wwn", ""),
+        # Filesystem columns: only the VD block devices carry them, so
+        # blockdev.vd_usage() gets a DIFFERENT answer per volume (F-136).
+        "MOUNTPOINT": d.get("mount", ""),
+        "FSSIZE": str(d["fssize"]) if d.get("fssize") else "",
+        "FSUSED": str(d["fsused"]) if d.get("fsused") else "",
     }
     print(" ".join(f'{f}="{vals.get(f, "")}"' for f in fields))
 
@@ -39,8 +49,8 @@ def main():
     if dev_arg is not None:
         # Targeted query (e.g. vd_usage) — passthrough, no RAID remodeling.
         want = dev_arg.replace("/dev/", "")
-        for d in state["disks"]:
-            if d.get("present") and d["name"] == want:
+        for d in state["disks"] + _vd_blockdevs():
+            if d.get("present", True) and d["name"] == want:
                 _emit(d, fields)
         return 0
 
@@ -51,7 +61,8 @@ def main():
             continue
         _emit(d, fields)
     if raid:
-        _emit(_VD, fields)      # the VD the front drives hide behind
+        for vd in _vd_blockdevs():    # the VDs the front drives hide behind
+            _emit(vd, fields)
     return 0
 
 

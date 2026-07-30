@@ -986,6 +986,27 @@ b2ctl rollback 20260617-143022-replace
 
 ## 8. ข้อควรระวัง
 
+### 📐 ตารางปรับตามขนาดจอเอง (v0.21.0)
+
+เครื่องที่มีดิสก์เยอะ ตารางเคยล้นจอทั้งแนวกว้างและแนวสูง ตอนนี้มันปรับให้พอดีหน้าต่างเอง:
+
+- **จอแคบไป?** ตัด column ที่สำคัญน้อยสุดออกก่อน (`WRITTEN` → `POWER_ON` →
+  `END(left)` → `WEAR(used)` → `HEALTH_CHK` → …) แล้วบอกว่าซ่อนไปกี่อัน
+  **BAY, MODEL, SERIAL, HEALTH, POOL/ARRAY, LEVEL ไม่ถูกตัดเด็ดขาด** — ดูออกเสมอว่าแถวไหน
+  คือดิสก์ลูกไหน และมันปกติหรือเปล่า
+- **สูงเกินจอ?** `b2ctl status` จะเปิด pager (`less`) ให้ ไม่มีอะไรเลื่อนหายอีก
+  ปุ่มลูกศรเลื่อนได้ รวมทั้งเลื่อนซ้ายขวาไปดู column ที่ถูกตัด กด `q` ออก
+
+```
+[!] 5 column(s) hidden (terminal 120 < 186) — widen the window or use `b2ctl status --full`
+```
+
+pipe หรือ redirect ไม่โดนผลกระทบ: `b2ctl status > report.txt` และ
+`b2ctl status | grep …` ได้ตารางเต็มเสมอ และไม่เข้า pager `--full` บังคับโชว์ทุก column,
+`--no-pager` ปิด pager, หรือตั้ง `PAGER=cat` ก็ได้เหมือนกัน
+
+`watch` ปรับ column เหมือนกัน แต่ **ไม่เข้า pager** เพราะมันต้องใช้ terminal ตรวจจับ hot-plug
+
 ### ⚠️ อย่าผสม SAS กับ SATA โดยไม่ทดสอบก่อน
 
 การเอาดิสก์ SAS มาเป็น spare ในพูลที่เป็น SATA ล้วน อาจมีปัญหาได้ ถ้าไม่แน่ใจ ให้ใช้
@@ -1019,6 +1040,8 @@ b2ctl rollback 20260617-143022-replace
 | `sudo b2ctl status` | ดูตารางสุขภาพดิสก์ครั้งเดียว |
 | `sudo b2ctl status --locate` | ดูตาราง + กะพริบไฟดิสก์ที่มีปัญหา |
 | `sudo b2ctl status --json` | แสดงผลเป็น JSON |
+| `sudo b2ctl status --full` | โชว์ทุก column เต็มความกว้าง ไม่เข้า pager (ไว้ copy/paste) |
+| `sudo b2ctl status --no-pager` | ไม่ต้องเข้า pager ถึงตารางจะสูงเกินจอ |
 | `sudo b2ctl watch` | ⭐ เข้าโหมดเฝ้าดู (แนะนำ) |
 | `sudo b2ctl --dry-run watch` | เข้าโหมดเฝ้าดูแบบ dry-run (ไม่เปลี่ยนแปลงจริง) |
 | `sudo b2ctl locate <bay/serial/sdX>` | กะพริบไฟดิสก์ตัวนั้น |
@@ -1118,6 +1141,25 @@ Storage summary:
 - **NAME** — ชื่อ volume ของ hardware (เช่น `MainSSD`) / ชื่อ pool ของ software
 - **USED/FREE** — software เอาจาก pool; hardware อ่านจาก **filesystem ที่ mount**
   ของ volume ผ่าน `lsblk` ถ้า volume เป็น raw/ไม่ได้ mount จะขึ้น `-` (ไม่มี FS ให้วัด)
+
+### ทำไมแถว hardware RAID ขึ้น `DEV = -` (v0.21.0)
+
+ดิสก์ที่อยู่ *หลัง* PERC virtual disk — OS มองไม่เห็นมันเลย มันไม่มี `/dev/sdX` ของตัวเอง
+column DEV จึงบอกตรงๆ ว่าไม่มี:
+
+```
+BAY     DEV    IF   MODEL              ... POOL/ARRAY
+32:12   -      SAS  X357_S164A3T8ATE   ... HW:vd1/raid10
+32:22   -      SATA SSDSC2KG480G8R     ... HW:vd0/raid1
+32:0    sda    SAS  DL2400MM0159       ... SW:tank/mirror-0
+```
+
+ก่อน v0.21.0 column นี้โชว์ device ของ **virtual disk** (`sdq`) ให้ทุกแถว — ค่าเดียวกันหมด
+ทุกลูก และซ้ำกันข้าม volume ด้วย ให้ระบุดิสก์ด้วย **BAY** แทน ซึ่งเป็นสิ่งที่ทุกคำสั่งของ b2ctl
+ใช้อยู่แล้ว
+
+ผลพลอยได้ที่ควรรู้: เครื่องที่มี 2 hardware volume ตอนนี้ storage summary วัดแยกกันจริงแล้ว
+เมื่อก่อนโชว์ `USED`/`FREE` เท่ากันทั้งสองแถว
 
 ### เปลี่ยนดิสก์ RAID ที่เสีย
 

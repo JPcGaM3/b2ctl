@@ -97,6 +97,32 @@ def assign_bays(disks: list, bm: dict, panels: list) -> None:
                 break
 
 
+def assign_sysfs_bays(disks: list, panels: list, enc: str = "0",
+                      slots: dict | None = None) -> None:
+    """Fill any disk still WITHOUT a bay from the kernel's SAS transport class.
+
+    Runs after assign_bays, never instead of it: a vendor tool's label always
+    wins where it exists, so an R620's sas2ircu + reverse_slots output is
+    untouched. This only covers what the serial join could not reach — a SAS
+    drive before SMART has published its serial, or a perccli build that prints
+    no per-drive detail section (F-134).
+
+    `enc` is a display prefix only; the caller passes the enclosure number the
+    vendor tool already uses so labels stay '9:0', not '0:0'. Slot numbers come
+    from blockdev.sas_bay_slots(), which needs no serial at all, and the result
+    goes through the same front-panel remap as every other bay.
+    """
+    from . import blockdev
+    if slots is None:
+        slots = blockdev.sas_bay_slots()
+    if not slots:
+        return
+    for d in disks:
+        if d.bay or d.dev not in slots:
+            continue
+        d.bay = remap_slot(f"{enc}:{slots[d.dev]}", panels)
+
+
 def remap_slot(enc_slot: str, panels: list) -> str:
     """Remap a sas/PERC 'enc:slot' via a front (type=sas) panel.
 

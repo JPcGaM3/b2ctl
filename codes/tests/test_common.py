@@ -58,6 +58,26 @@ class TestDiskAssessment:
         assert d.level == "CONFIG"
         assert any("unassigned" in r for r in d.reasons)
 
+    def test_foreign_perc_drive_reports_foreign_not_available(self):
+        # F-135: perccli reports a foreign drive as UGood with DG=F. Grading it
+        # only by pd_state advertised "available … set JBOD for ZFS" for a drive
+        # the firmware refuses every transition on.
+        d = _disk(pool=None, vdev=None, vdev_state=None)
+        d.pd_state = "UGood"; d.smart_dtype = "megaraid,9"; d.pd_foreign = True
+        assess(d)
+        assert d.level == "CONFIG"          # config problem, not a failing drive
+        assert any("FOREIGN" in r for r in d.reasons)
+        assert not any("Unconfigured Good" in r for r in d.reasons)
+
+    def test_foreign_exposed_drive_is_flagged_too(self):
+        # An OS-exposed foreign drive has no megaraid passthrough, so it would
+        # otherwise fall through to the plain 'unassigned' advisory.
+        d = _disk(pool=None, vdev=None, vdev_state=None, dev="/dev/sdb")
+        d.pd_state = "UGood"; d.pd_foreign = True
+        assess(d)
+        assert d.level == "CONFIG"
+        assert any("FOREIGN" in r for r in d.reasons)
+
     def test_critical_bad_sectors(self):
         d = _disk(realloc=5)
         assess(d)

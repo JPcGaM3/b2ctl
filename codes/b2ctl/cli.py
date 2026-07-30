@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 
 from . import core, watch, zfs, spec, locate as locatemod, common
@@ -24,26 +25,68 @@ from . import ui
 from ._version import __version__      # single source of truth (F-066)
 
 
+def _page(text: str, no_pager: bool = False) -> None:
+    """Print `text`, handing it to a pager when it would scroll off the screen.
+
+    Only when stdout is a terminal: a pipe or a redirect must get the plain text
+    (and its full width) or `b2ctl status > report.txt` silently changes shape.
+    `less -SRFX` chops long lines so the wide table scrolls SIDEWAYS instead of
+    wrapping into unreadable stripes (-S), keeps the level colours (-R), skips
+    paging if it turns out to fit (-F), and leaves the output on screen (-X).
+    $PAGER wins when set — `PAGER=cat` disables paging (F-137).
+    """
+    import shlex
+    import subprocess as _sp
+    try:
+        tty = sys.stdout.isatty()
+    except (AttributeError, ValueError):
+        tty = False
+    if no_pager or not tty:
+        print(text)
+        return
+    if len(text.splitlines()) < shutil.get_terminal_size().lines:
+        print(text)
+        return
+    argv = shlex.split(os.environ.get("PAGER") or "less -SRFX")
+    if not argv or not shutil.which(argv[0]):
+        print(text)                     # no pager installed — never lose output
+        return
+    try:
+        _sp.run(argv, input=text, text=True)
+    except OSError:
+        print(text)
+
+
 def _status(args) -> int:
     tbw = spec.load()
     disks = core.scan(tbw)
     if args.json:
         print(json.dumps([vars(d) for d in disks], indent=2, default=str))
         return 0
-    print(ui.render_table(disks))
+    width = None if getattr(args, "full", False) else ui.auto_width()
     pools = zfs.list_pools()
     vols = _backend_mod.get_backend().raid_volumes()
-    print(ui.render_storage(core.assemble_storage(disks, pools, vols)))
-    print(ui.render_details(disks, pools))
+    # Rendered as ONE string so the pager decision is made on the real height —
+    # table + summary + details together are what overflows, not any one block.
+    _page("\n".join([
+        ui.render_table(disks, width),
+        ui.render_storage(core.assemble_storage(disks, pools, vols)),
+        ui.render_details(disks, pools),
+    ]), no_pager=getattr(args, "no_pager", False) or getattr(args, "full", False))
 
     if args.locate:
         # F-001/F-002: skip ghosts (no /dev node) and rebuilding/resilvering
         # disks (CLAUDE.md §9), and route each survivor through blink_disk — PERC
         # PDs light their slot LED via perccli by enc:slot, raw disks via
         # ledctl/dd — never a raw dd fan-out on the shared VD device.
+        # A PERC PD now also reports dev='-' (F-136) but IS locatable — perccli
+        # lights its slot by enc:slot. Gate on "has no way to be found" (ghost),
+        # not on "has no device node", or every failing hardware member would be
+        # silently skipped here.
         risky = [d for d in disks
                  if d.level in ("WARNING", "CRITICAL")
-                 and d.dev not in ("-", "") and d.health != "GHOST"
+                 and (d.dev not in ("-", "") or locatemod.is_perc_pd(d))
+                 and d.health != "GHOST"
                  and not locatemod.is_resilvering(d)]
         if not risky:
             print(f"{G}[OK] nothing at risk to blink (ghosts/resilvering disks skipped){N}")
@@ -325,6 +368,13 @@ def _raid_create(args) -> int:
 def _raid_del(args) -> int:
     from . import raid_actions
     return raid_actions.delete_vd(args.vd)
+
+
+def _raid_foreign(args) -> int:
+    from . import raid_actions
+    action = ("import" if getattr(args, "do_import", False)
+              else "clear" if getattr(args, "clear", False) else "show")
+    return raid_actions.foreign(action, getattr(args, "controller", None))
 
 
 def _check(_args) -> int:
@@ -651,6 +701,10 @@ def build_parser() -> argparse.ArgumentParser:
     st_mode.add_argument("--json", action="store_true", help="machine-readable output")
     st.add_argument("--seconds", type=_pos_int, default=locatemod.DEFAULT_SECONDS,
                     help="blink duration in seconds (default 5, must be > 0)")
+    st.add_argument("--full", action="store_true",
+                    help="every column at full width, no pager (for copy/paste)")
+    st.add_argument("--no-pager", action="store_true",
+                    help="never page, even when the output is taller than the screen")
     st.set_defaults(func=_status)
 
     w = sub.add_parser("watch", help="interactive hotplug-aware loop")
@@ -847,20 +901,38 @@ def build_parser() -> argparse.ArgumentParser:
     rd_p.add_argument("vd", type=int, help="virtual disk number, e.g. 0")
     rd_p.set_defaults(func=_raid_del)
 
+    rf_p = sub.add_parser("raid-foreign",
+                          help="show / import / clear a PERC foreign configuration "
+                               "(a foreign drive is refused JBOD, hot-spare and "
+                               "volume-create until it is resolved)")
+    rf_act = rf_p.add_mutually_exclusive_group()
+    rf_act.add_argument("--import", dest="do_import", action="store_true",
+                        help="import the foreign config — CONTROLLER-WIDE")
+    rf_act.add_argument("--clear", action="store_true",
+                        help="discard the foreign config — CONTROLLER-WIDE, DESTRUCTIVE")
+    rf_p.add_argument("-c", "--controller", type=int, default=None,
+                      help="controller index (default 0)")
+    rf_p.set_defaults(func=_raid_foreign)
+
     return p
 
 
 _ROOT_EXEMPT = ("version", "check", "config", "log", "rollback",
-                "install", "update", "maint")
+                "install", "update", "maint", "raid-foreign")
 
 
 def _needs_root(args) -> bool:
     """Read-only commands run without root. `maint` is special: the bare history
     view (no subcommand / --log) and `maint health --status` are read-only; the
-    mutating subcommands (scrub / trim / health <dev>) need root."""
+    mutating subcommands (scrub / trim / health <dev>) need root.
+    `raid-foreign` is the same shape: bare = `perccli /cN/fall show` (read-only),
+    --import/--clear mutate the controller."""
     cmd = getattr(args, "cmd", None)
     if cmd not in _ROOT_EXEMPT:
         return True
+    if cmd == "raid-foreign":
+        return bool(getattr(args, "do_import", False)
+                    or getattr(args, "clear", False))
     if cmd != "maint":
         return False                          # other exempt cmds never need root
     mc = getattr(args, "maint_cmd", None)

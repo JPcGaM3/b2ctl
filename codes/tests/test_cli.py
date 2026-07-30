@@ -764,6 +764,103 @@ class TestMaintVerbs(unittest.TestCase):
                 ns = cli.build_parser().parse_args(argv)
                 self.assertEqual(cli._needs_root(ns), not exempt)
 
+    def test_raid_foreign_routes_to_raid_actions(self):
+        """F-135: `raid-foreign` maps to the show/import/clear contract."""
+        import b2ctl.cli as cli
+        for argv, action, ctrl in ((["raid-foreign"], "show", None),
+                                   (["raid-foreign", "--import"], "import", None),
+                                   (["raid-foreign", "--clear"], "clear", None),
+                                   (["raid-foreign", "--clear", "-c", "1"], "clear", 1)):
+            with self.subTest(argv=argv):
+                ns = cli.build_parser().parse_args(argv)
+                with patch("b2ctl.raid_actions.foreign", return_value=0) as fn:
+                    ns.func(ns)
+                fn.assert_called_once_with(action, ctrl)
+
+    def test_raid_foreign_import_and_clear_are_exclusive(self):
+        import b2ctl.cli as cli
+        with self.assertRaises(SystemExit):
+            cli.build_parser().parse_args(["raid-foreign", "--import", "--clear"])
+
+    def test_status_pager_flags_parse(self):
+        import b2ctl.cli as cli
+        ns = cli.build_parser().parse_args(["status", "--full", "--no-pager"])
+        self.assertTrue(ns.full)
+        self.assertTrue(ns.no_pager)
+        plain = cli.build_parser().parse_args(["status"])
+        self.assertFalse(plain.full)
+        self.assertFalse(plain.no_pager)
+
+    def test_raid_foreign_root_gating(self):
+        """Bare `raid-foreign` is `perccli /cN/fall show` — read-only (§9)."""
+        import b2ctl.cli as cli
+        for argv, exempt in ((["raid-foreign"], True),
+                             (["raid-foreign", "-c", "1"], True),
+                             (["raid-foreign", "--import"], False),
+                             (["raid-foreign", "--clear"], False)):
+            with self.subTest(argv=argv):
+                ns = cli.build_parser().parse_args(argv)
+                self.assertEqual(cli._needs_root(ns), not exempt)
+
+
+class TestPager(unittest.TestCase):
+    """F-137: cli._page hands tall output to a pager, but must never eat it."""
+
+    _TALL = "\n".join(f"line {i}" for i in range(200))
+
+    def _run(self, text, *, tty, no_pager=False, pager="less", which=True,
+             lines=24, spawn=None):
+        import b2ctl.cli as cli
+
+        class _Out:
+            def isatty(self):
+                return tty
+
+        env = {"PAGER": pager} if pager is not None else {}
+        with patch.object(cli.sys, "stdout", _Out()), \
+             patch.dict(os.environ, env, clear=False), \
+             patch.object(cli.shutil, "which",
+                          return_value="/usr/bin/less" if which else None), \
+             patch.object(cli.shutil, "get_terminal_size",
+                          return_value=os.terminal_size((100, lines))), \
+             patch("subprocess.run", side_effect=spawn) as sp, \
+             patch("builtins.print") as pr:
+            if pager is None:
+                os.environ.pop("PAGER", None)
+            cli._page(text, no_pager=no_pager)
+        return sp, pr
+
+    def test_non_tty_never_pages(self):
+        sp, pr = self._run(self._TALL, tty=False)
+        sp.assert_not_called()
+        pr.assert_called_once()
+
+    def test_no_pager_flag_prints_plain(self):
+        sp, pr = self._run(self._TALL, tty=True, no_pager=True)
+        sp.assert_not_called()
+        pr.assert_called_once()
+
+    def test_short_output_is_not_paged(self):
+        sp, pr = self._run("one\ntwo", tty=True)
+        sp.assert_not_called()
+        pr.assert_called_once()
+
+    def test_tall_output_goes_to_the_pager(self):
+        sp, pr = self._run(self._TALL, tty=True)
+        sp.assert_called_once()
+        self.assertEqual(sp.call_args.args[0][0], "less")
+        pr.assert_not_called()
+
+    def test_missing_pager_binary_falls_back_to_print(self):
+        sp, pr = self._run(self._TALL, tty=True, which=False)
+        sp.assert_not_called()
+        pr.assert_called_once()          # output is never lost
+
+    def test_unspawnable_pager_falls_back_to_print(self):
+        sp, pr = self._run(self._TALL, tty=True, spawn=OSError("boom"))
+        sp.assert_called_once()
+        pr.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -145,6 +145,146 @@ class TestHbaBmReuse:
         assert d.bay == "2:3"
 
 
+class TestGhostSerialDomainGuard(unittest.TestCase):
+    """F-133: enterprise SAS drives expose no lsblk SERIAL until SMART runs, so
+    a bay map keyed on real serials matches nothing and EVERY entry would become
+    a phantom GHOST row."""
+
+    @patch("b2ctl.baymap.load", return_value=[])
+    def test_all_entries_ghosting_against_serialless_disks_returns_none(self, _load):
+        disks = [Disk(dev="/dev/sda"), Disk(dev="/dev/sdb")]      # no serials yet
+        bm = {"WBM066HP": "9:0", "WBM06F90": "9:1"}
+        self.assertEqual(hba.get_ghost_disks(disks, bm=bm), [])
+
+    @patch("b2ctl.baymap.load", return_value=[])
+    def test_surplus_ghosts_are_still_reported(self, _load):
+        # F-133 review: the guard must not blank the whole list. Two serial-less
+        # disks cannot explain THREE would-be ghosts, so the map is reporting at
+        # least one genuinely OS-rejected drive — show them rather than hide it.
+        disks = [Disk(dev="/dev/sda"), Disk(dev="/dev/sdb")]
+        bm = {"WBM066HP": "9:0", "WBM06F90": "9:1", "WBM00W6L": "9:2"}
+        self.assertEqual(len(hba.get_ghost_disks(disks, bm=bm)), 3)
+
+    @patch("b2ctl.baymap.load", return_value=[])
+    def test_real_ghost_still_reported_when_serials_are_known(self, _load):
+        disks = [Disk(dev="/dev/sda", serial="WBM066HP")]
+        bm = {"WBM066HP": "9:0", "WBM06F90": "9:1"}
+        ghosts = hba.get_ghost_disks(disks, bm=bm)
+        self.assertEqual([g.serial for g in ghosts], ["WBM06F90"])
+
+
+class TestSysfsBayFallback(unittest.TestCase):
+    """F-134: the kernel's SAS transport class maps device -> slot with no serial
+    join. It fills what the vendor map could not, and never overrides it."""
+
+    # The real field HBA330 map: bays 0-6 -> sda-sdg, 22/23 -> sdh/sdi.
+    _SLOTS = {f"/dev/sd{n}": i for i, n in enumerate("abcdefg")}
+    _SLOTS.update({"/dev/sdh": 22, "/dev/sdi": 23})
+
+    @patch("b2ctl.baymap.load", return_value=[])
+    @patch("b2ctl.hba.have_sas2ircu", return_value=False)
+    def test_fills_bays_when_vendor_map_is_empty(self, _has, _load):
+        disks = [Disk(dev="/dev/sda"), Disk(dev="/dev/sdh")]
+        with patch("b2ctl.blockdev.sas_bay_slots", return_value=self._SLOTS):
+            hba.attach_bays(disks, bm={}, enc_hint=9)
+        self.assertEqual([d.bay for d in disks], ["9:0", "9:22"])
+
+    @patch("b2ctl.baymap.load", return_value=[])
+    @patch("b2ctl.hba.have_sas2ircu", return_value=False)
+    def test_vendor_label_always_wins(self, _has, _load):
+        d = Disk(dev="/dev/sda", serial="SN001")
+        with patch("b2ctl.blockdev.sas_bay_slots", return_value=self._SLOTS):
+            hba.attach_bays([d], bm={"SN001": "1:7"})
+        self.assertEqual(d.bay, "1:7")          # sas2ircu/perccli label untouched
+
+    @patch("b2ctl.baymap.load", return_value=[])
+    @patch("b2ctl.hba.have_sas2ircu", return_value=False)
+    def test_enclosure_borrowed_from_the_vendor_map(self, _has, _load):
+        # A partially-successful vendor map must not produce mixed prefixes:
+        # sdb takes its enclosure from the entry sda already got.
+        disks = [Disk(dev="/dev/sda", serial="SN001"), Disk(dev="/dev/sdb")]
+        with patch("b2ctl.blockdev.sas_bay_slots", return_value=self._SLOTS):
+            hba.attach_bays(disks, bm={"SN001": "9:0"})
+        self.assertEqual([d.bay for d in disks], ["9:0", "9:1"])
+
+    @patch("b2ctl.baymap.load", return_value=[])
+    @patch("b2ctl.hba.have_sas2ircu", return_value=False)
+    def test_no_sas_transport_is_a_no_op(self, _has, _load):
+        d = Disk(dev="/dev/nvme0n1")
+        with patch("b2ctl.blockdev.sas_bay_slots", return_value={}):
+            hba.attach_bays([d], bm={})
+        self.assertIsNone(d.bay)
+
+
+class TestSasBaySlots(unittest.TestCase):
+    """blockdev.sas_bay_slots — sysfs parsing, SEP exclusion, constant-bay veto."""
+
+    def _fake_sysfs(self, tmp, entries):
+        """entries: {end_device_name: (bay_text, block_name_or_None)}"""
+        import os
+        for name, (bay, blk) in entries.items():
+            base = os.path.join(tmp, name)
+            os.makedirs(base, exist_ok=True)
+            with open(os.path.join(base, "bay_identifier"), "w") as f:
+                f.write(bay + "\n")
+            if blk:
+                os.makedirs(os.path.join(base, "device", "target1:0:0",
+                                         "1:0:0:0", "block", blk), exist_ok=True)
+        return tmp
+
+    def test_parses_bays_and_drops_the_enclosure_processor(self):
+        import tempfile
+        from b2ctl import blockdev
+        with tempfile.TemporaryDirectory() as tmp:
+            self._fake_sysfs(tmp, {
+                "end_device-11:0:0": ("0", "sda"),
+                "end_device-11:0:7": ("22", "sdh"),
+                "end_device-11:0:8": ("24", None),      # SES processor, no block dev
+            })
+            with patch.object(blockdev, "SAS_DEVICE_DIR", tmp):
+                slots = blockdev.sas_bay_slots()
+        self.assertEqual(slots, {"/dev/sda": 0, "/dev/sdh": 22})
+
+    def test_constant_bay_backplane_is_rejected(self):
+        import tempfile
+        from b2ctl import blockdev
+        with tempfile.TemporaryDirectory() as tmp:
+            self._fake_sysfs(tmp, {
+                "end_device-11:0:0": ("0", "sda"),
+                "end_device-11:0:1": ("0", "sdb"),
+            })
+            with patch.object(blockdev, "SAS_DEVICE_DIR", tmp):
+                self.assertEqual(blockdev.sas_bay_slots(), {})
+
+    def test_missing_dir_is_empty(self):
+        from b2ctl import blockdev
+        with patch.object(blockdev, "SAS_DEVICE_DIR", "/nonexistent/sas"):
+            self.assertEqual(blockdev.sas_bay_slots(), {})
+
+
+class TestEnumerateWwn(unittest.TestCase):
+    """F-133: WWN is a serial-independent join key between lsblk and perccli."""
+
+    @patch("b2ctl.baymap.load", return_value=[])
+    @patch("b2ctl.hba._by_id_index", return_value={})
+    @patch("b2ctl.hba._lsblk_pairs")
+    def test_wwn_captured_from_lsblk(self, mock_lsblk, _byid, _load):
+        mock_lsblk.return_value = [{
+            "NAME": "sda", "TYPE": "disk", "SIZE": "0", "SERIAL": "",
+            "MODEL": "DL2400MM0159", "TRAN": "sas", "ROTA": "1",
+            "WWN": "0x5000c500a1b2c3d4"}]
+        disks = hba.enumerate_disks()
+        self.assertEqual(disks[0].wwn, "0x5000c500a1b2c3d4")
+
+    @patch("b2ctl.baymap.load", return_value=[])
+    @patch("b2ctl.hba._by_id_index", return_value={})
+    @patch("b2ctl.hba._lsblk_pairs")
+    def test_wwn_column_requested(self, mock_lsblk, _byid, _load):
+        mock_lsblk.return_value = []
+        hba.enumerate_disks()
+        self.assertIn("WWN", mock_lsblk.call_args[0][0])
+
+
 class TestHaveSas2ircuMemo:
     """F-037: have_sas2ircu() is probed once per process, then cached."""
 

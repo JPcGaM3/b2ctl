@@ -153,8 +153,12 @@ def assemble_storage(disks: list[Disk], pools: list[dict],
     rows: list[dict] = []
     for v in vols or []:
         vd = str(v.get("vd", "?"))
-        dev = next((d.dev for d in disks if d.array_type == "HW"
-                    and d.array_name.startswith(f"vd{vd}/")), None)
+        # ctrl_dev, not dev: a VD member has no device node (dev='-'), and its
+        # ctrl_dev is resolved PER VOLUME. Asking members for `dev` used to give
+        # every volume the same /dev/sdX, so two VDs measured one filesystem and
+        # printed identical used/free (F-136).
+        dev = next((d.ctrl_dev for d in disks if d.array_type == "HW"
+                    and d.array_name.startswith(f"vd{vd}/") and d.ctrl_dev), None)
         used = free = "-"
         usage = blockdev.vd_usage(dev) if dev else None   # shared VD-usage (F-099)
         if usage:

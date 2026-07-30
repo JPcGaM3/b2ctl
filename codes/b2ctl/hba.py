@@ -51,7 +51,7 @@ def enumerate_disks() -> list[Disk]:
     byid = _by_id_index()
     panels = baymap.load()
     disks: list[Disk] = []
-    for row in _lsblk_pairs("NAME,SIZE,SERIAL,MODEL,TRAN,ROTA,TYPE"):
+    for row in _lsblk_pairs("NAME,SIZE,SERIAL,MODEL,TRAN,ROTA,TYPE,WWN"):
         name = row.get("NAME", "")
         if row.get("TYPE") != "disk" or name.startswith(_EXCLUDE):
             continue
@@ -62,6 +62,7 @@ def enumerate_disks() -> list[Disk]:
         except ValueError:
             d.size_bytes = None
         d.serial = (row.get("SERIAL") or "").strip()
+        d.wwn = (row.get("WWN") or "").strip()
         d.model = (row.get("MODEL") or "").strip()
         d.iface = (row.get("TRAN") or "").strip().upper()
         d.is_ssd = (row.get("ROTA") == "0")
@@ -176,7 +177,22 @@ def bay_map(controller: int = CONTROLLER) -> dict:
     return mapping
 
 
-def attach_bays(disks: list[Disk], controller: int = CONTROLLER, bm=None) -> None:
+def _enc_hint(bm, override) -> str:
+    """Enclosure number used to prefix a sysfs-derived slot (display only).
+
+    Prefer the enclosure the vendor map already labels with, so switching a disk
+    from a vendor bay to a sysfs bay never changes the number the operator reads;
+    then an explicit hint from the backend; else '0' (F-134).
+    """
+    for val in (bm or {}).values():
+        enc, _, _slot = str(val).rpartition(":")
+        if enc:
+            return enc
+    return str(override) if override not in (None, "") else "0"
+
+
+def attach_bays(disks: list[Disk], controller: int = CONTROLLER, bm=None,
+                enc_hint=None) -> None:
     """Fill disk.bay from sas2ircu, matching on serial, then remap to the
     physical chassis label.
 
@@ -185,16 +201,19 @@ def attach_bays(disks: list[Disk], controller: int = CONTROLLER, bm=None) -> Non
     gone, so LSI shows the raw, reordered values. This is a known issue. The
     bay is display-only here (LEDs are driven by device, not slot — see
     locate.py), so we remap purely for the human label using bay_map.json.
+
+    Whatever the vendor map leaves unassigned is then filled from the kernel's
+    SAS transport class, which maps device -> slot with no serial join at all
+    (F-134). Vendor labels always win, so existing boxes render identically.
     """
     from . import baymap
+    panels = baymap.load()
     # A populated bm already proves the tool works; only probe when the caller
     # (a direct call, not core.scan) passed nothing (F-037).
-    if bm is None and not have_sas2ircu():
-        return
-    panels = baymap.load()
     if bm is None:
-        bm = bay_map(controller)
+        bm = bay_map(controller) if have_sas2ircu() else {}
     baymap.assign_bays(disks, bm, panels)      # shared serial-match loop (F-084)
+    baymap.assign_sysfs_bays(disks, panels, enc=_enc_hint(bm, enc_hint))
 
 
 def get_ghost_disks(disks: list[Disk], controller: int = CONTROLLER, bm=None) -> list[Disk]:
@@ -222,7 +241,29 @@ def get_ghost_disks(disks: list[Disk], controller: int = CONTROLLER, bm=None) ->
             d.level = "CRITICAL"
             d.reasons = ["OS_REJECTED"]
             ghosts.append(d)
+    # Serial-domain guard (F-133). Enterprise SAS drives expose no lsblk SERIAL
+    # until smart.read() fills it in, so on the pre-SMART pass a serial-keyed bay
+    # map matches nothing and every entry looks like a rejected disk. Suppress
+    # only when the serial-less block devices ALREADY present can account for all
+    # of them — then this is a scan-ordering artefact, not a backplane where the
+    # OS rejected 100% of the drives. If there are more would-be ghosts than
+    # unidentified disks the surplus cannot be explained away, so report the lot
+    # rather than hide a real OS_REJECTED drive (F-133 review).
+    if bm and not _matched_any(bm, os_serials):
+        unidentified = sum(1 for d in disks if d.dev != "-" and not d.serial)
+        if unidentified and len(ghosts) <= unidentified:
+            return []
     return ghosts
+
+
+def _matched_any(bm: dict, os_serials: list) -> bool:
+    """True if ANY bay-map serial lines up with an OS disk's serial.
+
+    One hit proves the two tools agree on the serial format, which is what makes
+    the remaining misses trustworthy as real ghosts.
+    """
+    from . import baymap
+    return any(baymap.serial_match(s, o) for s in bm for o in os_serials)
 
 
 def _read_sg_serial(sg_path: str, sg_dev: str) -> str:

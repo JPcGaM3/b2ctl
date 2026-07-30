@@ -525,5 +525,32 @@ class TestSelftestLog(unittest.TestCase):
         assert d.selftest_last_poh == 18238
 
 
+class TestSmartTargetDevice(unittest.TestCase):
+    """F-136: a PERC PD has dev='-'. `-d megaraid,<DID>` must be pointed at the
+    controller HANDLE (ctrl_dev), or smartctl is handed a literal '-'."""
+
+    @patch("b2ctl.smart._smartctl", return_value="")
+    def test_megaraid_disk_opens_ctrl_dev(self, mock_sc):
+        d = _disk(dev="-", smart_dtype="megaraid,12")
+        d.ctrl_dev = "/dev/sdr"
+        smart.read(d, {})
+        self.assertEqual(mock_sc.call_args.args[0], "/dev/sdr")
+
+    @patch("b2ctl.smart._smartctl", return_value="")
+    def test_plain_disk_still_opens_its_own_dev(self, mock_sc):
+        d = _disk(dev="/dev/sdb", smart_dtype="")
+        d.ctrl_dev = "/dev/sdr"          # set but irrelevant without a passthrough
+        smart.read(d, {})
+        self.assertEqual(mock_sc.call_args.args[0], "/dev/sdb")
+
+    @patch("b2ctl.smart._smartctl", return_value="")
+    def test_megaraid_without_ctrl_dev_falls_back(self, mock_sc):
+        """An older/synthetic Disk with no ctrl_dev keeps the previous behaviour
+        instead of silently reading nothing."""
+        d = _disk(dev="/dev/sda", smart_dtype="megaraid,3")
+        smart.read(d, {})
+        self.assertEqual(mock_sc.call_args.args[0], "/dev/sda")
+
+
 if __name__ == "__main__":
     unittest.main()

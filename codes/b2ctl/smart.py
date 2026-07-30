@@ -55,7 +55,11 @@ def _smartctl(dev: str, dtype: str = "") -> str:
 
 def read(d: Disk, tbw_table: dict) -> None:
     """Populate SMART-derived fields on a Disk in place."""
-    out = _smartctl(d.dev, d.smart_dtype)
+    # A disk behind a PERC virtual disk has NO device node of its own (dev='-'),
+    # so `-d megaraid,<DID>` must be pointed at the controller handle instead.
+    # Reading d.dev here would hand smartctl the literal '-' (F-136).
+    out = _smartctl(d.ctrl_dev if d.smart_dtype and d.ctrl_dev else d.dev,
+                    d.smart_dtype)
     if not out:
         d.readable = False
         d.health = "NOREAD"

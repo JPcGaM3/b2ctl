@@ -108,7 +108,9 @@ class TestEnumerate(unittest.TestCase):
         hw = [d for d in disks if d.array_type == "HW"]
         self.assertEqual(len(hw), 2)
         self.assertEqual(hw[0].smart_dtype, "megaraid,0")
-        self.assertEqual(hw[0].dev, "/dev/sda")          # megaraid target
+        # F-136: a VD member has no device node; the megaraid handle is ctrl_dev.
+        self.assertEqual(hw[0].dev, "-")
+        self.assertEqual(hw[0].ctrl_dev, "/dev/sda")     # megaraid target
         self.assertEqual(hw[0].array_name, "vd0/raid1")
         self.assertIn("/dev/nvme0n1", devs)
 
@@ -140,7 +142,8 @@ class TestEnumerate(unittest.TestCase):
         for d in ugood:
             self.assertEqual(d.array_type, "")          # available, not a member
             self.assertIn(d.smart_dtype, ("megaraid,4", "megaraid,5"))
-            self.assertEqual(d.dev, "/dev/sda")          # megaraid target
+            self.assertEqual(d.dev, "-")                 # hidden: no device node
+            self.assertEqual(d.ctrl_dev, "/dev/sda")     # megaraid target (F-136)
         # no ghosts in RAID mode
         self.assertEqual(raid.get_ghost_disks(disks), [])
 
@@ -353,6 +356,470 @@ WWN = 5002538E40A1B2D4
         self.assertNotIn("32:4", mapping.values())
 
 
+class TestNormHelpers(unittest.TestCase):
+    """F-133: cross-tool join keys (WWN, model) must normalise before compare."""
+
+    def test_norm_wwn_strips_prefix_and_case(self):
+        self.assertEqual(raid._norm_wwn("0x5000C500A1B2C3D4"),
+                         raid._norm_wwn("5000c500a1b2c3d4"))
+
+    def test_norm_wwn_empty(self):
+        self.assertEqual(raid._norm_wwn(""), "")
+        self.assertEqual(raid._norm_wwn(None), "")
+
+    def test_model_match_tolerates_perccli_truncation(self):
+        # perccli truncates the model column; lsblk reports it in full.
+        self.assertTrue(raid._model_match("Samsung SSD 860", "Samsung SSD 860 PRO 1TB"))
+        self.assertTrue(raid._model_match("DL2400MM0159", "DL2400MM0159"))
+
+    def test_model_match_rejects_different_models(self):
+        self.assertFalse(raid._model_match("DL2400MM0159", "Samsung SSD 860 PRO 1TB"))
+        self.assertFalse(raid._model_match("", "Samsung SSD 860 PRO 1TB"))
+
+
+class TestParseBayMapTolerantHeader(unittest.TestCase):
+    """F-133: only SOME perccli builds label the section 'Device attributes'.
+    Requiring that literal made every SN unreadable on an HBA330."""
+
+    _EALL_HBA = """\
+Drive /c0/e9/s0 - Detailed Information :
+========================================
+
+Drive /c0/e9/s0 State :
+=======================
+Shield Counter = 0
+
+Drive /c0/e9/s0 Device attributes :
+===================================
+SN = WBM066HP
+WWN = 0x5000C500A1B2C3D4
+Model Number = DL2400MM0159
+
+Drive /c0/e9/s1 - Detailed Information :
+========================================
+SN = WBM06F90
+WWN = 5000C500A1B2C3D5
+"""
+
+    def test_sn_binds_to_any_drive_header(self):
+        mapping = {}
+        raid._parse_bay_map(self._EALL_HBA, mapping)
+        self.assertEqual(mapping, {"WBM066HP": "9:0", "WBM06F90": "9:1"})
+
+    def test_wwn_map_parsed_from_same_text(self):
+        mapping = {}
+        raid._parse_wwn_map(self._EALL_HBA, mapping)
+        self.assertEqual(mapping, {"5000c500a1b2c3d4": "9:0",
+                                   "5000c500a1b2c3d5": "9:1"})
+
+
+class TestEnumerateNoPhantomDuplicates(unittest.TestCase):
+    """F-133: on an HBA330 every PD is ALREADY an lsblk disk. Synthesising a
+    row per PD produced a duplicate /dev/sda row with no serial and dead
+    megaraid SMART for every drive."""
+
+    # No virtual disks; 3 identical SAS HDDs, all exposed to the OS.
+    _EALL = (
+        "EID:Slt DID State DG     Size Intf Med SED PI SeSz Model            Sp\n"
+        "9:0       0 JBOD   - 2.181 TB SAS  HDD N   N  512B DL2400MM0159     U\n"
+        "9:1       1 JBOD   - 2.181 TB SAS  HDD N   N  512B DL2400MM0159     U\n"
+        "9:2       2 JBOD   - 2.181 TB SAS  HDD N   N  512B DL2400MM0159     U\n")
+
+    def _raw(self):
+        from b2ctl.common import Disk
+        out = []
+        for n in "abc":
+            d = Disk(dev=f"/dev/sd{n}")
+            d.model = "DL2400MM0159"       # identical models, no lsblk SERIAL (SAS)
+            out.append(d)
+        return out
+
+    def _enumerate(self, raw, bay_map_ret, eall):
+        with patch.object(raid, "have_tool", return_value=True), \
+             patch.object(raid, "_vall_data", return_value=([], [])), \
+             patch.object(raid, "bay_map", return_value=bay_map_ret), \
+             patch.object(raid, "_ctrl_indices", return_value=[0]), \
+             patch.object(raid, "_tool", return_value="perccli"), \
+             patch.object(raid, "run", return_value=eall), \
+             patch("b2ctl.hba.enumerate_disks", return_value=raw):
+            return raid.enumerate_disks()
+
+    def test_no_synthetic_rows_when_serials_unknown(self):
+        raw = self._raw()
+        disks = self._enumerate(raw, {}, self._EALL)
+        self.assertEqual(len(disks), 3)
+        self.assertEqual(sorted(d.dev for d in disks),
+                         ["/dev/sda", "/dev/sdb", "/dev/sdc"])
+        # nothing synthesised => no megaraid passthrough targets
+        self.assertEqual([d for d in disks if d.smart_dtype], [])
+
+    def test_wwn_join_tags_the_real_disk(self):
+        raw = self._raw()
+        raw[0].wwn = "0x5000C500A1B2C3D4"
+        eall = self._EALL + (
+            "Drive /c0/e9/s0 Device attributes :\n"
+            "WWN = 5000c500a1b2c3d4\n")
+        disks = self._enumerate(raw, {}, eall)
+        self.assertEqual(len(disks), 3)
+        self.assertEqual(raw[0].bay, "9:0")
+        self.assertEqual(raw[0].ctrl_slot, "9:0")
+        self.assertEqual(raw[0].pd_state, "JBOD")
+
+    def test_serial_join_still_tags_the_real_disk(self):
+        raw = self._raw()
+        raw[1].serial = "WBM06F90"
+        eall = self._EALL + ("Drive /c0/e9/s1 Device attributes :\n"
+                             "SN = WBM06F90\n")
+        disks = self._enumerate(raw, {}, eall)
+        self.assertEqual(len(disks), 3)
+        self.assertEqual(raw[1].bay, "9:1")
+
+    def test_genuinely_hidden_drive_is_still_synthesised(self):
+        # A PD whose model matches NO OS disk really is hidden behind the
+        # controller — keep surfacing it (H730P UGood spare).
+        from b2ctl.common import Disk
+        sda = Disk(dev="/dev/sda"); sda.model = "PERC H730P Mini"
+        eall = (
+            "EID:Slt DID State DG     Size Intf Med SED PI SeSz Model            Sp\n"
+            "32:4      4 UGood  - 931.0 GB SATA SSD Y   N  512B Samsung SSD 870 EVO 1TB U\n"
+            "Drive /c0/e32/s4 Device attributes :\n"
+            "SN = S74Z288W\n")
+        disks = self._enumerate([sda], {}, eall)
+        hidden = [d for d in disks if d.pd_state == "UGood"]
+        self.assertEqual(len(hidden), 1)
+        self.assertEqual(hidden[0].smart_dtype, "megaraid,4")
+        self.assertEqual(hidden[0].serial, "S74Z288W")
+
+
+class TestHba330FieldRegression(unittest.TestCase):
+    """The exact HBA330 Mini report: 9 real drives (7 SAS HDD + 2 SATA SSD),
+    every one already an lsblk device, perccli emitting no detail section. The
+    old code returned 18 rows — 9 phantom `/dev/sda` entries, serial N/A,
+    NOREAD, CRITICAL (F-133)."""
+
+    _EALL = (
+        "EID:Slt DID State DG     Size Intf Med SED PI SeSz Model            Sp\n"
+        + "".join(f"9:{i}       {i} JBOD   - 2.181 TB SAS  HDD N   N  512B "
+                  f"DL2400MM0159     U\n" for i in range(7))
+        + "9:22     22 JBOD   -  931.0 GB SATA SSD N   N  512B "
+          "Samsung SSD 860  U\n"
+          "9:23     23 JBOD   -  931.0 GB SATA SSD N   N  512B "
+          "Samsung SSD 860  U\n")
+
+    def test_nine_drives_stay_nine_rows(self):
+        from b2ctl.common import Disk
+        raw = []
+        for i, name in enumerate("abcdefg"):
+            d = Disk(dev=f"/dev/sd{name}")
+            d.model = "DL2400MM0159"        # SAS: no lsblk SERIAL, no WWN yet
+            raw.append(d)
+        for name in "hi":
+            d = Disk(dev=f"/dev/sd{name}")
+            d.model = "Samsung SSD 860 PRO 1TB"
+            raw.append(d)
+        with patch.object(raid, "have_tool", return_value=True), \
+             patch.object(raid, "_vall_data", return_value=([], [])), \
+             patch.object(raid, "_ctrl_indices", return_value=[0]), \
+             patch.object(raid, "_tool", return_value="perccli"), \
+             patch.object(raid, "run", return_value=self._EALL), \
+             patch("b2ctl.hba.enumerate_disks", return_value=raw):
+            disks = raid.enumerate_disks()
+        self.assertEqual(len(disks), 9)
+        self.assertEqual(len({d.dev for d in disks}), 9)   # no shared /dev/sda
+        self.assertEqual([d for d in disks if d.smart_dtype], [])
+
+
+class TestHbaPersonality(unittest.TestCase):
+    """F-133: perccli manages an HBA330/H330, but the OS — not the controller —
+    owns the disks there. RAID-mode enumeration must not claim such a card."""
+
+    def setUp(self):
+        raid._reset_caches()
+
+    def tearDown(self):
+        raid._reset_caches()
+
+    def test_false_without_tool(self):
+        with patch.object(raid, "have_tool", return_value=False):
+            self.assertFalse(raid.is_hba_personality())
+
+    def test_true_when_no_megaraid_sas_driver(self):
+        # `smartctl -d megaraid` needs a megaraid_sas host; an HBA330 binds
+        # mpt3sas, so RAID-mode SMART is impossible by construction. It reports
+        # no personality line at all — that '' is the realistic input here, and
+        # an explicit 'RAID-Mode' would (correctly) short-circuit to False.
+        with patch.object(raid, "have_tool", return_value=True), \
+             patch.object(raid, "_vall_data", return_value=([], [])), \
+             patch.object(raid, "_personality", return_value=""), \
+             patch.object(raid, "_driver_name", return_value=""), \
+             patch.object(raid, "_megaraid_driver_present", return_value=False):
+            self.assertTrue(raid.is_hba_personality())
+
+    def test_false_when_virtual_disks_exist(self):
+        vols, members = raid._parse_vall(_VALL)
+        with patch.object(raid, "have_tool", return_value=True), \
+             patch.object(raid, "_megaraid_driver_present", return_value=True), \
+             patch.object(raid, "_vall_data", return_value=(vols, members)):
+            self.assertFalse(raid.is_hba_personality())
+
+    def test_true_when_controller_reports_hba_personality(self):
+        with patch.object(raid, "have_tool", return_value=True), \
+             patch.object(raid, "_megaraid_driver_present", return_value=True), \
+             patch.object(raid, "_vall_data", return_value=([], [])), \
+             patch.object(raid, "_personality", return_value="HBA-Mode"):
+            self.assertTrue(raid.is_hba_personality())
+
+    def test_explicit_raid_personality_wins_over_the_heuristic(self):
+        # F-133 review: a freshly-wiped H730P (no VD yet) with an unrelated BOSS
+        # mirror + 2 NVMe inflating the lsblk count was classified HBA, which
+        # locked the operator out of every raid-* verb in exactly the state that
+        # needs them. The controller naming itself RAID-Mode is authoritative.
+        with patch.object(raid, "have_tool", return_value=True), \
+             patch.object(raid, "_vall_data", return_value=([], [])), \
+             patch.object(raid, "_ctrl_indices", return_value=[0]), \
+             patch.object(raid, "_personality", return_value="RAID-MODE"), \
+             patch.object(raid, "_driver_name", return_value="megaraid_sas"), \
+             patch.object(raid, "_megaraid_driver_present", return_value=True):
+            self.assertFalse(raid.is_hba_personality())
+
+    def test_unresolvable_pd_means_the_controller_hides_it(self):
+        # megaraid_sas card, no VD, no personality string: HBA only if EVERY PD
+        # resolves to an OS block device. Counting unrelated NVMe/BOSS devices
+        # instead let 3 strangers outvote 2 genuinely hidden drives.
+        eall = (
+            "EID:Slt DID State DG     Size Intf Med SED PI SeSz Model            Sp\n"
+            "32:4      4 UGood  - 931.0 GB SATA SSD Y   N  512B Samsung SSD 870 EVO 1TB U\n"
+            "32:5      5 UGood  - 931.0 GB SATA SSD Y   N  512B Samsung SSD 870 EVO 1TB U\n"
+            "Drive /c0/e32/s4 Device attributes :\nSN = HIDDEN04\n"
+            "Drive /c0/e32/s5 Device attributes :\nSN = HIDDEN05\n")
+        with patch.object(raid, "have_tool", return_value=True), \
+             patch.object(raid, "_vall_data", return_value=([], [])), \
+             patch.object(raid, "_ctrl_indices", return_value=[0]), \
+             patch.object(raid, "_personality", return_value=""), \
+             patch.object(raid, "_driver_name", return_value="megaraid_sas"), \
+             patch.object(raid, "_megaraid_driver_present", return_value=True), \
+             patch.object(raid, "_tool", return_value="perccli"), \
+             patch.object(raid, "run", return_value=eall), \
+             patch("b2ctl.blockdev.lsblk_pairs", return_value=[
+                 {"NAME": "sda", "TYPE": "disk", "SERIAL": "BOSS0001", "WWN": ""},
+                 {"NAME": "nvme0n1", "TYPE": "disk", "SERIAL": "NV1", "WWN": ""},
+                 {"NAME": "nvme1n1", "TYPE": "disk", "SERIAL": "NV2", "WWN": ""}]):
+            self.assertFalse(raid.is_hba_personality())
+
+    def test_every_pd_resolving_to_an_os_disk_means_hba(self):
+        eall = (
+            "EID:Slt DID State DG     Size Intf Med SED PI SeSz Model            Sp\n"
+            "32:4      4 JBOD   - 931.0 GB SATA SSD Y   N  512B Samsung SSD 870 EVO 1TB U\n"
+            "Drive /c0/e32/s4 Device attributes :\nSN = EXPOSED4\n")
+        with patch.object(raid, "have_tool", return_value=True), \
+             patch.object(raid, "_vall_data", return_value=([], [])), \
+             patch.object(raid, "_ctrl_indices", return_value=[0]), \
+             patch.object(raid, "_personality", return_value=""), \
+             patch.object(raid, "_driver_name", return_value="megaraid_sas"), \
+             patch.object(raid, "_megaraid_driver_present", return_value=True), \
+             patch.object(raid, "_tool", return_value="perccli"), \
+             patch.object(raid, "run", return_value=eall), \
+             patch("b2ctl.blockdev.lsblk_pairs", return_value=[
+                 {"NAME": "sda", "TYPE": "disk", "SERIAL": "EXPOSED4", "WWN": ""},
+                 {"NAME": "nvme0n1", "TYPE": "disk", "SERIAL": "NV1", "WWN": ""}]):
+            self.assertTrue(raid.is_hba_personality())
+
+    # (The old count-based cases — "PDs outnumber OS disks" / "every PD is an OS
+    # disk" — encoded the len(lsblk) >= len(pds) heuristic that the F-133 review
+    # showed an unrelated BOSS mirror + NVMe could outvote. They are superseded by
+    # test_unresolvable_pd_means_the_controller_hides_it and
+    # test_every_pd_resolving_to_an_os_disk_means_hba above, which measure the
+    # thing the branch actually asks: does every PD resolve to a block device?)
+
+    def test_result_is_memoized(self):
+        with patch.object(raid, "have_tool", return_value=True), \
+             patch.object(raid, "_personality", return_value="RAID-Mode"), \
+             patch.object(raid, "_megaraid_driver_present", return_value=False), \
+             patch.object(raid, "_vall_data", return_value=([], [])) as probe:
+            raid.is_hba_personality()
+            raid.is_hba_personality()
+        self.assertEqual(probe.call_count, 1)
+
+
+class TestHiddenDriveSurvivesMixedLayout(unittest.TestCase):
+    """F-133 review: the anti-duplication refusal must never delete a PD the
+    controller genuinely hides. b2ctl's own `assign_perc` [2] set-JBOD workflow
+    produces exactly this mix — one drive JBOD-exposed, an identical-model
+    sibling still hidden — and the first cut dropped the hidden one whenever it
+    happened to be iterated first."""
+
+    def _eall(self, hidden_bay: str, exposed_bay: str) -> str:
+        rows = sorted([hidden_bay, exposed_bay], key=lambda b: int(b.split(":")[1]))
+        table = ("EID:Slt DID State DG     Size Intf Med SED PI SeSz Model            Sp\n"
+                 "32:0      0 Onln   0 931.0 GB SATA SSD Y   N  512B Samsung SSD 870 EVO 1TB U\n"
+                 "32:1      1 Onln   0 931.0 GB SATA SSD Y   N  512B Samsung SSD 870 EVO 1TB U\n")
+        for b in rows:
+            did = b.split(":")[1]
+            state = "UGood" if b == hidden_bay else "JBOD "
+            table += (f"{b}      {did} {state}  - 931.0 GB SATA SSD Y   N  512B "
+                      f"Samsung SSD 870 EVO 1TB U\n")
+        # perccli reports a serial for BOTH: each is identifiable.
+        table += (f"Drive /c0/e{hidden_bay.replace(':', '/s')} Device attributes :\n"
+                  f"SN = HIDDEN01\n"
+                  f"Drive /c0/e{exposed_bay.replace(':', '/s')} Device attributes :\n"
+                  f"SN = EXPOSED1\n")
+        return table
+
+    def _run(self, hidden_bay: str, exposed_bay: str):
+        from b2ctl.common import Disk
+        sda = Disk(dev="/dev/sda"); sda.model = "PERC H730P Mini"
+        sdb = Disk(dev="/dev/sdb")
+        sdb.model, sdb.serial = "Samsung SSD 870 EVO 1TB", "EXPOSED1"
+        vols, members = raid._parse_vall(_VALL)
+        with patch.object(raid, "have_tool", return_value=True), \
+             patch.object(raid, "_vall_data", return_value=(vols, members)), \
+             patch.object(raid, "_ctrl_indices", return_value=[0]), \
+             patch.object(raid, "_tool", return_value="perccli"), \
+             patch.object(raid, "run", return_value=self._eall(hidden_bay, exposed_bay)), \
+             patch("b2ctl.hba.enumerate_disks", return_value=[sda, sdb]):
+            disks = raid.enumerate_disks()
+        return disks, sdb
+
+    def test_hidden_drive_survives_when_iterated_first(self):
+        disks, sdb = self._run("32:2", "32:3")
+        hidden = [d for d in disks if d.serial == "HIDDEN01"]
+        self.assertEqual(len(hidden), 1)
+        self.assertEqual(hidden[0].smart_dtype, "megaraid,2")
+        self.assertEqual(hidden[0].pd_state, "UGood")
+        self.assertEqual(sdb.bay, "32:3")            # exposed sibling still tagged
+
+    def test_hidden_drive_survives_when_iterated_last(self):
+        # Only the two slot numbers swap; the result must not change.
+        disks, sdb = self._run("32:3", "32:2")
+        hidden = [d for d in disks if d.serial == "HIDDEN01"]
+        self.assertEqual(len(hidden), 1)
+        self.assertEqual(hidden[0].smart_dtype, "megaraid,3")
+        self.assertEqual(sdb.bay, "32:2")
+
+    def test_failed_hidden_drive_is_never_suppressed(self):
+        from b2ctl.common import Disk
+        sda = Disk(dev="/dev/sda"); sda.model = "PERC H730P Mini"
+        sdb = Disk(dev="/dev/sdb")
+        sdb.model, sdb.serial = "Samsung SSD 870 EVO 1TB", "EXPOSED1"
+        eall = ("EID:Slt DID State DG     Size Intf Med SED PI SeSz Model            Sp\n"
+                "32:2      2 Failed - 931.0 GB SATA SSD Y   N  512B Samsung SSD 870 EVO 1TB U\n"
+                "32:3      3 JBOD   - 931.0 GB SATA SSD Y   N  512B Samsung SSD 870 EVO 1TB U\n"
+                "Drive /c0/e32/s2 Device attributes :\nSN = DEADDISK\n"
+                "Drive /c0/e32/s3 Device attributes :\nSN = EXPOSED1\n")
+        with patch.object(raid, "have_tool", return_value=True), \
+             patch.object(raid, "_vall_data", return_value=([], [])), \
+             patch.object(raid, "_ctrl_indices", return_value=[0]), \
+             patch.object(raid, "_tool", return_value="perccli"), \
+             patch.object(raid, "run", return_value=eall), \
+             patch("b2ctl.hba.enumerate_disks", return_value=[sda, sdb]):
+            disks = raid.enumerate_disks()
+        self.assertEqual([d.pd_state for d in disks if d.serial == "DEADDISK"],
+                         ["Failed"])
+
+
+class TestSuppressionGuards(unittest.TestCase):
+    """F-133 review: the model refusal must not be a blunt instrument."""
+
+    def test_model_match_rejects_severely_truncated_prefix(self):
+        self.assertFalse(raid._model_match("S", "Samsung SSD 870 EVO 1TB"))
+        self.assertFalse(raid._model_match("Sam", "Samsung SSD 870 EVO 1TB"))
+
+    def test_model_match_still_accepts_real_perccli_truncation(self):
+        self.assertTrue(raid._model_match("Samsung SSD 860", "Samsung SSD 860 PRO 1TB"))
+
+    def test_pd_size_is_parsed_as_binary_units(self):
+        # perccli prints binary sizes under decimal labels.
+        self.assertTrue(raid._size_match("2.182 TB", 2_400_476_274_688))    # DL2400MM0159
+        self.assertTrue(raid._size_match("953.869 GB", 1_024_209_543_168))  # 860 PRO 1TB
+
+    def test_size_mismatch_blocks_suppression(self):
+        self.assertFalse(raid._size_match("953.869 GB", 2_400_476_274_688))
+
+    def test_unknown_size_never_widens_the_guard(self):
+        self.assertTrue(raid._size_match("", 2_400_476_274_688))
+        self.assertTrue(raid._size_match("2.182 TB", None))
+
+
+class TestHba330RealControllerShow(unittest.TestCase):
+    """Real `perccli /c0 show` from the field HBA330 Mini (F-133). Note what it
+    does NOT contain: no Personality line and no Virtual Drives line — the card
+    has no personality switch, it is IT firmware permanently. What it DOES
+    contain is `Driver Name = mpt3sas`, which settles it."""
+
+    _SHOW = """Controller = 0
+Status = Success
+Description = None
+
+Product Name = Dell HBA330 Mini
+Serial Number = 5d094660873aa100
+FW Version = 16.00.11.00
+Driver Name = mpt3sas
+Driver Version = 54.100.00.00
+Vendor Id = 0x1000
+Board Name = Dell HBA330 Mini
+Physical Drives = 9
+
+PD LIST :
+=======
+
+-------------------------------------------------------------------------
+EID:Slt DID State DG       Size Intf Med SED PI SeSz Model            Sp
+-------------------------------------------------------------------------
+9:0       0 UGood -    2.182 TB SAS  HDD N   N  512B DL2400MM0159     U
+9:22      7 UGood -  953.869 GB SATA SSD N   N  512B Samsung SSD 860  U
+-------------------------------------------------------------------------
+"""
+
+    _SHOW_PERC = """Controller = 0
+Product Name = PERC H730P Mini
+Driver Name = megaraid_sas
+Current Personality = RAID-Mode
+Virtual Drives = 1
+Physical Drives = 4
+"""
+
+    def setUp(self):
+        raid._reset_caches()
+
+    def tearDown(self):
+        raid._reset_caches()
+
+    def test_driver_name_parsed(self):
+        with patch.object(raid, "run", return_value=self._SHOW), \
+             patch.object(raid, "_tool", return_value="perccli"):
+            self.assertEqual(raid._driver_name(), "mpt3sas")
+
+    def test_personality_absent_is_empty_not_an_error(self):
+        with patch.object(raid, "run", return_value=self._SHOW), \
+             patch.object(raid, "_tool", return_value="perccli"):
+            self.assertEqual(raid._personality(), "")
+
+    def test_hba330_classified_as_hba_without_sysfs(self):
+        # sysfs deliberately reports "no megaraid_sas host" the WRONG way round
+        # here: the driver name from perccli must win on its own.
+        with patch.object(raid, "have_tool", return_value=True), \
+             patch.object(raid, "_vall_data", return_value=([], [])), \
+             patch.object(raid, "_megaraid_driver_present", return_value=True), \
+             patch.object(raid, "run", return_value=self._SHOW), \
+             patch.object(raid, "_tool", return_value="perccli"):
+            self.assertTrue(raid.is_hba_personality())
+
+    def test_perc_raid_mode_still_classified_as_raid(self):
+        vols, members = raid._parse_vall(_VALL)
+        with patch.object(raid, "have_tool", return_value=True), \
+             patch.object(raid, "_vall_data", return_value=(vols, members)), \
+             patch.object(raid, "run", return_value=self._SHOW_PERC), \
+             patch.object(raid, "_tool", return_value="perccli"):
+            self.assertFalse(raid.is_hba_personality())
+
+    def test_pd_list_in_controller_show_parses(self):
+        pds = raid._parse_pd_rows(self._SHOW)
+        self.assertEqual([p["bay"] for p in pds], ["9:0", "9:22"])
+        self.assertEqual(pds[0]["state"], "UGood")      # HBA330 says UGood, not JBOD
+        self.assertEqual(pds[0]["model"], "DL2400MM0159")
+        self.assertEqual(pds[1]["model"], "Samsung SSD 860")
+
+
 class TestActionController(unittest.TestCase):
     """F-085: a member enumerated on /c1 must have its perccli action target
     /c1, not the hardcoded /c0."""
@@ -370,6 +837,468 @@ class TestActionController(unittest.TestCase):
             raid.set_offline(d.ctrl_slot, ra._ctrl(d))
         raid._tool_cache = None
         self.assertEqual(seen["cmd"], ["perccli", "/c1/e32/s2", "set", "offline"])
+
+
+# ========================================================================== #
+# F-135 — foreign configs. perccli's State and DG columns are INDEPENDENT: a
+# foreign drive still reads 'UGood' but the firmware refuses every transition
+# on it. b2ctl parsed DG and threw it away, so it advertised a locked drive as
+# ready and answered the refusal with a raw vendor dump.
+# ========================================================================== #
+
+# `perccli /c0/eall/sall show all` with one foreign (DG=F) drive at 32:7
+# alongside a VD member and a genuinely free drive.
+_EALL_FOREIGN = """\
+Drive Information :
+EID:Slt DID State DG     Size Intf Med SED PI SeSz Model                Sp
+--------------------------------------------------------------------------
+32:0      0 Onln   0 931.0 GB SATA SSD N   N 512B Samsung SSD 870 EVO 1TB U
+32:6      8 UGood  - 931.0 GB SATA SSD N   N 512B Samsung SSD 870 EVO 1TB U
+32:7      9 UGood  F 1.746 TB SATA SSD N   N 512B SAMSUNG MZ7LH1T9HMLT-00003 U
+--------------------------------------------------------------------------
+
+Drive /c0/e32/s0 Device attributes :
+====================================
+SN = S8C5NS0L103617H
+
+Drive /c0/e32/s6 Device attributes :
+====================================
+SN = S74ZNS0W582278Y
+
+Drive /c0/e32/s7 Device attributes :
+====================================
+SN = S4F2NY0KA04123
+"""
+
+# VERBATIM from a PERC H730P Mini (`cmp01`, F-138). A foreign config is reported
+# per DRIVE GROUP: this is a 2-drive RAID10 (3.491 TB = 2 x 1.745 TB) with only
+# one member present, so EID:Slot is '-'. Anchoring the parser on an enc:slot
+# token found nothing here and the [5] menu answered "no foreign configuration"
+# while the drive stayed locked. Keep this fixture byte-for-byte.
+_FALL_REAL = """\
+Controller = 0
+Status = Success
+Description = None
+
+FOREIGN CONFIGURATION :
+=====================
+
+----------------------------------------
+DG EID:Slot Type   State     Size NoVDs
+----------------------------------------
+ 0 -        RAID10 Frgn  3.491 TB     1
+----------------------------------------
+
+NoVDs - Number of VDs in disk group|DG - Diskgroup
+Total foreign drive groups = 1
+Drive Groups = 1
+"""
+
+# `perccli /c0/fall show` — DID column present, size on the row, Name empty.
+_FALL = """\
+Controller = 0
+Status = Success
+Description = Operation on foreign configuration Succeeded
+
+
+FOREIGN CONFIGURATION :
+=====================
+
+--------------------------------------------------------------
+DG EID:Slt DID Type  State Status Size      Name
+--------------------------------------------------------------
+ 0 32:7      9 RAID0 Optl  Frgn   1.746 TB
+--------------------------------------------------------------
+"""
+
+# Several perccli builds report "no foreign config" as a FAILURE, so keying on
+# the Status line would claim a foreign config on every healthy controller.
+_FALL_NONE = """\
+Controller = 0
+Status = Failure
+Description = Operation on foreign configuration Failed
+
+Detailed Status :
+===============
+There is no foreign configuration present on the controller.
+"""
+
+_JBOD_CAP = """\
+Supported Adapter Operations :
+===========================
+Support JBOD = Yes
+
+Controller Properties :
+=====================
+JBOD = OFF
+"""
+
+_NOT_ALLOWED_OUT = """\
+Controller = 0
+Status = Failure
+Description = Set Drive JBOD Failed.
+
+------------------------------------------------
+Drive      Status  ErrCd ErrMsg
+------------------------------------------------
+/c0/e32/s7 Failure   255 Operation not allowed.
+------------------------------------------------
+"""
+
+
+class TestIsForeign(unittest.TestCase):
+
+    def test_dg_f_is_foreign(self):
+        self.assertTrue(raid._is_foreign({"dg": "F"}))
+        self.assertTrue(raid._is_foreign({"dg": " f "}))
+
+    def test_dg_group_or_dash_is_not(self):
+        for dg in ("-", "0", "12", "", None):
+            self.assertFalse(raid._is_foreign({"dg": dg}), dg)
+        self.assertFalse(raid._is_foreign({}))
+
+    def test_parse_pd_rows_keeps_dg(self):
+        rows = {r["bay"]: r for r in raid._parse_pd_rows(_EALL_FOREIGN)}
+        self.assertEqual(rows["32:7"]["dg"], "F")
+        self.assertEqual(rows["32:7"]["state"], "UGood")   # independent axes
+        self.assertEqual(rows["32:6"]["dg"], "-")
+
+
+class TestForeignConfigParse(unittest.TestCase):
+
+    def _rows(self, text):
+        with patch.object(raid, "run", return_value=text), \
+             patch("b2ctl.config.tool", side_effect=lambda n: n):
+            raid._tool_cache = "perccli"
+            try:
+                return raid.foreign_config(0)
+            finally:
+                raid._tool_cache = None
+
+    def test_parses_the_real_drive_group_row(self):
+        """F-138 regression — the shape real hardware actually prints."""
+        rows = self._rows(_FALL_REAL)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["dg"], "0")
+        self.assertEqual(rows[0]["bay"], "")        # group spans drives -> no slot
+        self.assertEqual(rows[0]["type"], "RAID10")
+        self.assertEqual(rows[0]["state"], "Frgn")
+        self.assertEqual(rows[0]["size"], "3.491 TB")
+        self.assertEqual(rows[0]["novds"], "1")
+
+    def test_header_legend_and_totals_are_not_rows(self):
+        """'DG EID:Slot …', 'NoVDs - Number of VDs in disk group|DG - Diskgroup'
+        and 'Total foreign drive groups = 1' must not parse as data."""
+        self.assertEqual(len(self._rows(_FALL_REAL)), 1)
+
+    def test_parses_the_single_drive_shape_too(self):
+        rows = self._rows(_FALL)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["bay"], "32:7")
+        self.assertEqual(rows[0]["dg"], "0")
+        self.assertEqual(rows[0]["type"], "RAID0")
+        self.assertEqual(rows[0]["state"], "Optl")
+        self.assertEqual(rows[0]["size"], "1.746 TB")
+
+    def test_status_failure_with_no_rows_is_empty(self):
+        self.assertEqual(self._rows(_FALL_NONE), [])
+
+    def test_no_tool_output_is_empty(self):
+        self.assertEqual(self._rows(""), [])
+
+    def test_foreign_bays_reads_the_pd_table_not_fall(self):
+        """F-138: `fall` reports drive GROUPS and prints EID:Slot '-' once a group
+        spans drives, so the slots must come from the PD table's DG column."""
+        with patch.object(raid, "run", return_value=_EALL_FOREIGN), \
+             patch.object(raid, "_ctrl_indices", return_value=[0]), \
+             patch.object(raid, "_tool", return_value="perccli"):
+            self.assertEqual(raid.foreign_bays(0), {"32:7"})   # 32:0 Onln, 32:6 '-'
+
+    def test_foreign_bays_unaffected_by_an_unparsable_fall_table(self):
+        with patch.object(raid, "run", return_value=_EALL_FOREIGN), \
+             patch.object(raid, "_ctrl_indices", return_value=[0]), \
+             patch.object(raid, "_tool", return_value="perccli"), \
+             patch.object(raid, "foreign_config", return_value=[]):
+            self.assertEqual(raid.foreign_bays(0), {"32:7"})
+
+
+class TestJbodCapability(unittest.TestCase):
+
+    def _cap(self, text):
+        with patch.object(raid, "run", return_value=text), \
+             patch("b2ctl.config.tool", side_effect=lambda n: n):
+            raid._tool_cache = "perccli"
+            try:
+                return raid.jbod_capability(0)
+            finally:
+                raid._tool_cache = None
+
+    def test_parses_both_fields(self):
+        cap = self._cap(_JBOD_CAP)
+        self.assertIs(cap["supported"], True)
+        self.assertIs(cap["enabled"], False)      # 'Support JBOD' must not win here
+
+    def test_enable_jbod_spelling(self):
+        self.assertIs(self._cap("Enable JBOD = Yes\n")["enabled"], True)
+
+    def test_absent_fields_are_none(self):
+        cap = self._cap("Product Name = Dell HBA330 Mini\n")
+        self.assertIsNone(cap["supported"])
+        self.assertIsNone(cap["enabled"])
+
+
+class TestExplainError(unittest.TestCase):
+
+    def test_unrelated_output_explains_nothing(self):
+        self.assertEqual(raid.explain_error("Status = Success"), "")
+
+    def test_names_the_foreign_cause(self):
+        from b2ctl.common import Disk
+        d = Disk(dev="/dev/sda", ctrl=0)
+        d.ctrl_slot = "32:7"
+        d.pd_foreign = True
+        with patch.object(raid, "foreign_bays", return_value={"32:7"}), \
+             patch.object(raid, "jbod_capability",
+                          return_value={"supported": True, "enabled": True}):
+            why = raid.explain_error(_NOT_ALLOWED_OUT, d=d)
+        self.assertIn("32:7", why)
+        self.assertIn("YES", why)
+        self.assertIn("/c0/fall", why)
+
+    def test_falls_back_to_the_controller_probe(self):
+        """A perccli build that prints no DG column leaves pd_foreign False, so
+        the diagnosis has to come from `/cN/fall show` instead."""
+        from b2ctl.common import Disk
+        d = Disk(dev="/dev/sda", ctrl=0)
+        d.ctrl_slot = "32:7"
+        self.assertFalse(d.pd_foreign)
+        with patch.object(raid, "foreign_bays", return_value={"32:7"}), \
+             patch.object(raid, "jbod_capability",
+                          return_value={"supported": True, "enabled": True}):
+            why = raid.explain_error(_NOT_ALLOWED_OUT, d=d)
+        self.assertIn("YES", why)
+        self.assertIn("/c0/fall", why)
+
+    def test_jbod_policy_off_is_the_named_cause(self):
+        with patch.object(raid, "foreign_bays", return_value=set()), \
+             patch.object(raid, "jbod_capability",
+                          return_value={"supported": True, "enabled": False}):
+            why = raid.explain_error(_NOT_ALLOWED_OUT, controller=0)
+        self.assertIn("set jbod=on", why)
+        self.assertNotIn("/c0/fall show`", why)
+
+    def test_unsupported_controller_is_the_named_cause(self):
+        with patch.object(raid, "foreign_bays", return_value=set()), \
+             patch.object(raid, "jbod_capability",
+                          return_value={"supported": False, "enabled": None}):
+            why = raid.explain_error(_NOT_ALLOWED_OUT, controller=0)
+        self.assertIn("no JBOD/non-RAID mode", why)
+
+
+class TestForeignCommands(unittest.TestCase):
+
+    def _capture(self, fn):
+        seen = []
+        with patch.object(raid, "run_check",
+                          side_effect=lambda c, **k: (seen.append(c), (True, ""))[1]), \
+             patch("b2ctl.config.tool", side_effect=lambda n: n):
+            raid._tool_cache = "perccli"
+            fn()
+        raid._tool_cache = None
+        return seen[0]
+
+    def test_import_foreign_cmd(self):
+        self.assertEqual(self._capture(lambda: raid.import_foreign(0)),
+                         ["perccli", "/c0/fall", "import"])
+
+    def test_clear_foreign_cmd(self):
+        self.assertEqual(self._capture(lambda: raid.clear_foreign(1)),
+                         ["perccli", "/c1/fall", "del"])
+
+
+class TestEnumerateSetsPdForeign(unittest.TestCase):
+    """The bug itself: DG=F reached the parser and stopped there, so `status`
+    graded a locked drive 'available (Unconfigured Good) — set JBOD for ZFS'."""
+
+    def _enumerate(self, os_disks):
+        from b2ctl import blockdev
+        with patch.object(raid, "_vall_data", return_value=([], [])), \
+             patch.object(raid, "_ctrl_indices", return_value=[0]), \
+             patch.object(raid, "run", return_value=_EALL_FOREIGN), \
+             patch.object(raid, "have_tool", return_value=True), \
+             patch("b2ctl.hba.enumerate_disks", return_value=os_disks), \
+             patch.object(blockdev, "vd_usage", return_value={}), \
+             patch("b2ctl.config.tool", side_effect=lambda n: n):
+            raid._tool_cache = "perccli"
+            try:
+                return {d.bay: d for d in raid.enumerate_disks() if d.bay}
+            finally:
+                raid._tool_cache = None
+
+    def test_hidden_drive_is_flagged(self):
+        disks = self._enumerate([])
+        self.assertTrue(disks["32:7"].pd_foreign)
+        self.assertFalse(disks["32:6"].pd_foreign)
+
+    def test_os_exposed_drive_is_flagged_too(self):
+        """A foreign drive the OS already sees is tagged in PASS 1, a different
+        code path from the synthesised one above — both must set the flag."""
+        from helpers import _disk
+        exposed = _disk(dev="/dev/sdb", serial="S4F2NY0KA04123",
+                        model="SAMSUNG MZ7LH1T9HMLT-00003")
+        disks = self._enumerate([exposed])
+        self.assertTrue(disks["32:7"].pd_foreign)
+        self.assertEqual(disks["32:7"].dev, "/dev/sdb")
+
+
+# ========================================================================== #
+# F-136 — one ctrl_dev was resolved from perc_devs[0] and stamped on every
+# member of every VD, so a two-volume box printed the same /dev/sdX on every
+# hardware row AND made both volumes measure one filesystem.
+# ========================================================================== #
+
+_VALL_TWO_VDS = """\
+/c0/v0 :
+======
+
+DG/VD TYPE  State Access Consist Cache Cac sCC     Size Name
+----------------------------------------------------------------
+0/0   RAID1 Optl  RW     Yes     RWBD  -   OFF 430.0 GB MainSSD
+----------------------------------------------------------------
+
+PDs for VD 0 :
+============
+
+EID:Slt DID State DG     Size Intf Med SED PI SeSz Model                Sp
+--------------------------------------------------------------------------
+32:22    22 Onln   0 430.0 GB SATA SSD N   N 512B SSDSC2KG480G8R       U
+--------------------------------------------------------------------------
+
+VD0 Properties :
+==============
+Strip Size = 64 KB
+SCSI NAA Id = 6d0946606a1b2c3d0000000000000000
+
+/c0/v1 :
+======
+
+DG/VD TYPE  State Access Consist Cache Cac sCC     Size Name
+----------------------------------------------------------------
+1/1   RAID10 Optl RW     Yes     RWBD  -   OFF 6.399 TB SAS-SSD
+----------------------------------------------------------------
+
+PDs for VD 1 :
+============
+
+EID:Slt DID State DG     Size Intf Med SED PI SeSz Model                Sp
+--------------------------------------------------------------------------
+32:12    12 Onln   1 3.492 TB SAS  SSD N   N 512B X357_S164A3T8ATE     U
+--------------------------------------------------------------------------
+
+VD1 Properties :
+==============
+Strip Size = 64 KB
+SCSI NAA Id = 6d0946606a1b2c3d1111111111111111
+"""
+
+
+def _vd_blockdev(dev, wwn="", size=None):
+    from b2ctl.common import Disk
+    d = Disk(dev=dev)
+    d.model = "PERC H730P Mini"
+    d.wwn = wwn
+    d.size_bytes = size
+    return d
+
+
+class TestParseVallNaa(unittest.TestCase):
+
+    def test_naa_captured_per_vd(self):
+        vols, members = raid._parse_vall(_VALL_TWO_VDS)
+        naa = {v["vd"]: v["naa"] for v in vols}
+        self.assertEqual(naa["0"], "6d0946606a1b2c3d0000000000000000")
+        self.assertEqual(naa["1"], "6d0946606a1b2c3d1111111111111111")
+        self.assertEqual({m["vd"] for m in members}, {"0", "1"})
+
+    def test_absent_naa_is_empty_not_missing(self):
+        vols, _ = raid._parse_vall(_VALL)          # fixture has no Properties block
+        self.assertTrue(vols)
+        self.assertEqual(vols[0]["naa"], "")
+
+
+class TestVdDevMap(unittest.TestCase):
+
+    def _vols(self):
+        vols, _ = raid._parse_vall(_VALL_TWO_VDS)
+        for v in vols:
+            v["controller"] = 0
+        return vols
+
+    def test_naa_join_wins(self):
+        devs = [_vd_blockdev("/dev/sdq", wwn="0x6d0946606a1b2c3d0000000000000000"),
+                _vd_blockdev("/dev/sdr", wwn="0x6D0946606A1B2C3D1111111111111111")]
+        m = raid._vd_dev_map(self._vols(), devs)
+        self.assertEqual(m["0:0"], "/dev/sdq")
+        self.assertEqual(m["0:1"], "/dev/sdr")     # case/0x differences absorbed
+
+    def test_size_join_when_no_naa(self):
+        vols = self._vols()
+        for v in vols:
+            v["naa"] = ""
+        # 430.0 GB and 6.399 TB as perccli means them: BINARY under decimal labels.
+        devs = [_vd_blockdev("/dev/sdq", size=int(6.399 * 1024 ** 4)),
+                _vd_blockdev("/dev/sdr", size=int(430.0 * 1024 ** 3))]
+        m = raid._vd_dev_map(vols, devs)
+        self.assertEqual(m["0:0"], "/dev/sdr")     # 430 GB volume -> 430 GB device
+        self.assertEqual(m["0:1"], "/dev/sdq")
+
+    def test_no_key_at_all_maps_nothing(self):
+        """Neither NAA nor size: return empty so the caller keeps its
+        controller-wide fallback rather than guessing a device."""
+        vols = self._vols()
+        for v in vols:
+            v["naa"], v["size"] = "", "??"
+        m = raid._vd_dev_map(vols, [_vd_blockdev("/dev/sdq")])
+        self.assertEqual(m, {})
+
+    def test_a_device_is_claimed_only_once(self):
+        vols = self._vols()
+        for v in vols:
+            v["naa"], v["size"] = "", "430.0 GB"   # both volumes the same size
+        devs = [_vd_blockdev("/dev/sdq", size=int(430.0 * 1024 ** 3)),
+                _vd_blockdev("/dev/sdr", size=int(430.0 * 1024 ** 3))]
+        m = raid._vd_dev_map(vols, devs)
+        self.assertEqual(len(set(m.values())), 2)  # never the same dev twice
+
+    def test_vd_key_is_controller_scoped(self):
+        """Two controllers can each own a v0 — the map key must not collide."""
+        a = {"controller": 0, "vd": "0"}
+        b = {"controller": 1, "vd": "0"}
+        self.assertNotEqual(raid._vd_key(a), raid._vd_key(b))
+
+
+class TestEnumeratePerVdCtrlDev(unittest.TestCase):
+
+    def test_two_vds_get_two_handles_and_no_device_node(self):
+        from b2ctl import blockdev
+        sdq = _vd_blockdev("/dev/sdq", wwn="0x6d0946606a1b2c3d0000000000000000")
+        sdr = _vd_blockdev("/dev/sdr", wwn="0x6d0946606a1b2c3d1111111111111111")
+        vols, members = raid._parse_vall(_VALL_TWO_VDS)
+        with patch.object(raid, "_vall_data", return_value=(vols, members)), \
+             patch.object(raid, "_ctrl_indices", return_value=[0]), \
+             patch.object(raid, "run", return_value=""), \
+             patch.object(raid, "have_tool", return_value=True), \
+             patch.object(raid, "_tool", return_value="perccli"), \
+             patch("b2ctl.hba.enumerate_disks", return_value=[sdq, sdr]), \
+             patch.object(blockdev, "vd_usage", return_value=None):
+            disks = raid.enumerate_disks()
+        hw = {d.array_name: d for d in disks if d.array_type == "HW"}
+        self.assertEqual(len(hw), 2)
+        # The field bug: every hardware row reported one and the same device.
+        self.assertEqual({d.ctrl_dev for d in hw.values()},
+                         {"/dev/sdq", "/dev/sdr"})
+        for d in hw.values():
+            self.assertEqual(d.dev, "-")           # hidden: no device node
 
 
 if __name__ == "__main__":

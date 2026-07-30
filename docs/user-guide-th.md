@@ -241,6 +241,79 @@ controller (ลดถ้าตัน). ถ้าปรับแล้วยั�
 
 ---
 
+### 📌 สถานการณ์ 7: ตารางขึ้นดิสก์ซ้ำเป็น 2 เท่า (การ์ด HBA330 / H330)
+
+**อาการ:** เครื่องมีดิสก์จริง 9 ลูก แต่ `b2ctl status` ขึ้น **18 แถว** — 9 แถวแรกถูกต้อง
+(`sda`…`sdi`) อีก 9 แถวเป็นแถวผี สังเกตง่ายมาก:
+
+| จุดสังเกต | ค่าที่เห็นในแถวผี |
+|-----------|-------------------|
+| **DEV** | เป็น `/dev/sda` **ซ้ำกันหมดทุกแถว** |
+| **SERIAL** | `N/A` |
+| **HEALTH** | `NOREAD` |
+| **LEVEL** | 🔴 `CRITICAL` |
+| คำแนะนำท้ายแถว | `available (Unconfigured Good) — set JBOD for ZFS, …` |
+
+**สาเหตุ:** การ์ด Dell **HBA330 / H330 Mini** (ชิป LSI SAS3008 เฟิร์มแวร์ IT) เป็น HBA แท้ —
+ดิสก์เป็นของ OS ตรงๆ ไม่ได้อยู่หลัง RAID volume — แต่ `sas2ircu` พูดได้แค่ SAS2 จึงมองการ์ดนี้
+ไม่เห็น b2ctl รุ่นก่อนหน้าเลยเดาว่า "ถ้าไม่ใช่ IT ก็ต้องเป็น PERC RAID" แล้วไปสร้างแถวดิสก์ขึ้นมาจาก
+`perccli` ซ้ำกับที่ OS เห็นอยู่แล้ว ทั้งยังอ่าน SMART ผ่าน `-d megaraid` ที่การ์ดนี้ไม่มี → `NOREAD` ยกแถว
+
+**วิธีแก้ (v0.19.0): อัปเดต b2ctl แล้วปล่อยให้มันตรวจเอง** — ไม่ต้องตั้งค่าอะไรเพิ่ม
+
+ตอนนี้ b2ctl จะถามก่อนว่า **"ใครเป็นเจ้าของดิสก์"** ถ้าเป็น HBA แท้ (ไม่มี virtual disk /
+การ์ดรายงาน `HBA-Mode` / ไดรเวอร์ไม่ใช่ `megaraid_sas`) มันจะใช้ **เส้นทาง ZFS/IT-mode ตามปกติ**
+คือ นับดิสก์จาก `lsblk` และอ่าน SMART ตรงด้วย `smartctl /dev/sdX` แต่ยัง **ดึงเลข bay จาก
+`perccli`** เพราะ `sas2ircu` มองการ์ดไม่เห็น — ได้ทั้งตารางที่ถูกต้องและเลข bay ครบ
+
+> 📌 **เลข bay ขึ้นเองแม้ `perccli` ไม่ได้บอก serial:** ดิสก์ SAS enterprise หลัง HBA330 / H330
+> มักยังไม่รายงาน serial ให้ `lsblk` จนกว่าจะอ่าน SMART และ `perccli` บางรุ่นก็ไม่พิมพ์ส่วนราย
+> ดิสก์ออกมาเลย — เดิมคอลัมน์ **BAY** จะว่าง ตอนนี้ b2ctl อ่านเลขช่องจาก kernel ตรงๆ ที่
+> `/sys/class/sas_device/end_device-*/bay_identifier` ซึ่งอยู่โหนดเดียวกับ block device จึงได้
+> แผนที่ `dev → slot` แบบ 1:1 โดยไม่ต้องเทียบ serial เลย (ตัว SES enclosure processor ไม่มี
+> block device จึงหลุดออกไปเอง ไม่กลายเป็นแถวผี)
+>
+> - **เลขตู้ (enclosure) เท่าเดิม** — ใช้เลขเดียวกับที่ vendor tool ใช้อยู่ (เช่น `9:0`…`9:23`
+>   ไม่ใช่ `0:0`) ป้าย bay ที่คุณจำไว้จึงไม่เปลี่ยน
+> - **เติมเฉพาะช่องที่ vendor tool ไม่ได้ตอบ** — ถ้า `sas2ircu` / `perccli` ให้ bay มาแล้ว
+>   ค่านั้นชนะเสมอ เครื่อง R620 เดิมจึงแสดงผลเหมือนเดิมทุกประการ
+> - **`bay_map.json` ยังทำงานเหมือนเดิม** — เลขช่องจาก kernel ผ่าน remap ของ front panel
+>   (`type:sas`) เหมือนเลขที่มาจาก vendor tool (ดูหัวข้อ *ป้ายชื่อ bay — `bay_map.json`* ท้ายคู่มือ)
+> - **เครื่องที่ยังไม่ได้ลง tool อะไรเลยก็เห็น bay** — ตั้ง `"controller": {"mode": "it"}` ใน
+>   `/etc/b2ctl/config.json` แล้ว b2ctl จะเติมคอลัมน์ BAY จาก kernel ให้ (ใช้ได้กับ backplane
+>   SAS เท่านั้น เครื่อง SATA/NVMe ล้วนไม่มี transport นี้ คอลัมน์จะยังว่างเหมือนเดิม)
+
+**สิ่งเดียวที่ต้องตรวจคือค่า `controller.mode`:**
+
+```bash
+cat /etc/b2ctl/config.json
+```
+
+| ค่า | ผลบนเครื่อง HBA330 / H330 |
+|-----|----------------------------|
+| `"auto"` (ค่าเริ่มต้น / ไม่มีคีย์นี้) | ✅ ถูกต้อง — b2ctl ตรวจเอง |
+| `"it"` | ✅ ใช้ได้ — b2ctl สลับไปเอาเลข bay จาก `perccli` ให้เอง ไม่ฟ้องว่าไม่มี tool |
+| `"raid"` | ❌ **บังคับโหมด RAID = อาการเดิมกลับมาทันที** ให้แก้เป็น `"auto"` หรือลบคีย์ทิ้ง |
+
+> ⚠️ ถ้าเคยติดตั้งด้วย `b2ctl install --perc` บนเครื่อง HBA330/H330 ไฟล์ config จะถูกตั้งเป็น
+> `mode=raid` ค้างไว้ — แก้เป็น `"auto"` แล้วรัน `b2ctl status` ใหม่ จำนวนแถวต้องเท่ากับจำนวน
+> ดิสก์จริง และคอลัมน์ SERIAL ต้องมีค่าครบทุกแถว
+
+> 📌 **ข้อจำกัดที่ต้องรู้:**
+> - เครื่อง **PERC RAID จริงที่ยังไม่มี virtual disk เลย** (เครื่องใหม่ หรือเพิ่งสั่ง `raid-del`)
+>   b2ctl อาจตัดสินผิดว่าเป็น HBA → ดิสก์ที่ซ่อนอยู่หลัง controller หายจากตาราง และคำสั่ง
+>   `raid-create` / `raid-replace` / `raid-offline` / `raid-del` จะตอบว่า
+>   `This box is IT/HBA`. **แก้โดยตั้ง `"controller": {"mode": "raid"}` ใน
+>   `/etc/b2ctl/config.json`** (หรือรัน `b2ctl install --perc`) แล้วสั่งใหม่
+> - บนเครื่อง PERC RAID ดิสก์ที่ controller ซ่อนจาก OS ไว้ (Unconfigured Good / Failed)
+>   อาจไม่ขึ้นในตาราง ถ้ามีดิสก์ **รุ่นเดียวกัน** อีกลูกที่ OS มองเห็นอยู่ — ก่อนสรุปว่าดิสก์หาย
+>   ให้เช็คตรงกับ `perccli /c0/eall/sall show` เสมอ
+> - บนเครื่องที่ดิสก์ยังไม่รายงาน serial ผ่าน `lsblk` (ดิสก์ SAS enterprise หลัง HBA330)
+>   b2ctl จะ **ไม่ขึ้นแถว GHOST** ให้ ถ้าเสียบดิสก์แล้ว OS ไม่รับ ให้ตรวจเองด้วย `lsblk` /
+>   `dmesg` แล้วรัน `udevadm trigger` ด้วยมือ (ดู `[u]` udev-rescue ใน §6.10)
+
+---
+
 ## 5. การอ่านตาราง
 
 แต่ละคอลัมน์ในตารางหมายถึง:
@@ -913,6 +986,27 @@ b2ctl rollback 20260617-143022-replace
 
 ## 8. ข้อควรระวัง
 
+### 📐 ตารางปรับตามขนาดจอเอง (v0.21.0)
+
+เครื่องที่มีดิสก์เยอะ ตารางเคยล้นจอทั้งแนวกว้างและแนวสูง ตอนนี้มันปรับให้พอดีหน้าต่างเอง:
+
+- **จอแคบไป?** ตัด column ที่สำคัญน้อยสุดออกก่อน (`WRITTEN` → `POWER_ON` →
+  `END(left)` → `WEAR(used)` → `HEALTH_CHK` → …) แล้วบอกว่าซ่อนไปกี่อัน
+  **BAY, MODEL, SERIAL, HEALTH, POOL/ARRAY, LEVEL ไม่ถูกตัดเด็ดขาด** — ดูออกเสมอว่าแถวไหน
+  คือดิสก์ลูกไหน และมันปกติหรือเปล่า
+- **สูงเกินจอ?** `b2ctl status` จะเปิด pager (`less`) ให้ ไม่มีอะไรเลื่อนหายอีก
+  ปุ่มลูกศรเลื่อนได้ รวมทั้งเลื่อนซ้ายขวาไปดู column ที่ถูกตัด กด `q` ออก
+
+```
+[!] 5 column(s) hidden (terminal 120 < 186) — widen the window or use `b2ctl status --full`
+```
+
+pipe หรือ redirect ไม่โดนผลกระทบ: `b2ctl status > report.txt` และ
+`b2ctl status | grep …` ได้ตารางเต็มเสมอ และไม่เข้า pager `--full` บังคับโชว์ทุก column,
+`--no-pager` ปิด pager, หรือตั้ง `PAGER=cat` ก็ได้เหมือนกัน
+
+`watch` ปรับ column เหมือนกัน แต่ **ไม่เข้า pager** เพราะมันต้องใช้ terminal ตรวจจับ hot-plug
+
 ### ⚠️ อย่าผสม SAS กับ SATA โดยไม่ทดสอบก่อน
 
 การเอาดิสก์ SAS มาเป็น spare ในพูลที่เป็น SATA ล้วน อาจมีปัญหาได้ ถ้าไม่แน่ใจ ให้ใช้
@@ -946,6 +1040,8 @@ b2ctl rollback 20260617-143022-replace
 | `sudo b2ctl status` | ดูตารางสุขภาพดิสก์ครั้งเดียว |
 | `sudo b2ctl status --locate` | ดูตาราง + กะพริบไฟดิสก์ที่มีปัญหา |
 | `sudo b2ctl status --json` | แสดงผลเป็น JSON |
+| `sudo b2ctl status --full` | โชว์ทุก column เต็มความกว้าง ไม่เข้า pager (ไว้ copy/paste) |
+| `sudo b2ctl status --no-pager` | ไม่ต้องเข้า pager ถึงตารางจะสูงเกินจอ |
 | `sudo b2ctl watch` | ⭐ เข้าโหมดเฝ้าดู (แนะนำ) |
 | `sudo b2ctl --dry-run watch` | เข้าโหมดเฝ้าดูแบบ dry-run (ไม่เปลี่ยนแปลงจริง) |
 | `sudo b2ctl locate <bay/serial/sdX>` | กะพริบไฟดิสก์ตัวนั้น |
@@ -963,6 +1059,8 @@ tool ไหนทำให้ไฟ drive ที่ healthy ติดนิ่�
 | `sudo b2ctl scrub [<pool>]` / `sudo b2ctl trim [<pool>]` | alias เดิมของ `b2ctl maint scrub` / `maint trim` |
 | `sudo b2ctl log-add <pool> <dev…> [--mirror\|--raid10] [--size 32G]` | เพิ่ม SLOG; บังคับ topology + over-provision |
 | `sudo b2ctl cache-add <pool> <dev…> [--size 512G]` | เพิ่ม L2ARC cache; over-provision ด้วย `--size` |
+| `b2ctl raid-foreign` | ดู foreign configuration ของ PERC (read-only ไม่ต้อง root) |
+| `sudo b2ctl raid-foreign --import\|--clear [-c N]` | import / ทิ้ง — **ทั้ง controller**, ยืนยันสองชั้น |
 | `sudo b2ctl log` | ดู 20 operation ล่าสุดจาก audit trail |
 | `sudo b2ctl log --last N` | ดู N operation ล่าสุด |
 | `sudo b2ctl rollback <op_id>` | ย้อนกลับ operation ก่อนหน้า (พร้อม confirm) |
@@ -1044,6 +1142,25 @@ Storage summary:
 - **USED/FREE** — software เอาจาก pool; hardware อ่านจาก **filesystem ที่ mount**
   ของ volume ผ่าน `lsblk` ถ้า volume เป็น raw/ไม่ได้ mount จะขึ้น `-` (ไม่มี FS ให้วัด)
 
+### ทำไมแถว hardware RAID ขึ้น `DEV = -` (v0.21.0)
+
+ดิสก์ที่อยู่ *หลัง* PERC virtual disk — OS มองไม่เห็นมันเลย มันไม่มี `/dev/sdX` ของตัวเอง
+column DEV จึงบอกตรงๆ ว่าไม่มี:
+
+```
+BAY     DEV    IF   MODEL              ... POOL/ARRAY
+32:12   -      SAS  X357_S164A3T8ATE   ... HW:vd1/raid10
+32:22   -      SATA SSDSC2KG480G8R     ... HW:vd0/raid1
+32:0    sda    SAS  DL2400MM0159       ... SW:tank/mirror-0
+```
+
+ก่อน v0.21.0 column นี้โชว์ device ของ **virtual disk** (`sdq`) ให้ทุกแถว — ค่าเดียวกันหมด
+ทุกลูก และซ้ำกันข้าม volume ด้วย ให้ระบุดิสก์ด้วย **BAY** แทน ซึ่งเป็นสิ่งที่ทุกคำสั่งของ b2ctl
+ใช้อยู่แล้ว
+
+ผลพลอยได้ที่ควรรู้: เครื่องที่มี 2 hardware volume ตอนนี้ storage summary วัดแยกกันจริงแล้ว
+เมื่อก่อนโชว์ `USED`/`FREE` เท่ากันทั้งสองแถว
+
 ### เปลี่ยนดิสก์ RAID ที่เสีย
 
 ```
@@ -1057,6 +1174,88 @@ controller **rebuild** พร้อมแถบความคืบหน้า
 
 > หมายเหตุ: การ์ด NVMe 2×M.2 ถ้าโชว์แค่ตัวเดียว ต้องเปิด **PCIe bifurcation (x4x4)**
 > ใน BIOS — เป็นเรื่องฮาร์ดแวร์ ไม่ใช่ b2ctl
+
+> ⚠️ **การ์ด HBA330 / H330 ไม่ใช่ RAID box** ถึงจะใช้ `perccli` เหมือนกัน — ดิสก์เป็นของ OS
+> ตรงๆ b2ctl (v0.19.0) จึงตรวจเองว่าใครเป็นเจ้าของดิสก์ แล้วใช้เส้นทาง ZFS/IT-mode โดยดึงแค่
+> เลข bay จาก `perccli` **อย่าตั้ง `controller.mode` เป็น `"raid"` บนการ์ดพวกนี้** (ดู
+> [สถานการณ์ 7](#-สถานการณ์-7-ตารางขึ้นดิสก์ซ้ำเป็น-2-เท่า-การ์ด-hba330--h330)) กลับกัน
+> ถ้าเป็น PERC RAID จริงแต่ **ยังไม่มี virtual disk** และคำสั่ง `raid-*` ตอบว่า
+> `This box is IT/HBA` ให้บังคับ `"controller": {"mode": "raid"}` ใน `/etc/b2ctl/config.json`
+
+### ดิสก์ที่ติด FOREIGN config (v0.20.0)
+
+ดิสก์ที่เคยอยู่กับ **controller อื่น หรือ array อื่น** จะพก metadata ของ array เก่ามาด้วย
+PERC เรียกสิ่งนี้ว่า **foreign configuration** แล้วปฏิเสธทุกคำสั่งกับดิสก์ลูกนั้น — ตั้ง JBOD
+ไม่ได้ ทำ hot spare ไม่ได้ ใส่ volume ไม่ได้ จนกว่าจะจัดการมันก่อน `b2ctl status` จะบอกว่า:
+
+```
+- bay 32:7 /dev/sda (SAMSUNG MZ7LH1T9HMLT-00003, SN S4F2NY0KA04123) [CONFIG]
+    - FOREIGN config on this drive — the controller refuses JBOD / hot-spare /
+      volume-create until it is imported or cleared (assign -> [5], or perccli /cN/fall)
+```
+
+ใน `watch` กด `[a]ssign` เลือกดิสก์ลูกนั้น เมนูจะเพิ่มข้อ `[5]` ขึ้นมา และข้อ 2/3/4 จะ
+**ปฏิเสธตั้งแต่ต้นพร้อมบอกเหตุผล** แทนที่จะปล่อยให้ controller ตอบ `ErrCd 255 Operation
+not allowed` แบบอ่านไม่รู้เรื่อง:
+
+```
+  PERC drive (32:7) SAMSUNG MZ7LH1T9HMLT-00003 (S4F2NY0KA04123) [UGood, FOREIGN]
+    [1] Locate LED (blink the bay)
+    [2] Use for ZFS / software RAID  (set JBOD — exposes it as /dev/sdX)
+    [3] CREATE a hardware RAID volume (perccli)
+    [4] Add as hardware HOT SPARE
+    [5] Foreign config on this controller — import or clear it (REQUIRED before 2/3/4)
+```
+
+กด `[5]` จะ **โชว์ก่อนว่า foreign config นั้นคืออะไร** แล้วค่อยถาม:
+
+```
+  FOREIGN CONFIG on /c0:
+    DG EID:Slot Type    State  Size      VDs
+     0 -        RAID10  Frgn   3.491 TB  1
+  foreign drive(s) present on this controller: 32:4
+  NOTE: this group spans more drives than are present — importing it would give
+        a degraded array.
+  WARNING: perccli /c0/fall acts on the WHOLE controller — there is no
+  per-drive form. Both actions below hit everything listed above.
+    [i] import — bring that foreign array back online on this controller
+    [c] clear  — DISCARD it; its drives drop to Unconfigured-Good
+    [s] skip / decide later
+```
+
+**`EID:Slot = -` เป็นเรื่องปกติ ไม่ใช่ error** — controller เก็บ foreign config เป็นราย
+**drive group** ไม่ใช่รายลูก ถ้า group นั้นกินหลายลูกมันเลยระบุ slot เดียวไม่ได้ อย่างเคสข้างบน
+array เก่าเป็น RAID10 2 ลูก แต่เครื่องนี้มีอยู่ลูกเดียว บรรทัดถัดมาจะบอกว่าลูกที่เสียบอยู่จริง
+ตัวไหนบ้างที่ติด config นี้
+
+- **import** — อยากได้ array เก่ากลับมา (เช่นย้ายชุดดิสก์ที่ยังใช้งานได้มาทั้งชุด)
+- **clear** — อยากได้แค่ตัวดิสก์ ไม่เอา array เก่า หลังจากนี้ array นั้น import กลับไม่ได้แล้ว
+  ยืนยันสองชั้น: ตอบ `[y/N]` แล้วพิมพ์เลข controller ซ้ำ
+
+⚠️ **อ่านตารางให้จบก่อนเลือก** คำสั่งนี้ไม่มีแบบรายลูก — `/c0/fall` = foreign config
+**ทุกอัน** บน controller 0 ถ้าในตารางมีดิสก์ที่ไม่คาดคิด ให้หยุดแล้วไปหาที่มาก่อน
+
+สั่งจาก command line ได้เหมือนกัน:
+
+```
+b2ctl raid-foreign                 # ดูอย่างเดียว — read-only ไม่ต้อง root
+b2ctl raid-foreign --import        # import (ทั้ง controller)
+b2ctl raid-foreign --clear         # ทิ้ง (ทั้ง controller, อันตราย)
+b2ctl raid-foreign --clear -c 1    # ... บน controller 1
+```
+
+เคลียร์เสร็จกด `[r]efresh` ดิสก์จะกลับเป็น `Unconfigured Good` ธรรมดา แล้ว `[2] set JBOD`
+จะทำงานได้
+
+> ถ้าโดนปฏิเสธ **ทั้งที่ไม่ได้ติด foreign** b2ctl จะพิมพ์ว่าตรวจอะไรไปบ้าง เห็นสาเหตุอีกทางได้:
+>
+> ```
+>   why: the PERC refuses this transition. Checked:
+>     - foreign config on 32:7    -> no
+>     - controller 0 JBOD policy  -> OFF  <-- this
+>     - Support JBOD              -> Yes
+>   fix: `perccli /c0 set jbod=on` (controller-wide policy — b2ctl will not flip it for you)
+> ```
 
 ---
 

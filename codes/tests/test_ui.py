@@ -1,6 +1,9 @@
 """Unit tests for b2ctl.ui — table/pool/detail rendering + format helpers."""
 from __future__ import annotations
 
+import os
+import re
+
 from helpers import _disk
 from b2ctl import ui
 from b2ctl.common import assess
@@ -281,3 +284,95 @@ class TestPoolMaintColumns:
         out = ui.render_storage(rows)
         assert "SCRUB" in out and "TRIM" in out
         assert "2d ago" in out
+
+
+# ========================================================================== #
+# F-137 — the table was a hardcoded 196 columns wide with no terminal awareness
+# at all, so 24 disks on a 120-column screen wrapped into unreadable stripes.
+# ========================================================================== #
+
+class TestFitColumns:
+
+    def test_unlimited_keeps_everything(self):
+        for w in (None, 0, ui.TABLE_W, ui.TABLE_W + 50):
+            cols, hidden = ui.fit_columns(w)
+            assert hidden == 0
+            assert len(cols) == len(ui._COLUMNS)
+
+    def test_narrow_drops_until_it_fits(self):
+        cols, hidden = ui.fit_columns(120)
+        assert hidden > 0
+        assert sum(c[2] for c in cols) <= 120
+
+    def test_drop_order_is_least_useful_first(self):
+        cols, _ = ui.fit_columns(ui.TABLE_W - 1)
+        keys = {c[0] for c in cols}
+        assert "written" not in keys          # rank 1 goes first
+        assert "poh" in keys                  # rank 2 still there
+
+    def test_identity_and_verdict_columns_never_drop(self):
+        cols, _ = ui.fit_columns(20)          # absurdly narrow
+        keys = [c[0] for c in cols]
+        for k in ("bay", "model", "serial", "health", "pool", "level"):
+            assert k in keys, k
+
+    def test_header_and_row_stay_in_lockstep(self):
+        """The point of the single _COLUMNS spec: two hand-written format
+        strings could (and did) drift apart."""
+        d = _disk()
+        assess(d)
+        for width in (None, 160, 120, 100):
+            cols, _ = ui.fit_columns(width)
+            expected = sum(c[2] for c in cols)
+            row = "".join(c[3](d) for c in cols)
+            assert _visible_len(row) == expected, width
+
+    def test_table_width_matches_the_spec(self):
+        assert ui.TABLE_W == sum(c[2] for c in ui._COLUMNS)
+
+    def test_rule_width_follows_the_visible_columns(self):
+        out = ui.render_table([_disk()], 120).splitlines()
+        assert len(out[0]) == len(out[2])     # '=' rule and '-' rule agree
+        assert len(out[0]) <= 120
+
+    def test_footer_only_when_something_was_hidden(self):
+        assert "column(s) hidden" in ui.render_table([_disk()], 120)
+        assert "column(s) hidden" not in ui.render_table([_disk()])
+
+
+def _visible_len(s: str) -> int:
+    """Length ignoring ANSI SGR escapes — the colour-wrapped STATUS/HEALTH_CHK/
+    LEVEL cells must not distort the layout maths."""
+    return len(re.sub(r"\x1b\[[0-9;]*m", "", s))
+
+
+class TestAutoWidth:
+
+    def test_env_columns_wins(self, monkeypatch):
+        monkeypatch.setenv("COLUMNS", "133")
+        assert ui.auto_width() == 133
+
+    def test_non_tty_is_unlimited(self, monkeypatch):
+        """A pipe or a redirect must get the full table — get_terminal_size()
+        answers its (80, 24) fallback there, which would silently truncate."""
+        monkeypatch.delenv("COLUMNS", raising=False)
+
+        class _NotATty:
+            def isatty(self):
+                return False
+
+        monkeypatch.setattr(ui.sys, "stdout", _NotATty())
+        assert ui.auto_width() is None
+
+    def test_tty_uses_terminal_size(self, monkeypatch):
+        import shutil as _sh
+        monkeypatch.delenv("COLUMNS", raising=False)
+
+        class _Tty:
+            def isatty(self):
+                return True
+
+        monkeypatch.setattr(ui.sys, "stdout", _Tty())
+        monkeypatch.setattr(_sh, "get_terminal_size",
+                            lambda *a: os.terminal_size((147, 40)))
+        assert ui.auto_width() == 147

@@ -11,9 +11,15 @@ because MODEL contains spaces.
 """
 from __future__ import annotations
 
+import glob
+import os
 import re
 
 from .common import run
+
+# Kernel SAS transport class: every end device exposes the bay its expander
+# reports, and the block device hangs off the SAME node.
+SAS_DEVICE_DIR = "/sys/class/sas_device"
 
 # Device-name prefixes that are never physical disks (loop/zram/dm/md/...).
 EXCLUDE = ("loop", "sr", "ram", "zd", "dm-", "md")
@@ -35,6 +41,42 @@ def lsblk_pairs(cols: str) -> list[dict]:
         if line.strip():
             rows.append(dict(_PAIR_RE.findall(line)))
     return rows
+
+
+def sas_bay_slots() -> dict:
+    """Return {'/dev/sdX': slot} straight from the kernel's SAS transport class.
+
+    `/sys/class/sas_device/end_device-*/bay_identifier` is the slot the expander
+    reports for that end device, and its block device lives under the SAME sysfs
+    node — so this is an EXACT device->slot map with no serial matching anywhere.
+    That removes the whole failure class F-133 was: lsblk publishes no SERIAL for
+    enterprise SAS drives until SMART runs, and tools truncate serials
+    differently, so every serial-keyed bay map can miss. This one cannot (F-134).
+
+    Nodes with no block device drop out on their own — which is how the SES
+    enclosure processor (a real end device, bay 24 on the field HBA330) excludes
+    itself, the same phantom-row hazard F-036 had to special-case for sas2ircu.
+
+    Returns {} when there is no SAS transport (pure SATA/NVMe box) or when the
+    backplane reports one constant for every drive (a useless map).
+    """
+    slots: dict[str, int] = {}
+    for end in sorted(glob.glob(os.path.join(SAS_DEVICE_DIR, "end_device-*"))):
+        try:
+            with open(os.path.join(end, "bay_identifier")) as f:
+                raw = f.read().strip()
+        except OSError:
+            continue
+        if not raw.isdigit():
+            continue
+        names = sorted(os.path.basename(p) for p in
+                       glob.glob(os.path.join(end, "device", "target*", "*", "block", "*")))
+        if not names:
+            continue                       # enclosure processor / no block device
+        slots[f"/dev/{names[0]}"] = int(raw)
+    if len(slots) > 1 and len(set(slots.values())) == 1:
+        return {}                          # backplane reports a constant bay
+    return slots
 
 
 def vd_usage(dev: str) -> tuple[int, int] | None:

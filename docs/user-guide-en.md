@@ -47,8 +47,10 @@ b2ctl reads each drive directly and talks to ZFS for everything else.
 > 📌 Note: b2ctl is one tool with two co-equal, auto-detected backends —
 > **IT/HBA mode** (`sas2ircu`, raw disks, ZFS lifecycle) and **RAID mode**
 > (`perccli` + `smartctl -d megaraid` passthrough, hardware RAID). It picks the
-> right one per box; force it with `controller.mode`. (Only the old `storcli`
-> tool was dropped — it was blind to a PERC and caused false detection.)
+> right one per box — leave `controller.mode` on `"auto"` and let it, including on
+> a **Dell HBA330 / H330**, where `perccli` sees the card but the OS still owns the
+> disks (v0.19.0 — see *HBA330 / H330 boxes* near the end of this guide). (Only the
+> old `storcli` tool was dropped — it was blind to a PERC and caused false detection.)
 
 ---
 
@@ -220,6 +222,18 @@ saturate and slow/old disks miss the read timeout → they show **`NOREAD` /
 `timeout` = seconds per disk (raise it for slow disks); `megaraid_workers` =
 how many disks are read at once through the controller (lower it if it saturates).
 A disk that stays `NOREAD` after this is likely genuinely failing — check its bay.
+
+### Every drive appears twice, half the rows `NOREAD` (HBA330 / H330 box)
+
+On a Dell box with an **HBA330 Mini / H330** (LSI SAS3008), `b2ctl status` printed
+**two rows per physical drive** — 9 drives, 18 rows. The extra rows all shared the
+**same DEV** (`/dev/sda`), **SERIAL `N/A`**, **HEALTH `NOREAD`** and **LEVEL
+CRITICAL**, each advising "available (Unconfigured Good) — set JBOD for ZFS".
+
+Nothing is wrong with those disks. b2ctl was treating the card as a hardware-RAID
+PERC and inventing one phantom row per drive. **Fixed in v0.19.0** — upgrade, then
+make sure `controller.mode` is back on `"auto"` (see *HBA330 / H330 boxes* near the
+end of this guide). `b2ctl status` then shows exactly one row per drive again.
 
 ---
 
@@ -967,6 +981,30 @@ state was reached. If something looks wrong:
 
 ## 8. Warnings
 
+### The table adapts to your terminal (v0.21.0)
+
+On a box with many disks the table used to run off the screen in both directions.
+It now fits itself to the window:
+
+- **Too narrow?** The least important columns are dropped, least-useful first
+  (`WRITTEN` → `POWER_ON` → `END(left)` → `WEAR(used)` → `HEALTH_CHK` → …), and a
+  note says how many were hidden. **BAY, MODEL, SERIAL, HEALTH, POOL/ARRAY and
+  LEVEL are never dropped** — you can always tell which disk a row is and whether
+  it is healthy.
+- **Too tall?** `b2ctl status` opens a pager (`less`), so nothing scrolls away.
+  Arrow keys scroll, including sideways for any column that was chopped; `q` quits.
+
+```
+[!] 5 column(s) hidden (terminal 120 < 186) — widen the window or use `b2ctl status --full`
+```
+
+Nothing changes when you pipe or redirect: `b2ctl status > report.txt` and
+`b2ctl status | grep …` always get the full table and never a pager. `--full`
+forces every column, `--no-pager` disables paging, and `PAGER=cat` does too.
+
+`watch` fits its columns the same way but **never** pages — it needs the terminal
+for hot-plug detection.
+
 ### Bay numbers may be scrambled
 
 On this Dell 12G backplane in IT mode, the controller reports scrambled slot
@@ -1009,6 +1047,8 @@ ESP partition **manually**. b2ctl does not touch Proxmox boot config.
 | `b2ctl status` | health table + pool summary + details block |
 | `b2ctl status --locate` | same + blink LEDs on WARNING/CRITICAL disks |
 | `b2ctl status --json` | JSON output |
+| `b2ctl status --full` | every column at full width, no pager (for copy/paste) |
+| `b2ctl status --no-pager` | never page, even when taller than the screen |
 | `b2ctl --dry-run <cmd>` | preview what commands would run — no writes |
 | `b2ctl locate <bay\|serial\|dev> [secs]` | blink one disk's LED (~5s) |
 
@@ -1031,6 +1071,8 @@ or fully dark.
 | `b2ctl scrub [<pool>]` / `b2ctl trim [<pool>]` | back-compat aliases of `b2ctl maint scrub` / `maint trim` |
 | `b2ctl log-add <pool> <dev…> [--mirror\|--raid10] [--size 32G]` | add a SLOG; force topology + over-provision |
 | `b2ctl cache-add <pool> <dev…> [--size 512G]` | add L2ARC cache; over-provision with `--size` |
+| `b2ctl raid-foreign` | show a PERC foreign configuration (read-only, no root) |
+| `b2ctl raid-foreign --import\|--clear [-c N]` | import / discard it — **CONTROLLER-WIDE**, double-confirmed |
 | `b2ctl log [--last N]` | show last N ops from audit trail (default 20) |
 | `b2ctl rollback <op_id>` | roll back a previous operation (with confirmation) |
 | `b2ctl check` | verify tools, show backend detected, config file status |
@@ -1074,6 +1116,11 @@ or fully dark.
 | `5` | add as single vdev — no redundancy ⚠ |
 | `6` | wipe all labels and data |
 | `s` | skip — decide later; come back with `a` |
+
+On a **PERC drive** (RAID mode) the same key opens the hardware menu instead:
+`1` locate, `2` set JBOD (hand it to ZFS), `3` create a volume, `4` hot spare —
+plus `5` **Foreign config** when the drive carries one, which is *required*
+before 2/3/4 will run.
 
 ### Audit trail
 
@@ -1138,6 +1185,26 @@ Storage summary:
   volume's **mounted filesystem** via `lsblk`. If the hardware volume is raw or
   not mounted, USED/FREE show `-` (there's no filesystem to measure).
 
+### Why hardware-RAID rows show `DEV = -` (v0.21.0)
+
+A drive that lives *behind* a PERC virtual disk is invisible to the operating
+system — it has no `/dev/sdX` of its own. The DEV column says so:
+
+```
+BAY     DEV    IF   MODEL              ... POOL/ARRAY
+32:12   -      SAS  X357_S164A3T8ATE   ... HW:vd1/raid10
+32:22   -      SATA SSDSC2KG480G8R     ... HW:vd0/raid1
+32:0    sda    SAS  DL2400MM0159       ... SW:tank/mirror-0
+```
+
+Before v0.21.0 the column printed the *virtual disk's* device (`sdq`) on every
+hardware row — the same value for every drive, and the same value even across two
+different volumes. Identify these drives by their **BAY**, which is what every
+b2ctl action uses anyway.
+
+The side effect worth knowing: with two hardware volumes, the storage summary now
+measures each one separately. It used to report identical `USED`/`FREE` for both.
+
 ### Replacing a failed RAID disk
 
 ```
@@ -1154,6 +1221,189 @@ turned back off; there is no latched `on`/`off` form, by design), and
 
 > Note: on a 2×M.2 NVMe card, if only one NVMe shows, enable **PCIe bifurcation
 > (x4x4)** for that slot in the BIOS — that is a hardware setting, not b2ctl.
+
+### A drive with a FOREIGN config (v0.20.0)
+
+Put a disk in that once belonged to **another controller or another array** and it
+arrives carrying that array's metadata. The PERC calls this a **foreign
+configuration** and refuses to do *anything* with the drive — JBOD, hot spare,
+volume member — until you deal with it. `b2ctl status` flags it:
+
+```
+- bay 32:7 /dev/sda (SAMSUNG MZ7LH1T9HMLT-00003, SN S4F2NY0KA04123) [CONFIG]
+    - FOREIGN config on this drive — the controller refuses JBOD / hot-spare /
+      volume-create until it is imported or cleared (assign -> [5], or perccli /cN/fall)
+```
+
+In `watch`, `[a]ssign` that drive and the menu grows a fifth entry. Options 2/3/4
+refuse up front and tell you why, instead of letting the controller answer with
+`ErrCd 255 Operation not allowed`:
+
+```
+  PERC drive (32:7) SAMSUNG MZ7LH1T9HMLT-00003 (S4F2NY0KA04123) [UGood, FOREIGN]
+    [1] Locate LED (blink the bay)
+    [2] Use for ZFS / software RAID  (set JBOD — exposes it as /dev/sdX)
+    [3] CREATE a hardware RAID volume (perccli)
+    [4] Add as hardware HOT SPARE
+    [5] Foreign config on this controller — import or clear it (REQUIRED before 2/3/4)
+```
+
+Choosing `[5]` shows **what the foreign config actually is** before asking:
+
+```
+  FOREIGN CONFIG on /c0:
+    DG EID:Slot Type    State  Size      VDs
+     0 -        RAID10  Frgn   3.491 TB  1
+  foreign drive(s) present on this controller: 32:4
+  NOTE: this group spans more drives than are present — importing it would give
+        a degraded array.
+  WARNING: perccli /c0/fall acts on the WHOLE controller — there is no
+  per-drive form. Both actions below hit everything listed above.
+    [i] import — bring that foreign array back online on this controller
+    [c] clear  — DISCARD it; its drives drop to Unconfigured-Good
+    [s] skip / decide later
+```
+
+**`EID:Slot = -` is normal, not an error.** The controller records a foreign
+config per **drive group**, not per drive, so it cannot name one slot when the
+group spans several — as above, where the old array was a 2-drive RAID10 and only
+one of its disks is in this machine. The line underneath tells you which drives
+that are actually plugged in carry the config.
+
+- **import** — you want that old array back (you moved a working set of disks).
+- **clear** — you want the disks, not the old array. The array becomes
+  unimportable. Double-confirmed: `[y/N]`, then type the controller number.
+
+⚠️ **Read the table before you choose.** There is no per-drive form of this
+command — `/c0/fall` means *every* foreign config on controller 0. If the table
+lists drives you did not expect, stop and work out where they came from first.
+
+Same thing from the command line:
+
+```
+b2ctl raid-foreign                 # show only — read-only, no root needed
+b2ctl raid-foreign --import        # import (CONTROLLER-WIDE)
+b2ctl raid-foreign --clear         # discard (CONTROLLER-WIDE, DESTRUCTIVE)
+b2ctl raid-foreign --clear -c 1    # ... on controller 1
+```
+
+After clearing, `[r]efresh` and the drive reads plain `Unconfigured Good` — then
+`[2] set JBOD` works.
+
+> If a drive is refused **without** being foreign, b2ctl now prints what it
+> checked, so the other cause is visible too:
+>
+> ```
+>   why: the PERC refuses this transition. Checked:
+>     - foreign config on 32:7    -> no
+>     - controller 0 JBOD policy  -> OFF  <-- this
+>     - Support JBOD              -> Yes
+>   fix: `perccli /c0 set jbod=on` (controller-wide policy — b2ctl will not flip it for you)
+> ```
+
+### HBA330 / H330 boxes — perccli sees the card, the OS owns the disks (v0.19.0)
+
+A Dell **HBA330 Mini / H330** (LSI SAS3008, IT firmware) is *not* a RAID
+controller. It hands every drive straight to the OS as a raw `/dev/sdX`, exactly
+like a crossflashed H710 — but it is a **SAS3** chip, so the tooling splits:
+
+- **`sas2ircu` cannot see it.** That tool speaks SAS2 only and reports zero
+  controllers on this card.
+- **`perccli` can.** It manages the card fine, and is the only way to read each
+  drive's bay (`enclosure:slot`).
+
+Since **v0.19.0** b2ctl asks *who owns the storage* before picking a mode, so on
+such a box it:
+
+- runs the normal **IT/HBA workflow** — one row per real drive from `lsblk`,
+  SMART read **directly** (`smartctl -a /dev/sdX`, no megaraid passthrough), and
+  the full **ZFS** lifecycle (`[a]ssign`, `[n]ew-pool`, `[o]ffload`, `[s]wap`,
+  `[m]aint`, `[l]ocate`);
+- takes **only the bay numbers** from perccli.
+
+`b2ctl check` confirms it:
+
+```
+  [✔] Detected backend: IT-mode
+  [✔] Bays mapped: 9 disks across 1 enclosure(s)
+```
+
+**Install perccli, but do not force RAID mode:**
+
+```bash
+sudo b2ctl install --tool perccli   # the tool only — leaves controller.mode alone
+```
+
+`b2ctl install --perc` is for a real PERC running hardware RAID: it writes
+`controller.mode = "raid"`, which on an HBA330 is exactly the setting that produced
+the duplicated-`NOREAD` rows in §4.
+
+**Leave `controller.mode` on `"auto"`.** Auto now gets these boxes right by itself,
+so you no longer need to force anything:
+
+| `controller.mode` | what happens on an HBA330 / H330 |
+|-------------------|----------------------------------|
+| `"auto"` (default) | **correct** — IT/ZFS workflow, bays from perccli |
+| `"it"` | works (b2ctl falls back to perccli for the bays), but pointless |
+| `"raid"` | **wrong** — brings back the duplicated `NOREAD` rows |
+
+If an earlier version left `"raid"` in the config for one of these boxes, put it
+back to `"auto"` — edit `/etc/b2ctl/config.json` (there is no `config set` verb):
+
+```json
+{ "controller": { "mode": "auto" } }
+```
+
+then re-run `b2ctl check` — it should report `Detected backend: IT-mode`.
+
+**Auto never demotes a real PERC.** A controller that names its own personality
+(`RAID-Mode`) is believed outright, and where there is no such string b2ctl calls a
+card HBA-like only when **every** drive it reports also turns up as an OS block
+device. A PERC with no virtual disk yet — a fresh box, or right after `b2ctl
+raid-del` — therefore stays in RAID mode with its `raid-*` verbs available; you do
+not have to force `"mode": "raid"` just to build the first volume.
+
+**Bays fill in even when perccli reports no serials.** These cards often print a
+drive list with no per-drive serial section, and an enterprise SAS drive publishes
+no serial to `lsblk` until b2ctl reads SMART — so the serial-keyed bay map matched
+nothing and the BAY column stayed blank. b2ctl now also reads each slot straight
+from the kernel (`/sys/class/sas_device/*/bay_identifier`), which maps **device →
+slot** with no serial involved. Nothing you have memorised changes:
+
+- **The numbers stay the same.** Only the *slot* comes from the kernel; the
+  **enclosure** prefix keeps the number the vendor tool already shows, so drives
+  still read `9:0 … 9:23`, never `0:0`.
+- **A vendor label always wins.** The kernel is consulted only for disks the vendor
+  map left without a bay, so an R620 (`sas2ircu` + `reverse_slots`) prints exactly
+  the table it printed in v0.18.0.
+- **`bay_map.json` still applies** — a kernel slot goes through the same front-panel
+  remap (`map` / `reverse_slots`) as any other bay (see *Bay labels* below).
+
+It also works with **no vendor tool installed at all**: on a SAS backplane with
+neither `sas2ircu` nor `perccli`, `b2ctl status` now shows bays instead of blanks
+(labelled `0:<slot>`, since there is no vendor enclosure number to borrow). A box
+with no SAS transport (pure SATA / NVMe) is unaffected — there is nothing to read.
+The SES enclosure processor in the backplane has no block device of its own, so it
+never becomes an extra row.
+
+**Known limits in v0.19.0 — worth knowing before you trust an empty-looking bay:**
+
+- **On a real PERC RAID box, a hidden drive can still be missing from the table.**
+  b2ctl joins every controller drive to an OS disk by **serial, then WWN**, so a
+  drive perccli can identify always gets a row — including the mixed layout that
+  the `[a]ssign` menu's *set JBOD* creates (one drive exposed to the OS, an
+  identical sibling still hidden). Only a drive perccli reports with **neither
+  serial nor WWN** can be left out, and then only when a drive of the same model
+  *and* size is already visible to the OS — in that case you cannot `set jbod` it
+  or add it as a hot spare until it shows up. If a bay is populated but has no row,
+  check the controller's own list: `perccli /c0/eall/sall show all`.
+- **A GHOST row can be withheld on the pre-SMART pass.** Enterprise SAS drives
+  report no serial to `lsblk` until b2ctl reads SMART, which made *every* mapped
+  drive look OS-rejected — that was the phantom-row symptom. b2ctl now stays quiet
+  only when the drives that have not identified themselves yet can account for all
+  of them; any surplus is still reported as a GHOST / CRITICAL row with the
+  `[u]dev-rescue` prompt (§6.10). If a populated bay has no row at all, check
+  `dmesg | tail` and reseat the drive.
 
 ---
 

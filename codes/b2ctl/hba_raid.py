@@ -24,13 +24,15 @@ _TOOL_CANDIDATES = ("perccli64", "perccli")
 
 _tool_cache: str | None = None
 _have_tool_cache: bool | None = None
+_hba_personality_cache: bool | None = None
 
 
 def _reset_caches() -> None:
     """Clear the per-process perccli memos (tests / a forced re-probe, F-040)."""
-    global _tool_cache, _have_tool_cache
+    global _tool_cache, _have_tool_cache, _hba_personality_cache
     _tool_cache = None
     _have_tool_cache = None
+    _hba_personality_cache = None
 
 
 def _ctrlcount(tool: str) -> int | None:
@@ -131,21 +133,131 @@ def bay_map(controller: int | None = None) -> dict:
     return mapping
 
 
-def _parse_bay_map(text: str, mapping: dict) -> None:
-    """Parse perccli `show all` output into {serial: 'enc:slot'}."""
-    # Pattern: "Drive /c<n>/e<enc>/s<slot> Device attributes"
-    # followed by "SN = <serial>"
+# Any per-drive section header, e.g. "Drive /c0/e9/s0 Device attributes :",
+# "Drive /c0/e9/s0 - Detailed Information :" or a bare "Drive /c0/e9/s0 :".
+# Deliberately loose: only SOME perccli builds label the section 'Device
+# attributes', and requiring that literal made every SN unreadable on a Dell
+# HBA330 — which is what left each PD looking 'hidden' (F-133).
+_DRIVE_HDR = re.compile(r"\s*Drive\s+/c\d+/e(\d+)/s(\d+)\b")
+
+
+def _parse_detail(text: str, mapping: dict, key: str, norm=None) -> None:
+    """Bind each `<key> = <value>` line to the nearest preceding Drive header.
+
+    Shared by the serial map and the WWN map: both walk the same
+    `/cX/eall/sall show all` detail sections, differing only in the field they
+    pick up. current_slot is cleared after a hit so a second value in the same
+    section cannot re-bind the slot.
+    """
+    field = re.compile(rf"\s*{key}\s*=\s*(\S+)")
     current_slot: str | None = None
     for line in text.splitlines():
-        m = re.match(r"\s*Drive\s+/c\d+/e(\d+)/s(\d+)\s+Device", line)
+        m = _DRIVE_HDR.match(line)
         if m:
             current_slot = f"{m.group(1)}:{m.group(2)}"
             continue
         if current_slot:
-            m2 = re.match(r"\s*SN\s*=\s*(\S+)", line)
+            m2 = field.match(line)
             if m2:
-                mapping[m2.group(1)] = current_slot
+                val = norm(m2.group(1)) if norm else m2.group(1)
+                if val:
+                    mapping[val] = current_slot
                 current_slot = None
+
+
+def enclosure_ids(controller: int | None = None) -> list[int]:
+    """Distinct enclosure numbers the controller reports for its physical drives.
+
+    Display only: used to prefix a sysfs-derived slot so the bay LABEL keeps the
+    enclosure the operator already sees ('9:0'), never to address anything —
+    perccli actions always take Disk.ctrl_slot, the raw locator (F-134).
+    """
+    encs = set()
+    for idx in _ctrl_indices(controller):
+        for pd in _parse_pd_rows(run([_tool(), f"/c{idx}/eall/sall", "show", "all"])):
+            enc, _, _slot = pd["bay"].partition(":")
+            if enc.isdigit():
+                encs.add(int(enc))
+    return sorted(encs)
+
+
+def _parse_bay_map(text: str, mapping: dict) -> None:
+    """Parse perccli `show all` output into {serial: 'enc:slot'}."""
+    _parse_detail(text, mapping, "SN")
+
+
+def _parse_wwn_map(text: str, mapping: dict) -> None:
+    """Parse perccli `show all` output into {normalised WWN: 'enc:slot'}.
+
+    A serial-independent join key. lsblk reports no SERIAL for enterprise SAS
+    drives until SMART runs, so serial alone cannot tell an exposed PD from a
+    hidden one on the scan path (F-133).
+    """
+    _parse_detail(text, mapping, "WWN", norm=_norm_wwn)
+
+
+def _norm_wwn(value: str) -> str:
+    """Normalise a WWN for cross-tool compare: lowercase hex, no '0x'/separators.
+
+    lsblk prints '0x5000c500a1b2c3d4'; perccli prints '5000C500A1B2C3D4'.
+    """
+    s = (value or "").strip().lower()
+    if s.startswith("0x"):
+        s = s[2:]
+    return re.sub(r"[^0-9a-f]", "", s)
+
+
+def _norm_model(model: str) -> str:
+    return re.sub(r"\s+", " ", (model or "").strip()).upper()
+
+
+_MODEL_MIN = 8          # shortest prefix allowed to claim two models are the same
+
+
+def _model_match(pd_model: str, dev_model: str) -> bool:
+    """True if two model strings describe the same drive.
+
+    perccli truncates its Model column ('Samsung SSD 860') while lsblk reports
+    the full string ('Samsung SSD 860 PRO 1TB'), so this is a prefix compare in
+    either direction — never plain equality. The _MODEL_MIN floor stops a
+    severely truncated column from matching everything: a bare prefix test made
+    ('S', 'Samsung SSD 870 EVO 1TB') True, which would suppress arbitrary drives.
+    """
+    a, b = _norm_model(pd_model), _norm_model(dev_model)
+    if not a or not b or min(len(a), len(b)) < _MODEL_MIN:
+        return False
+    return a.startswith(b) or b.startswith(a)
+
+
+# perccli prints BINARY units under decimal labels: an 860 PRO 1TB
+# (1_024_209_543_168 B) shows as '953.869 GB' = 953.869 GiB, and a 2.4 TB SAS HDD
+# (2_400_476_274_688 B) as '2.182 TB' = 2.182 TiB. Parse them as powers of 1024.
+_SIZE_RE = re.compile(r"([\d.]+)\s*([KMGTP])B", re.I)
+_SIZE_POW = {"K": 1, "M": 2, "G": 3, "T": 4, "P": 5}
+
+
+def _pd_size_bytes(size: str) -> int | None:
+    m = _SIZE_RE.search(size or "")
+    if not m:
+        return None
+    try:
+        return int(float(m.group(1)) * (1024 ** _SIZE_POW[m.group(2).upper()]))
+    except ValueError:
+        return None
+
+
+def _size_match(pd_size: str, dev_bytes) -> bool:
+    """True when a PD's size agrees with a block device's, within 10%.
+
+    Returns True when either side is unknown — this only ever NARROWS the
+    model-based suppression, it must never widen it. The tolerance absorbs
+    rounding and reserved-area differences while still separating a 960 GB SSD
+    from a 2.4 TB HDD.
+    """
+    a = _pd_size_bytes(pd_size)
+    if a is None or not dev_bytes:
+        return True
+    return abs(a - dev_bytes) <= 0.10 * max(a, dev_bytes)
 
 
 # (hba_raid._lsblk_pairs was a dead duplicate of hba._lsblk_pairs — removed,
@@ -180,11 +292,24 @@ def _parse_pd_rows(text: str) -> list[dict]:
     return pds
 
 
+def _is_foreign(row: dict) -> bool:
+    """True when a parsed PD row carries a FOREIGN config (DG column == 'F').
+
+    perccli's State and DG columns are INDEPENDENT axes: State says whether the
+    drive belongs to a VD ('UGood' = it does not), DG says which drive group owns
+    it — and 'F' means "foreign metadata from some other controller/array". The
+    firmware refuses every transition on such a drive (set jbod / add
+    hotsparedrive / add vd) with 'Operation not allowed'. The one authority for
+    the test, so no enumerate path can forget it (F-135).
+    """
+    return (row.get("dg") or "").strip().upper() == "F"
+
+
 def _parse_vall(text: str) -> tuple[list[dict], list[dict]]:
     """Parse `perccli /cN/vall show all`.
 
     Returns (volumes, members):
-      volumes: {"vd","raid","state","size","name"}
+      volumes: {"vd","raid","state","size","name","naa"}
       members: {"bay","did","state","dg","size","intf","med","model","vd","raid"}
 
     Member rows come from the per-VD 'PDs for VD N' table, e.g.::
@@ -194,9 +319,14 @@ def _parse_vall(text: str) -> tuple[list[dict], list[dict]]:
 
     Model is multi-word; parse positionally (4 fixed cols, size = 2 tokens,
     model = middle, Sp = last token).
+
+    `naa` is the `SCSI NAA Id` from that VD's 'VDn Properties' block — the exact
+    key that maps a volume to the /dev/sdX the OS gave it (F-136). '' when the
+    build does not print it; the caller falls back to a size match.
     """
     vols: list[dict] = []
     members: list[dict] = []
+    by_vd: dict[str, dict] = {}
     cur_vd: str | None = None
     cur_raid: str | None = None
     for line in text.splitlines():
@@ -205,15 +335,28 @@ def _parse_vall(text: str) -> tuple[list[dict], list[dict]]:
         if mv:
             cur_vd = mv.group(1)
             continue
+        # 'VD0 Properties :' — the block that carries SCSI NAA Id. Set cur_vd from
+        # it explicitly rather than trusting the preceding '/cN/vX :' header to
+        # still be in scope.
+        mp = re.match(r"VD(\d+)\s+Properties", s, re.I)
+        if mp:
+            cur_vd = mp.group(1)
+            continue
+        mn = re.match(r"SCSI\s+NAA\s+Id\s*=\s*(\S+)", s, re.I)
+        if mn and cur_vd in by_vd:
+            by_vd[cur_vd]["naa"] = mn.group(1)
+            continue
         tok = s.split()
         # VD summary row: "0/0 RAID1 Optl RW Yes RWBD - OFF 640.0 GB MainSSD"
         if (len(tok) >= 10 and re.match(r"^\d+/\d+$", tok[0])
                 and tok[1].upper().startswith("RAID")):
             vd = tok[0].split("/")[1]
             cur_raid = tok[1]
-            vols.append({"vd": vd, "raid": tok[1], "state": tok[2],
-                         "size": f"{tok[8]} {tok[9]}",
-                         "name": " ".join(tok[10:])})
+            row = {"vd": vd, "raid": tok[1], "state": tok[2],
+                   "size": f"{tok[8]} {tok[9]}",
+                   "name": " ".join(tok[10:]), "naa": ""}
+            vols.append(row)
+            by_vd[vd] = row
             continue
         # PD row: starts "EID:Slt DID State DG  Size Unit Intf Med ..."
         if len(tok) >= 12 and re.match(r"^\d+:\d+$", tok[0]):
@@ -223,6 +366,65 @@ def _parse_vall(text: str) -> tuple[list[dict], list[dict]]:
                 "model": " ".join(tok[11:-1]), "vd": cur_vd, "raid": cur_raid,
             })
     return vols, members
+
+
+def _vd_key(v: dict) -> str:
+    """Map key for a volume: '<controller>:<vd>'. Two controllers can each own a
+    v0, so the vd number alone is not unique."""
+    return f"{v.get('controller', CONTROLLER)}:{v.get('vd')}"
+
+
+def _vd_dev_map(vols: list[dict], perc_devs: list) -> dict[str, str]:
+    """Map each virtual disk to the block device the OS gave IT.
+
+    Before this, one `ctrl_dev` was resolved from `perc_devs[0]` and stamped on
+    every member of every VD. On a box with two volumes that printed the same
+    /dev/sdX on six hardware rows and — worse — made `core.assemble_storage`
+    measure ONE filesystem twice, so both volumes reported identical used/free
+    (F-136).
+
+    Joined in order of certainty:
+
+      1. perccli's `SCSI NAA Id` against the block device's lsblk WWN, through
+         the shared `_norm_wwn` (both sides print the same NAA in different
+         punctuation/case). Exact.
+      2. VD size against the device's byte size, via `_pd_size_bytes` +
+         `_size_match` — perccli prints BINARY sizes under decimal labels, which
+         those already handle. Only same-size volumes can tie.
+      3. Nothing: the caller keeps the old controller-wide fallback, so a
+         single-VD box behaves exactly as before.
+
+    A device is claimed at most once, so two same-size VDs cannot both grab it.
+    """
+    out: dict[str, str] = {}
+    taken: set[str] = set()
+    by_wwn = {}
+    for d in perc_devs:
+        w = _norm_wwn(getattr(d, "wwn", ""))
+        if w:
+            by_wwn[w] = d.dev
+    for v in vols:
+        dev = by_wwn.get(_norm_wwn(v.get("naa", "")))
+        if dev and dev not in taken:
+            out[_vd_key(v)] = dev
+            taken.add(dev)
+    for v in vols:                      # pass 2: size, only for what NAA missed
+        key = _vd_key(v)
+        if key in out:
+            continue
+        # _size_match answers True when EITHER side is unknown — correct where it
+        # narrows F-133's suppression, wrong here, where an unparseable size would
+        # let a VD claim the first free device at random. Demand both sizes.
+        if _pd_size_bytes(v.get("size", "")) is None:
+            continue
+        for d in perc_devs:
+            if d.dev in taken or not getattr(d, "size_bytes", None):
+                continue
+            if _size_match(v.get("size", ""), d.size_bytes):
+                out[key] = d.dev
+                taken.add(d.dev)
+                break
+    return out
 
 
 def _vall_data() -> tuple[list[dict], list[dict]]:
@@ -241,6 +443,154 @@ def _vall_data() -> tuple[list[dict], list[dict]]:
     return vols_all, members_all
 
 
+# --------------------------------------------------------------------------- #
+# Controller personality — does the CONTROLLER own the storage, or the OS?
+# --------------------------------------------------------------------------- #
+
+def _megaraid_driver_present() -> bool:
+    """True when a megaraid_sas SCSI host exists.
+
+    `smartctl -d megaraid,<DID>` goes through the MegaRAID SAS ioctl, so it
+    works only against a megaraid_sas host. A Dell HBA330/H330 binds mpt3sas —
+    perccli still manages the card, but RAID-mode SMART is impossible there by
+    construction, which is the decisive (and free) personality signal.
+    """
+    for path in glob.glob("/sys/class/scsi_host/host*/proc_name"):
+        try:
+            with open(path) as f:
+                if f.read().strip() == "megaraid_sas":
+                    return True
+        except OSError:
+            continue
+    return False
+
+
+def _personality(controller: int = CONTROLLER) -> str:
+    """Controller personality from `perccli /cN show` ('' when not reported).
+
+    13G+ PERCs expose a switchable personality: 'RAID-Mode' / 'HBA-Mode'. A Dell
+    HBA330 Mini prints NO personality line at all — it has no switch, it is IT
+    firmware permanently — so '' is a normal answer here, not an error.
+    """
+    out = run([_tool(), f"/c{controller}", "show"])
+    m = (re.search(r"Current Personality\s*=\s*(\S+)", out)
+         or re.search(r"^\s*Personality\s*=\s*(\S+)", out, re.M))
+    return m.group(1).strip().upper() if m else ""
+
+
+def _driver_name(controller: int = CONTROLLER) -> str:
+    """Kernel driver the controller is bound to, as perccli itself reports it.
+
+    `perccli /c0 show` on a Dell HBA330 Mini prints `Driver Name = mpt3sas`;
+    a PERC in RAID mode prints `megaraid_sas`. Anything other than megaraid_sas
+    means the MegaRAID SAS ioctl does not exist for this card, so
+    `smartctl -d megaraid,<DID>` cannot work — the decisive personality signal,
+    and more portable than reading sysfs (F-133).
+    """
+    out = run([_tool(), f"/c{controller}", "show"])
+    m = re.search(r"^\s*Driver Name\s*=\s*(\S+)", out, re.M)
+    return m.group(1).strip() if m else ""
+
+
+def is_hba_personality() -> bool:
+    """True when perccli manages the card but the OS — not it — owns the disks.
+
+    That is a Dell HBA330/H330, or a PERC switched to HBA-Mode / with every
+    drive in JBOD. RAID-mode enumeration is wrong for such a card in two ways:
+    it synthesises one Disk per controller PD (which duplicates a block device
+    the OS already exposes) and reads each through a megaraid passthrough that
+    does not exist. On an HBA330 that turned 9 real drives into 18 rows, half of
+    them phantom `/dev/sda` entries with no serial and NOREAD health (F-133).
+
+    Memoized — the probe costs up to three perccli round-trips and perccli is
+    slow (F-040). Cleared by _reset_caches().
+    """
+    global _hba_personality_cache
+    if _hba_personality_cache is None:
+        _hba_personality_cache = _probe_hba_personality()
+    return _hba_personality_cache
+
+
+def _probe_hba_personality() -> bool:
+    if not have_tool():
+        return False
+    # A virtual disk is definitive and is checked FIRST: the sysfs driver probe
+    # below reads False wherever /sys is absent (a dev box, the sim harness), and
+    # a real RAID controller must never be misclassified there.
+    vols, _members = _vall_data()
+    if vols:
+        return False                    # the controller owns storage
+    idxs = _ctrl_indices()
+    # A controller that NAMES its own personality is authoritative in BOTH
+    # directions. Reading 'RAID-Mode' only as "not HBA" and then falling through
+    # to a heuristic classified a freshly-wiped H730P (no VD yet) as an HBA and
+    # locked the operator out of every raid-* verb (F-133 review).
+    pers = [_personality(i) for i in idxs]
+    if any(p.startswith("RAID") for p in pers):
+        return False
+    if any(p.startswith("HBA") for p in pers):
+        return True
+    named = [d for d in (_driver_name(i) for i in idxs) if d]
+    if named:
+        # perccli named the driver: trust it over sysfs. Anything but
+        # megaraid_sas (mpt3sas on an HBA330/HBA355) has no MegaRAID ioctl.
+        if all(d != "megaraid_sas" for d in named):
+            return True
+    elif not _megaraid_driver_present():
+        return True                     # no megaraid_sas host => no passthrough
+    # Last resort — a megaraid_sas card with no VD and no personality string.
+    # HBA-like only if EVERY physical drive it reports already resolves to an OS
+    # block device. Comparing raw counts instead (len(lsblk) >= len(pds)) let an
+    # unrelated BOSS mirror and two NVMe outvote two hidden PERC drives.
+    pds: list[dict] = []
+    bm: dict = {}
+    wm: dict = {}
+    for idx in idxs:
+        text = run([_tool(), f"/c{idx}/eall/sall", "show", "all"])
+        pds += _parse_pd_rows(text)
+        _parse_bay_map(text, bm)
+        _parse_wwn_map(text, wm)
+    if not pds:
+        return False
+    bay_to_sn = {bay: sn for sn, bay in bm.items()}
+    bay_to_wwn = {bay: w for w, bay in wm.items()}
+    from . import blockdev
+    from .baymap import serial_match
+    rows = [r for r in blockdev.lsblk_pairs("NAME,TYPE,SERIAL,WWN")
+            if r.get("TYPE") == "disk"
+            and not r.get("NAME", "").startswith(blockdev.EXCLUDE)]
+    os_sn = {(r.get("SERIAL") or "").strip() for r in rows} - {""}
+    os_wwn = {_norm_wwn(r.get("WWN") or "") for r in rows} - {""}
+    for pd in pds:
+        sn = bay_to_sn.get(pd["bay"], "")
+        wwn = bay_to_wwn.get(pd["bay"], "")
+        if sn and any(serial_match(sn, s) for s in os_sn):
+            continue
+        if wwn and wwn in os_wwn:
+            continue
+        return False                    # this PD is hidden => the controller owns it
+    return True
+
+
+def _match_os_disk(sn: str, wwn: str, by_sn: dict, by_wwn: dict) -> Disk | None:
+    """Resolve the block device a controller PD ALREADY appears as, or None.
+
+    Serial first (exact, then the project's fuzzy prefix rule), then WWN.
+    """
+    from .baymap import serial_match
+    if sn:
+        d = by_sn.get(sn)
+        if d is None:
+            d = next((x for s, x in by_sn.items() if serial_match(sn, s)), None)
+        if d is not None:
+            return d
+    if wwn:
+        d = by_wwn.get(wwn)
+        if d is not None:
+            return d
+    return None
+
+
 def enumerate_disks() -> list[Disk]:
     """Return Disks for PERC RAID members + JBOD/direct block devices.
 
@@ -255,12 +605,15 @@ def enumerate_disks() -> list[Disk]:
     if not have_tool():
         return raw
 
-    _vols, members = _vall_data()
+    vols, members = _vall_data()
     perc_devs = [d for d in raw if _is_perc_vd(d.model)]
     perc_dev_set = {d.dev for d in perc_devs}
-    # Any block device on the controller is a valid megaraid SMART target.
+    # Any block device on the controller is a valid megaraid SMART target, so this
+    # is the fallback ioctl handle. It is NOT a member's device node — resolving
+    # it once and stamping it on every row is exactly the F-136 bug.
     ctrl_dev = (perc_devs[0].dev if perc_devs
                 else (raw[0].dev if raw else "/dev/sda"))
+    vd_dev = _vd_dev_map(vols, perc_devs)   # per-VD handle where resolvable (F-136)
     # Fetch eall/sall ONCE per controller and reuse the text for both the
     # serial map and the non-member PD pass — the old code ran it twice, plus a
     # third time inside bay_map() (F-040/F-041).
@@ -268,14 +621,21 @@ def enumerate_disks() -> list[Disk]:
     eall_by_ctrl = {idx: run([t, f"/c{idx}/eall/sall", "show", "all"])
                     for idx in _ctrl_indices()}
     bm: dict = {}
+    wm: dict = {}
     for text in eall_by_ctrl.values():
         _parse_bay_map(text, bm)
+        _parse_wwn_map(text, wm)
     bay_to_sn = {bay: sn for sn, bay in bm.items()}
+    bay_to_wwn = {bay: w for w, bay in wm.items()}
 
     member_disks: list[Disk] = []
     member_bays = set()
     for m in members:
-        d = Disk(dev=ctrl_dev)
+        # dev='-' : a VD member is invisible to the OS, it HAS no device node.
+        # The megaraid handle lives in ctrl_dev, per-VD so two volumes can never
+        # collapse onto one filesystem in the storage summary (F-136).
+        d = Disk(dev="-")
+        d.ctrl_dev = vd_dev.get(_vd_key(m)) or ctrl_dev
         d.bay = m["bay"]
         d.ctrl_slot = m["bay"]          # raw perccli enc:slot (never remapped)
         d.ctrl = m.get("controller")    # which /cN this PD lives on (F-085)
@@ -288,36 +648,73 @@ def enumerate_disks() -> list[Disk]:
         d.array_type = "HW"
         d.array_name = f"vd{m['vd']}/{(m['raid'] or '').lower()}"
         d.pd_state = m["state"]
+        d.pd_foreign = _is_foreign(m)
         member_disks.append(d)
         member_bays.add(m["bay"])
 
-    # Non-member physical drives the PERC sees (UGood/JBOD/Failed). These are NOT
-    # ghosts — the controller just hides them from the OS. Surface them as real
-    # disks (megaraid SMART) so they show health + state, not false GHOST rows.
-    raw_serials = {d.serial for d in raw if d.serial}
+    # Non-member physical drives the PERC sees (UGood/JBOD/Failed). A drive the
+    # OS ALREADY exposes must tag that block device; only a drive the controller
+    # genuinely hides is synthesised with megaraid SMART. Getting that test
+    # wrong duplicates the whole fleet (F-133), so it joins on serial, then WWN,
+    # then refuses to synthesise anything an OS disk could plausibly be.
+    # The VD's own block device is never a physical drive — keep it out of every
+    # join table so it can't absorb a PD.
+    os_disks = [d for d in raw if d.dev not in perc_dev_set]
+    by_sn = {d.serial: d for d in os_disks if d.serial}
+    by_wwn = {}
+    for d in os_disks:
+        w = _norm_wwn(d.wwn)
+        if w:
+            by_wwn[w] = d
+    claimed: set[int] = set()
+    pending: list[tuple] = []
+
+    # PASS 1 — join every non-member PD to the block device it already IS.
+    # This must finish before any suppression decision: `claimed` is only
+    # complete once every PD has had its turn, and deciding mid-loop made a
+    # drive's very existence depend on enc:slot iteration order (F-133 review).
     for idx in _ctrl_indices():
         for pd in _parse_pd_rows(eall_by_ctrl.get(idx, "")):
             if pd["bay"] in member_bays:
                 continue
             sn = bay_to_sn.get(pd["bay"], "")
-            if sn and sn in raw_serials:        # OS-exposed JBOD: tag the real disk
-                for r in raw:
-                    if r.serial == sn:
-                        r.bay, r.pd_state, r.ctrl_slot = pd["bay"], pd["state"], pd["bay"]
-                        r.ctrl = idx
+            wwn = bay_to_wwn.get(pd["bay"], "")
+            target = _match_os_disk(sn, wwn, by_sn, by_wwn)
+            if target is not None:              # OS-exposed JBOD: tag the real disk
+                target.bay, target.pd_state = pd["bay"], pd["state"]
+                target.pd_foreign = _is_foreign(pd)
+                target.ctrl_slot, target.ctrl = pd["bay"], idx
+                claimed.add(id(target))
                 continue
-            d = Disk(dev=ctrl_dev)              # hidden drive: synthesise + megaraid SMART
-            d.bay = pd["bay"]
-            d.ctrl_slot = pd["bay"]            # raw perccli enc:slot (never remapped)
-            d.ctrl = idx                       # which /cN this PD lives on (F-085)
-            d.did = int(pd["did"]) if str(pd["did"]).isdigit() else None
-            d.smart_dtype = f"megaraid,{pd['did']}"
-            d.model = pd["model"]
-            d.serial = sn
-            d.is_ssd = (pd["med"].upper() == "SSD")
-            d.iface = pd["intf"]
-            d.pd_state = pd["state"]            # array_type stays "" (not in an array)
-            member_disks.append(d)
+            pending.append((idx, pd, sn, wwn))
+
+    # PASS 2 — synthesise what stayed unmatched. The model/size refusal applies
+    # ONLY to a PD perccli could not identify at all (no SN and no WWN): that is
+    # the HBA330 case this exists for. A PD that HAS an identity which simply
+    # matches no OS disk is genuinely hidden behind the controller and must keep
+    # its row — dropping it removed real UGood/Failed drives from `status` and
+    # from the raid-create/hotspare pickers (F-133 review).
+    for idx, pd, sn, wwn in pending:
+        if not sn and not wwn and any(
+                id(r) not in claimed and _model_match(pd["model"], r.model)
+                and _size_match(pd["size"], r.size_bytes) for r in os_disks):
+            continue                            # this PD IS one of those OS disks
+        # Hidden drive: synthesise + megaraid SMART. It belongs to no VD, so it
+        # keeps the controller-wide handle — and, like a member, no device node.
+        d = Disk(dev="-")
+        d.ctrl_dev = ctrl_dev
+        d.bay = pd["bay"]
+        d.ctrl_slot = pd["bay"]                 # raw perccli enc:slot (never remapped)
+        d.ctrl = idx                            # which /cN this PD lives on (F-085)
+        d.did = int(pd["did"]) if str(pd["did"]).isdigit() else None
+        d.smart_dtype = f"megaraid,{pd['did']}"
+        d.model = pd["model"]
+        d.serial = sn
+        d.is_ssd = (pd["med"].upper() == "SSD")
+        d.iface = pd["intf"]
+        d.pd_state = pd["state"]                # array_type stays "" (not in an array)
+        d.pd_foreign = _is_foreign(pd)
+        member_disks.append(d)
 
     # Keep lsblk disks that are NOT a PERC virtual disk (JBOD/non-RAID + NVMe).
     raw_kept = [d for d in raw if d.dev not in perc_dev_set]
@@ -434,6 +831,158 @@ def pd_state(enc_slot: str, controller: int = CONTROLLER) -> str:
     return ""
 
 
+# --------------------------------------------------------------------------- #
+# Foreign-config + JBOD-policy probes (READ-ONLY — run(), never run_check).
+#
+# A drive carrying a foreign config is refused EVERY state transition by the
+# firmware, so these answer "why did perccli say 'Operation not allowed'?" and
+# feed the assign pre-flight. Deliberately NOT called from core.scan(): perccli
+# is slow enough that its probes are already memoised (F-040/F-041), and the
+# enumerate path gets the same answer for free from the PD table's DG column.
+# --------------------------------------------------------------------------- #
+
+_SIZE_TOKEN = re.compile(r"([\d.]+\s*[KMGTP]B)", re.I)
+
+
+_FOREIGN_HDR = re.compile(r"FOREIGN\s+CONFIGURATION", re.I)
+
+
+def foreign_config(controller: int = CONTROLLER) -> list[dict]:
+    """Parse `perccli /cN/fall show`.
+
+    -> [{"dg","bay","type","state","size","novds"}], one entry per foreign DRIVE
+    GROUP::
+
+        DG EID:Slot Type   State     Size NoVDs
+         0 -        RAID10 Frgn  3.491 TB     1
+
+    perccli reports foreign config per drive GROUP, and the `EID:Slot` column is
+    `-` whenever the group spans more than one drive. Anchoring on an enc:slot
+    token therefore found nothing on real hardware (a 2-drive foreign RAID10 with
+    one member present) and the menu dead-ended — F-138. `bay` is '' for such a
+    group; per-drive slots come from foreign_bays() instead.
+
+    Rows, not the Status line, remain the signal: several builds answer "no
+    foreign configuration present" with `Status = Failure`, so keying on that
+    would report a foreign config on every healthy controller (F-135).
+    """
+    out = run([_tool(), f"/c{controller}/fall", "show"])
+    rows: list[dict] = []
+    in_section = False
+    for line in out.splitlines():
+        if _FOREIGN_HDR.search(line):
+            in_section = True
+            continue
+        if not in_section:
+            continue
+        tok = line.split()
+        # A data row starts with the DG number and names a RAID type. That test
+        # rejects the header ('DG EID:Slot …'), the legend ('NoVDs - Number of
+        # VDs in disk group|DG - Diskgroup') and 'Total foreign drive groups = 1'.
+        if not tok or not tok[0].isdigit():
+            continue
+        ti = next((i for i, t in enumerate(tok) if t.upper().startswith("RAID")), None)
+        if ti is None:
+            continue
+        size = _SIZE_TOKEN.search(line)
+        rows.append({
+            "dg": tok[0],
+            # Filled only by the single-drive shape some builds print; '-' or a
+            # missing column both mean "this group spans drives, ask the PD table".
+            "bay": tok[1] if len(tok) > 1 and re.fullmatch(r"\d+:\d+", tok[1]) else "",
+            "type": tok[ti],
+            "state": tok[ti + 1] if len(tok) > ti + 1 else "",
+            "size": size.group(1) if size else "",
+            "novds": tok[-1] if tok[-1].isdigit() else "",
+        })
+    return rows
+
+
+def foreign_bays(controller: int | None = None) -> set[str]:
+    """enc:slots of every PD the controller marks foreign (PD table `DG` == 'F').
+
+    Read from the PD table, NOT from `/cN/fall show`: that reports drive GROUPS
+    and cannot name a slot once a group spans more than one drive (F-138). The
+    PD table always names the slot, and `_is_foreign` is already the authority
+    for the flag (F-135).
+    """
+    bays: set[str] = set()
+    for idx in _ctrl_indices(controller):
+        text = run([_tool(), f"/c{idx}/eall/sall", "show", "all"])
+        bays.update(pd["bay"] for pd in _parse_pd_rows(text) if _is_foreign(pd))
+    return bays
+
+
+def jbod_capability(controller: int = CONTROLLER) -> dict:
+    """{"supported": bool|None, "enabled": bool|None} from `perccli /cN show all`.
+
+    Two different gates with the same failure message: a controller may not
+    support JBOD at all (PERC 11 in RAID personality), or support it with the
+    policy switched off. None means the field was not printed — an HBA330 prints
+    neither, because its drives are raw already. b2ctl only REPORTS this; it
+    never flips the policy, since that is controller-wide and the operator's call.
+    """
+    out = run([_tool(), f"/c{controller}", "show", "all"])
+    sup = re.search(r"Support\s+JBOD\s*=\s*(\S+)", out, re.I)
+    # '^\s*JBOD =' cannot match the 'Support JBOD =' line above: after the line
+    # start comes 'Support', not 'JBOD'.
+    ena = re.search(r"^\s*(?:Enable\s+)?JBOD\s*=\s*(\S+)", out, re.I | re.M)
+    return {"supported": _yes(sup), "enabled": _yes(ena)}
+
+
+def _yes(m) -> bool | None:
+    if not m:
+        return None
+    return m.group(1).strip().upper() in ("YES", "ON", "TRUE", "ENABLED")
+
+
+_NOT_ALLOWED = ("operation not allowed", "errcd 255")
+
+
+def explain_error(out: str, *, d=None, controller: int | None = None) -> str:
+    """Translate a perccli refusal into its real causes ('' when unrecognised).
+
+    perccli reports every policy refusal as the same opaque 'ErrCd 255 Operation
+    not allowed', which sent an operator off-tool to diagnose a foreign config by
+    hand (F-135). The causes are checked in the order they actually bite.
+    """
+    if not any(m in (out or "").lower() for m in _NOT_ALLOWED):
+        return ""
+    ctrl = controller
+    if ctrl is None:
+        ctrl = getattr(d, "ctrl", None)
+    if ctrl is None:
+        ctrl = CONTROLLER
+    bay = getattr(d, "ctrl_slot", "") or getattr(d, "bay", "") or "?"
+    foreign = bool(getattr(d, "pd_foreign", False)) or bay in foreign_bays(ctrl)
+    cap = jbod_capability(ctrl)
+    def _mark(v):                       # the first YES is the one to act on
+        return "  <-- this" if v else ""
+    lines = ["why: the PERC refuses this transition. Checked:",
+             f"  - foreign config on {bay:<10} -> "
+             f"{'YES' if foreign else 'no'}{_mark(foreign)}"]
+    if cap["enabled"] is not None:
+        off = cap["enabled"] is False
+        lines.append(f"  - controller {ctrl} JBOD policy  -> "
+                     f"{'ON' if cap['enabled'] else 'OFF'}{_mark(off and not foreign)}")
+    if cap["supported"] is not None:
+        unsup = cap["supported"] is False
+        lines.append(f"  - Support JBOD             -> "
+                     f"{'Yes' if cap['supported'] else 'No'}"
+                     f"{_mark(unsup and not foreign)}")
+    if foreign:
+        lines.append(f"  fix: assign -> [5] Foreign config, or "
+                     f"`perccli /c{ctrl}/fall show` then `... del`")
+    elif cap["supported"] is False:
+        lines.append("  fix: this controller has no JBOD/non-RAID mode — build a "
+                     "hardware volume instead, or switch its personality to HBA "
+                     "(DESTRUCTIVE, deletes every VD).")
+    elif cap["enabled"] is False:
+        lines.append(f"  fix: `perccli /c{ctrl} set jbod=on` (controller-wide "
+                     f"policy — b2ctl will not flip it for you)")
+    return "\n".join(lines)
+
+
 def rebuild_progress(enc_slot: str, controller: int = CONTROLLER) -> dict:
     """Parse `perccli /cC/eE/sS show rebuild`.
 
@@ -492,6 +1041,28 @@ def set_jbod(enc_slot: str, controller: int = CONTROLLER, *,
     The drive leaves the controller's RAID management and appears as /dev/sdX.
     """
     return run_check(build_cmd(_pd(enc_slot, controller), "set", "jbod"), dry_run=dry_run)
+
+
+def import_foreign(controller: int = CONTROLLER, *,
+                   dry_run: bool = False) -> tuple[bool, str]:
+    """Import every foreign config on a controller: `perccli /cN/fall import`.
+
+    CONTROLLER-WIDE. MegaRAID exposes no per-drive form of this — /cN/fall is the
+    only selector — so the caller MUST confirm at controller scope and show the
+    full affected set first (ADR-006).
+    """
+    return run_check(build_cmd(f"/c{controller}/fall", "import"), dry_run=dry_run)
+
+
+def clear_foreign(controller: int = CONTROLLER, *,
+                  dry_run: bool = False) -> tuple[bool, str]:
+    """Discard every foreign config on a controller: `perccli /cN/fall del`.
+
+    CONTROLLER-WIDE and DESTRUCTIVE: the foreign array becomes unimportable and
+    its drives drop to plain Unconfigured-Good. Same scope caveat as
+    import_foreign — confirm at controller scope, never per drive (ADR-006).
+    """
+    return run_check(build_cmd(f"/c{controller}/fall", "del"), dry_run=dry_run)
 
 
 def del_vd(vd: int, controller: int = CONTROLLER, *,

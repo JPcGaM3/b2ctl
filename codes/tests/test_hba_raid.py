@@ -870,6 +870,30 @@ Drive /c0/e32/s7 Device attributes :
 SN = S4F2NY0KA04123
 """
 
+# VERBATIM from a PERC H730P Mini (`cmp01`, F-138). A foreign config is reported
+# per DRIVE GROUP: this is a 2-drive RAID10 (3.491 TB = 2 x 1.745 TB) with only
+# one member present, so EID:Slot is '-'. Anchoring the parser on an enc:slot
+# token found nothing here and the [5] menu answered "no foreign configuration"
+# while the drive stayed locked. Keep this fixture byte-for-byte.
+_FALL_REAL = """\
+Controller = 0
+Status = Success
+Description = None
+
+FOREIGN CONFIGURATION :
+=====================
+
+----------------------------------------
+DG EID:Slot Type   State     Size NoVDs
+----------------------------------------
+ 0 -        RAID10 Frgn  3.491 TB     1
+----------------------------------------
+
+NoVDs - Number of VDs in disk group|DG - Diskgroup
+Total foreign drive groups = 1
+Drive Groups = 1
+"""
+
 # `perccli /c0/fall show` — DID column present, size on the row, Name empty.
 _FALL = """\
 Controller = 0
@@ -951,7 +975,23 @@ class TestForeignConfigParse(unittest.TestCase):
             finally:
                 raid._tool_cache = None
 
-    def test_parses_row(self):
+    def test_parses_the_real_drive_group_row(self):
+        """F-138 regression — the shape real hardware actually prints."""
+        rows = self._rows(_FALL_REAL)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["dg"], "0")
+        self.assertEqual(rows[0]["bay"], "")        # group spans drives -> no slot
+        self.assertEqual(rows[0]["type"], "RAID10")
+        self.assertEqual(rows[0]["state"], "Frgn")
+        self.assertEqual(rows[0]["size"], "3.491 TB")
+        self.assertEqual(rows[0]["novds"], "1")
+
+    def test_header_legend_and_totals_are_not_rows(self):
+        """'DG EID:Slot …', 'NoVDs - Number of VDs in disk group|DG - Diskgroup'
+        and 'Total foreign drive groups = 1' must not parse as data."""
+        self.assertEqual(len(self._rows(_FALL_REAL)), 1)
+
+    def test_parses_the_single_drive_shape_too(self):
         rows = self._rows(_FALL)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["bay"], "32:7")
@@ -966,9 +1006,19 @@ class TestForeignConfigParse(unittest.TestCase):
     def test_no_tool_output_is_empty(self):
         self.assertEqual(self._rows(""), [])
 
-    def test_foreign_bays_collects_enc_slots(self):
-        with patch.object(raid, "foreign_config", return_value=[{"bay": "32:7"}]), \
-             patch.object(raid, "_ctrl_indices", return_value=[0]):
+    def test_foreign_bays_reads_the_pd_table_not_fall(self):
+        """F-138: `fall` reports drive GROUPS and prints EID:Slot '-' once a group
+        spans drives, so the slots must come from the PD table's DG column."""
+        with patch.object(raid, "run", return_value=_EALL_FOREIGN), \
+             patch.object(raid, "_ctrl_indices", return_value=[0]), \
+             patch.object(raid, "_tool", return_value="perccli"):
+            self.assertEqual(raid.foreign_bays(0), {"32:7"})   # 32:0 Onln, 32:6 '-'
+
+    def test_foreign_bays_unaffected_by_an_unparsable_fall_table(self):
+        with patch.object(raid, "run", return_value=_EALL_FOREIGN), \
+             patch.object(raid, "_ctrl_indices", return_value=[0]), \
+             patch.object(raid, "_tool", return_value="perccli"), \
+             patch.object(raid, "foreign_config", return_value=[]):
             self.assertEqual(raid.foreign_bays(0), {"32:7"})
 
 

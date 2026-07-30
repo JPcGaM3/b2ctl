@@ -1211,14 +1211,22 @@ not allowed` แบบอ่านไม่รู้เรื่อง:
 
 ```
   FOREIGN CONFIG on /c0:
-    DG EID:Slot Type   State  Size
-     0 32:7     RAID0  Optl   1.746 TB
+    DG EID:Slot Type    State  Size      VDs
+     0 -        RAID10  Frgn   3.491 TB  1
+  foreign drive(s) present on this controller: 32:4
+  NOTE: this group spans more drives than are present — importing it would give
+        a degraded array.
   WARNING: perccli /c0/fall acts on the WHOLE controller — there is no
-  per-drive form. Both actions below hit all 1 drive(s) listed above.
+  per-drive form. Both actions below hit everything listed above.
     [i] import — bring that foreign array back online on this controller
     [c] clear  — DISCARD it; its drives drop to Unconfigured-Good
     [s] skip / decide later
 ```
+
+**`EID:Slot = -` เป็นเรื่องปกติ ไม่ใช่ error** — controller เก็บ foreign config เป็นราย
+**drive group** ไม่ใช่รายลูก ถ้า group นั้นกินหลายลูกมันเลยระบุ slot เดียวไม่ได้ อย่างเคสข้างบน
+array เก่าเป็น RAID10 2 ลูก แต่เครื่องนี้มีอยู่ลูกเดียว บรรทัดถัดมาจะบอกว่าลูกที่เสียบอยู่จริง
+ตัวไหนบ้างที่ติด config นี้
 
 - **import** — อยากได้ array เก่ากลับมา (เช่นย้ายชุดดิสก์ที่ยังใช้งานได้มาทั้งชุด)
 - **clear** — อยากได้แค่ตัวดิสก์ ไม่เอา array เก่า หลังจากนี้ array นั้น import กลับไม่ได้แล้ว

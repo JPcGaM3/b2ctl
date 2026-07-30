@@ -56,14 +56,22 @@ def _fall_show(state):
     print("Status = Success")
     print("Description = Operation on foreign configuration Succeeded")
     print("")
+    # The REAL shape, taken from a PERC H730P: one row per foreign DRIVE GROUP,
+    # with EID:Slot '-' because a group spans drives. The invented single-drive
+    # shape this used to print is exactly why the sim passed while hardware
+    # dead-ended (F-138) — keep this honest.
     print("FOREIGN CONFIGURATION :")
     print("=====================")
     print("")
-    print("DG EID:Slt Type  State Status Size     Name")
-    print("-------------------------------------------------")
-    for i, d in enumerate(pds):
-        print(f" {i} {d['enc']}:{d['slot']}     RAID0 Optl  Frgn   931.0 GB")
-    print("-------------------------------------------------")
+    print("----------------------------------------")
+    print("DG EID:Slot Type   State     Size NoVDs ")
+    print("----------------------------------------")
+    for i, _d in enumerate(pds):
+        print(f" {i} -        RAID10 Frgn  3.491 TB     1 ")
+    print("----------------------------------------")
+    print("")
+    print("NoVDs - Number of VDs in disk group|DG - Diskgroup")
+    print(f"Total foreign drive groups = {len(pds)}")
     return 0
 
 

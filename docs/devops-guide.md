@@ -1153,8 +1153,8 @@ subprocesses — `dg` is in text already fetched.
 
 | function | command | note |
 |----------|---------|------|
-| `foreign_config(c)` | `perccli /cN/fall show` | keyed on the presence of **enc:slot rows**, never the Status line: several builds answer "no foreign configuration present" with `Status = Failure`. Parsed by locating the enc:slot token, not by fixed column index — the DID column exists in some builds only |
-| `foreign_bays(c)` | ↑ across `_ctrl_indices()` | authoritative fallback when a build prints no DG column |
+| `foreign_config(c)` | `perccli /cN/fall show` | one row per foreign **drive group** (see below). Keyed on rows inside the `FOREIGN CONFIGURATION` section, never the Status line: several builds answer "no foreign configuration present" with `Status = Failure` |
+| `foreign_bays(c)` | `perccli /cN/eall/sall show all` | enc:slots of every PD flagged `DG = F`. **Not** from `fall` — see the drive-group note |
 | `jbod_capability(c)` | `perccli /cN show all` | `Support JBOD = Yes\|No` + `JBOD = ON\|OFF`. `None` = not printed (an HBA330 prints neither). **Reported only** — b2ctl never runs `set jbod=on` |
 | `explain_error(out, d=, controller=)` | — | matches `operation not allowed` / `errcd 255`, then prints the checked causes in the order they bite, marking the first hit `<-- this` |
 
@@ -1170,6 +1170,37 @@ hence ADR-006: print the full affected set first, confirm at **controller** scop
 and require a type-the-controller-number second confirm. `raid_actions._run_foreign()`
 is the single implementation, shared by watch's `[5]` and the CLI verb so the
 guards cannot drift apart.
+
+**A foreign config is a DRIVE GROUP, not a drive (v0.21.1 / F-138).** This is the
+single most misleading thing about the `fall` output. Real hardware
+(`cmp01`, H730P Mini):
+
+```
+DG EID:Slot Type   State     Size NoVDs
+ 0 -        RAID10 Frgn  3.491 TB     1        <-- EID:Slot is '-'
+Total foreign drive groups = 1
+```
+
+The group is a 2-drive RAID10 (3.491 TB = 2 × 1.745 TB) with only one member
+present, so there is no single slot to name. The first cut of `foreign_config()`
+located rows by matching an `enc:slot` token, parsed **zero** rows here, and the
+`[5]` menu answered "no foreign configuration" while the drive stayed locked.
+
+Consequences baked into the design:
+
+- `foreign_config()` anchors on the `FOREIGN CONFIGURATION` header, then takes
+  rows whose first token is a DG number **and** which name a `RAID*` type. That
+  rejects the column header, the `NoVDs - …|DG - Diskgroup` legend and
+  `Total foreign drive groups = 1`. `bay` is `''` for a spanning group; the older
+  single-drive shape still fills it.
+- `foreign_bays()` reads the **PD table** (`DG = F`), the only place a slot is
+  always named.
+- `_foreign_menu()` / `foreign()` gate on **either** source. A build whose `fall`
+  table we cannot parse still reaches import/clear, driven by the PD flags —
+  never a dead end while a PD is flagged `F`.
+- Confirms count **drive groups**, not drives, and list the affected bays.
+- The sim emits this shape verbatim. It previously printed an invented
+  single-drive table, which is exactly why the sim passed while hardware failed.
 
 **Refusal is pre-flight and all-or-nothing.** `_refuse_foreign(targets, what)`
 rejects the *whole* selection if any pick is foreign, before perccli is called. A

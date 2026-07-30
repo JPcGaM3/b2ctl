@@ -1252,14 +1252,23 @@ Choosing `[5]` shows **what the foreign config actually is** before asking:
 
 ```
   FOREIGN CONFIG on /c0:
-    DG EID:Slot Type   State  Size
-     0 32:7     RAID0  Optl   1.746 TB
+    DG EID:Slot Type    State  Size      VDs
+     0 -        RAID10  Frgn   3.491 TB  1
+  foreign drive(s) present on this controller: 32:4
+  NOTE: this group spans more drives than are present — importing it would give
+        a degraded array.
   WARNING: perccli /c0/fall acts on the WHOLE controller — there is no
-  per-drive form. Both actions below hit all 1 drive(s) listed above.
+  per-drive form. Both actions below hit everything listed above.
     [i] import — bring that foreign array back online on this controller
     [c] clear  — DISCARD it; its drives drop to Unconfigured-Good
     [s] skip / decide later
 ```
+
+**`EID:Slot = -` is normal, not an error.** The controller records a foreign
+config per **drive group**, not per drive, so it cannot name one slot when the
+group spans several — as above, where the old array was a 2-drive RAID10 and only
+one of its disks is in this machine. The line underneath tells you which drives
+that are actually plugged in carry the config.
 
 - **import** — you want that old array back (you moved a working set of disks).
 - **clear** — you want the disks, not the old array. The array becomes

@@ -84,15 +84,36 @@ def _refuse_foreign(targets, what: str) -> bool:
     return True
 
 
-def _print_foreign(rows: list, controller: int, pad: str = "") -> None:
+def _print_foreign(rows: list, controller: int, pad: str = "",
+                   bays: set | None = None) -> None:
+    """Show a controller's foreign DRIVE GROUPS, then which present drives carry
+    one. perccli prints `EID:Slot = -` for any group spanning more than one
+    drive, so the slots have to come from the PD table (F-138)."""
     print(f"{pad}{C}FOREIGN CONFIG on /c{controller}:{N}")
-    print(f"{pad}  {'DG':>2} {'EID:Slot':<9}{'Type':<7}{'State':<7}Size")
-    for r in rows:
-        print(f"{pad}  {r['dg']:>2} {r['bay']:<9}{r['type']:<7}"
-              f"{r['state']:<7}{r['size']}")
+    if rows:
+        print(f"{pad}  {'DG':>2} {'EID:Slot':<9}{'Type':<8}{'State':<7}"
+              f"{'Size':<10}VDs")
+        for r in rows:
+            print(f"{pad}  {r['dg']:>2} {(r['bay'] or '-'):<9}{r['type']:<8}"
+                  f"{r['state']:<7}{r['size']:<10}{r.get('novds', '')}")
+    else:
+        # A build whose fall output we cannot parse still gets a usable menu —
+        # the PD flags alone prove there is something to import or clear.
+        print(f"{pad}  (perccli printed no readable group table)")
+    if bays:
+        print(f"{pad}  foreign drive(s) present on this controller: "
+              f"{', '.join(sorted(bays))}")
+        # A group whose member count exceeds what is plugged in imports degraded.
+        # `novds` counts VDs, not drives, so infer from size where we can.
+        for r in rows:
+            if not r["bay"] and len(bays) == 1:
+                print(f"{pad}  {Y}NOTE: this group spans more drives than are "
+                      f"present — importing it would give a degraded array.{N}")
+                break
 
 
-def _run_foreign(kind: str, controller: int, rows: list) -> int:
+def _run_foreign(kind: str, controller: int, rows: list,
+                 bays: set | None = None) -> int:
     """import|clear every foreign config on a controller, with the scope confirms.
 
     /cN/fall is the ONLY selector MegaRAID offers — there is no per-drive import
@@ -100,10 +121,15 @@ def _run_foreign(kind: str, controller: int, rows: list) -> int:
     printed before asking (ADR-006). Shared by the [5] menu and the CLI verb so
     the guards cannot drift apart.
     """
-    n = len(rows)
+    # perccli counts foreign DRIVE GROUPS, not drives — saying "3 drive(s)" for
+    # three groups understated the blast radius of a controller-wide clear
+    # (F-138). Name the affected bays too, since that is what the operator sees.
+    what = f"{len(rows)} foreign drive group(s)" if rows else "the foreign config"
+    if bays:
+        what += f" covering {', '.join(sorted(bays))}"
     if kind == "clear":
         if not _confirm(f"CLEAR ALL foreign config on controller {controller} "
-                        f"({n} drive(s))? the array becomes unimportable"):
+                        f"({what})? the array becomes unimportable"):
             print("cancelled")
             return 1
         if ask(f"  type the controller number '{controller}' to confirm> ") != str(controller):
@@ -114,7 +140,7 @@ def _run_foreign(kind: str, controller: int, rows: list) -> int:
                 f"Unconfigured-Good.\n    Press [r]efresh, then [a]ssign them.")
     else:
         if not _confirm(f"import ALL foreign config on controller {controller} "
-                        f"({n} drive(s))?"):
+                        f"({what})?"):
             print("cancelled")
             return 1
         op, verb, fn = "raid_foreign_import", "import", hba_raid.import_foreign
@@ -132,23 +158,30 @@ def _run_foreign(kind: str, controller: int, rows: list) -> int:
 
 
 def _foreign_menu(controller: int) -> int:
-    """Show a controller's foreign configs, then offer import / clear."""
+    """Show a controller's foreign configs, then offer import / clear.
+
+    Gated on EITHER source — the group table or the PD flags. Requiring the group
+    table dead-ended on real hardware: perccli printed a foreign RAID10 whose
+    EID:Slot column was '-', b2ctl parsed no rows, and the menu answered "no
+    foreign configuration" while the drive stayed locked (F-138).
+    """
     rows = hba_raid.foreign_config(controller)
-    if not rows:
+    bays = hba_raid.foreign_bays(controller)
+    if not rows and not bays:
         print(f"{G}  no foreign configuration on controller {controller}{N}")
         return 0
-    _print_foreign(rows, controller, pad="  ")
+    _print_foreign(rows, controller, pad="  ", bays=bays)
     print(f"{Y}  WARNING: perccli /c{controller}/fall acts on the WHOLE controller — "
-          f"there is no\n  per-drive form. Both actions below hit all "
-          f"{len(rows)} drive(s) listed above.{N}")
+          f"there is no\n  per-drive form. Both actions below hit everything "
+          f"listed above.{N}")
     print("    [i] import — bring that foreign array back online on this controller")
     print("    [c] clear  — DISCARD it; its drives drop to Unconfigured-Good")
     print("    [s] skip / decide later")
     choice = ask("  action> ").lower()
     if choice == "i":
-        return _run_foreign("import", controller, rows)
+        return _run_foreign("import", controller, rows, bays)
     if choice == "c":
-        return _run_foreign("clear", controller, rows)
+        return _run_foreign("clear", controller, rows, bays)
     print("  skipped")
     return 0
 
@@ -161,22 +194,23 @@ def foreign(action: str = "show", controller: int | None = None) -> int:
     """
     ctrl = controller if controller is not None else hba_raid.CONTROLLER
     rows = hba_raid.foreign_config(ctrl)
+    bays = hba_raid.foreign_bays(ctrl)      # PD flags: the slot-level truth (F-138)
     if action == "show":
-        if not rows:
+        if not rows and not bays:
             print(f"{G}no foreign configuration on controller {ctrl}{N}")
             return 0
-        _print_foreign(rows, ctrl)
+        _print_foreign(rows, ctrl, bays=bays)
         print(f"{Y}These drives are locked out of JBOD / hot-spare / volume-create "
               f"until this is\nimported (b2ctl raid-foreign --import) or cleared "
               f"(b2ctl raid-foreign --clear).{N}")
         return 0
     if not _require_raid():
         return 1
-    if not rows:
+    if not rows and not bays:
         print(f"{G}no foreign configuration on controller {ctrl} — nothing to do{N}")
         return 0
-    _print_foreign(rows, ctrl)
-    return _run_foreign(action, ctrl, rows)
+    _print_foreign(rows, ctrl, bays=bays)
+    return _run_foreign(action, ctrl, rows, bays)
 
 
 def _pick_member(disks, target):

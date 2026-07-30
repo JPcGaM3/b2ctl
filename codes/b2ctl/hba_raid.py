@@ -844,42 +844,72 @@ def pd_state(enc_slot: str, controller: int = CONTROLLER) -> str:
 _SIZE_TOKEN = re.compile(r"([\d.]+\s*[KMGTP]B)", re.I)
 
 
+_FOREIGN_HDR = re.compile(r"FOREIGN\s+CONFIGURATION", re.I)
+
+
 def foreign_config(controller: int = CONTROLLER) -> list[dict]:
-    """Parse `perccli /cN/fall show` -> [{"dg","bay","type","state","size"}].
+    """Parse `perccli /cN/fall show`.
 
-    The presence of enc:slot ROWS is the signal, never the Status line: several
-    perccli builds answer "no foreign configuration present" with
-    `Status = Failure`, so keying on that would report a foreign config on every
-    healthy controller.
+    -> [{"dg","bay","type","state","size","novds"}], one entry per foreign DRIVE
+    GROUP::
 
-    Parsed by locating the enc:slot token rather than by fixed column index — the
-    DID column is present in some builds and absent in others.
+        DG EID:Slot Type   State     Size NoVDs
+         0 -        RAID10 Frgn  3.491 TB     1
+
+    perccli reports foreign config per drive GROUP, and the `EID:Slot` column is
+    `-` whenever the group spans more than one drive. Anchoring on an enc:slot
+    token therefore found nothing on real hardware (a 2-drive foreign RAID10 with
+    one member present) and the menu dead-ended — F-138. `bay` is '' for such a
+    group; per-drive slots come from foreign_bays() instead.
+
+    Rows, not the Status line, remain the signal: several builds answer "no
+    foreign configuration present" with `Status = Failure`, so keying on that
+    would report a foreign config on every healthy controller (F-135).
     """
     out = run([_tool(), f"/c{controller}/fall", "show"])
     rows: list[dict] = []
+    in_section = False
     for line in out.splitlines():
-        tok = line.split()
-        idx = next((i for i, t in enumerate(tok) if re.fullmatch(r"\d+:\d+", t)), None)
-        if idx is None:
+        if _FOREIGN_HDR.search(line):
+            in_section = True
             continue
-        rest = tok[idx + 1:]
-        ti = next((i for i, t in enumerate(rest) if t.upper().startswith("RAID")), None)
+        if not in_section:
+            continue
+        tok = line.split()
+        # A data row starts with the DG number and names a RAID type. That test
+        # rejects the header ('DG EID:Slot …'), the legend ('NoVDs - Number of
+        # VDs in disk group|DG - Diskgroup') and 'Total foreign drive groups = 1'.
+        if not tok or not tok[0].isdigit():
+            continue
+        ti = next((i for i, t in enumerate(tok) if t.upper().startswith("RAID")), None)
+        if ti is None:
+            continue
         size = _SIZE_TOKEN.search(line)
         rows.append({
-            "dg": tok[idx - 1] if idx else "",
-            "bay": tok[idx],
-            "type": rest[ti] if ti is not None else "",
-            "state": rest[ti + 1] if ti is not None and len(rest) > ti + 1 else "",
+            "dg": tok[0],
+            # Filled only by the single-drive shape some builds print; '-' or a
+            # missing column both mean "this group spans drives, ask the PD table".
+            "bay": tok[1] if len(tok) > 1 and re.fullmatch(r"\d+:\d+", tok[1]) else "",
+            "type": tok[ti],
+            "state": tok[ti + 1] if len(tok) > ti + 1 else "",
             "size": size.group(1) if size else "",
+            "novds": tok[-1] if tok[-1].isdigit() else "",
         })
     return rows
 
 
 def foreign_bays(controller: int | None = None) -> set[str]:
-    """Every enc:slot holding a foreign config, across the configured controllers."""
+    """enc:slots of every PD the controller marks foreign (PD table `DG` == 'F').
+
+    Read from the PD table, NOT from `/cN/fall show`: that reports drive GROUPS
+    and cannot name a slot once a group spans more than one drive (F-138). The
+    PD table always names the slot, and `_is_foreign` is already the authority
+    for the flag (F-135).
+    """
     bays: set[str] = set()
     for idx in _ctrl_indices(controller):
-        bays.update(r["bay"] for r in foreign_config(idx))
+        text = run([_tool(), f"/c{idx}/eall/sall", "show", "all"])
+        bays.update(pd["bay"] for pd in _parse_pd_rows(text) if _is_foreign(pd))
     return bays
 
 

@@ -419,8 +419,11 @@ def _clean_disk(bay="32:6", ctrl=0):
     return d
 
 
-_FALL_ROWS = [{"dg": "0", "bay": "32:7", "type": "RAID0",
-               "state": "Optl", "size": "1.746 TB"}]
+# A foreign DRIVE GROUP, the shape real perccli prints: EID:Slot is '-' once the
+# group spans more than one drive, so the slot comes from the PD table (F-138).
+_FALL_ROWS = [{"dg": "0", "bay": "", "type": "RAID10",
+               "state": "Frgn", "size": "3.491 TB", "novds": "1"}]
+_FALL_BAYS = {"32:7"}
 
 
 class TestAssignPercForeignRefusal(unittest.TestCase):
@@ -480,7 +483,7 @@ class TestAssignPercForeignRefusal(unittest.TestCase):
 
 class TestForeignMenu(unittest.TestCase):
 
-    def _run(self, keys, rows=_FALL_ROWS, confirm=True):
+    def _run(self, keys, rows=_FALL_ROWS, confirm=True, bays=_FALL_BAYS):
         """Drive assign_perc -> [5] with `keys` fed to input()."""
         with patch("b2ctl.raid_actions.safety"), \
              patch("b2ctl.raid_actions._require_raid", return_value=True), \
@@ -488,6 +491,7 @@ class TestForeignMenu(unittest.TestCase):
              patch("b2ctl.raid_actions.hba_raid") as mock_hba, \
              patch("builtins.input", side_effect=keys):
             mock_hba.foreign_config.return_value = rows
+            mock_hba.foreign_bays.return_value = bays
             mock_hba.clear_foreign.return_value = (True, "")
             mock_hba.import_foreign.return_value = (True, "")
             mock_hba.build_cmd.side_effect = lambda *a: ["perccli", *a]
@@ -515,9 +519,23 @@ class TestForeignMenu(unittest.TestCase):
         self.assertEqual(rc, 0)
 
     def test_no_foreign_config_is_a_noop(self):
-        rc, hba = self._run(["5"], rows=[])
+        rc, hba = self._run(["5"], rows=[], bays=set())
         hba.clear_foreign.assert_not_called()
         hba.import_foreign.assert_not_called()
+        self.assertEqual(rc, 0)
+
+    def test_unparsable_group_table_still_offers_the_actions(self):
+        """The F-138 dead-end: perccli printed a foreign RAID10 whose EID:Slot
+        was '-', b2ctl parsed no rows, and the menu said "no foreign
+        configuration" while the drive stayed locked. The PD flags alone must be
+        enough to reach import/clear."""
+        rc, hba = self._run(["5", "c", "0"], rows=[], bays={"32:4"})
+        hba.clear_foreign.assert_called_once_with(0, dry_run=False)
+        self.assertEqual(rc, 0)
+
+    def test_group_row_without_a_slot_still_offers_the_actions(self):
+        rc, hba = self._run(["5", "i"])            # _FALL_ROWS has bay == ""
+        hba.import_foreign.assert_called_once_with(0, dry_run=False)
         self.assertEqual(rc, 0)
 
     def test_skip_does_nothing(self):
@@ -532,6 +550,7 @@ class TestForeignCliEntry(unittest.TestCase):
         with patch("b2ctl.raid_actions.hba_raid") as mock_hba, \
              patch("b2ctl.raid_actions._require_raid") as req:
             mock_hba.foreign_config.return_value = _FALL_ROWS
+            mock_hba.foreign_bays.return_value = _FALL_BAYS
             rc = ra.foreign("show", 0)
         req.assert_not_called()
         mock_hba.clear_foreign.assert_not_called()
@@ -544,6 +563,7 @@ class TestForeignCliEntry(unittest.TestCase):
              patch("b2ctl.raid_actions.ask", return_value="0"), \
              patch("b2ctl.raid_actions.hba_raid") as mock_hba:
             mock_hba.foreign_config.return_value = _FALL_ROWS
+            mock_hba.foreign_bays.return_value = _FALL_BAYS
             mock_hba.clear_foreign.return_value = (True, "")
             mock_hba.build_cmd.side_effect = lambda *a: ["perccli", *a]
             rc = ra.foreign("clear", 0)
@@ -555,6 +575,7 @@ class TestForeignCliEntry(unittest.TestCase):
              patch("b2ctl.raid_actions._confirm") as cf, \
              patch("b2ctl.raid_actions.hba_raid") as mock_hba:
             mock_hba.foreign_config.return_value = []
+            mock_hba.foreign_bays.return_value = set()
             rc = ra.foreign("clear", 0)
         cf.assert_not_called()
         mock_hba.clear_foreign.assert_not_called()
@@ -564,6 +585,7 @@ class TestForeignCliEntry(unittest.TestCase):
         with patch("b2ctl.raid_actions._require_raid", return_value=False), \
              patch("b2ctl.raid_actions.hba_raid") as mock_hba:
             mock_hba.foreign_config.return_value = _FALL_ROWS
+            mock_hba.foreign_bays.return_value = _FALL_BAYS
             rc = ra.foreign("clear", 0)
         mock_hba.clear_foreign.assert_not_called()
         self.assertEqual(rc, 1)

@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import mock_open, patch
 
 import b2ctl.baymap as baymap
+from b2ctl import common
 from b2ctl.common import Disk
 
 _FRONT = {"panel": "front", "type": "sas", "reverse_slots": True,
@@ -177,6 +178,109 @@ class TestAssignBays(unittest.TestCase):
         d = self._d("UNRELATED")
         baymap.assign_bays([d], {"S74ZNS0W582303N": "32:0"}, [])
         self.assertIsNone(d.bay)
+
+
+class TestSlotCountHardening(unittest.TestCase):
+    """F-140: the default 8-slot reverse rule renders a bogus negative label
+    ('32:-5') on an R740xd/HBA330 chassis (24 bays, enc:slot up to '32:23') —
+    slot 12 must be SKIPPED (identity), never flipped negative. Also covers
+    the auto-detected slot count (detect_slots) and its "I guessed" warning,
+    since a silently-wrong guess sends someone to pull the wrong drive (§9)."""
+
+    def setUp(self):
+        baymap._slot_warned = set()
+        common.set_json_mode(True)
+        common.take_warnings()             # drain anything a previous test left
+
+    def tearDown(self):
+        baymap._slot_warned = set()
+        common.set_json_mode(False)
+        common.take_warnings()
+
+    def test_in_range_still_reverses_with_explicit_count(self):
+        panel = [{"panel": "front", "type": "sas", "reverse_slots": True,
+                  "slots_per_enclosure": 8, "map": {}}]
+        self.assertEqual(baymap.remap_slot("x:3", panel), "x:4")
+
+    def test_out_of_range_skips_the_rule_and_stays_identity(self):
+        panel = [{"panel": "front", "type": "sas", "reverse_slots": True,
+                  "slots_per_enclosure": 8, "map": {}}]
+        result = baymap.remap_slot("32:12", panel)
+        self.assertEqual(result, "32:12")            # identity, not '32:-5'
+        self.assertNotIn(":-", result)
+
+    def test_out_of_range_warns_once_across_many_disks(self):
+        # remap_slot runs per drive (once per disk in a scan) — a 24-drive
+        # enclosure must not print the same warning 24 times.
+        panel = [{"panel": "front", "type": "sas", "reverse_slots": True,
+                  "slots_per_enclosure": 8, "map": {}}]
+        for _ in range(5):
+            baymap.remap_slot("32:12", panel)
+        self.assertEqual(len(common.take_warnings()), 1)
+
+    def test_detect_slots_from_enc_slot_strings(self):
+        self.assertEqual(baymap.detect_slots(["32:0", "32:23", "9:5"]),
+                          {"32": 24, "9": 6})
+
+    def test_detect_slots_ignores_malformed_entries(self):
+        self.assertEqual(
+            baymap.detect_slots(["32:0", "bogus", "32:x", None, 7]),
+            {"32": 1})
+
+    def test_detect_slots_empty_input(self):
+        self.assertEqual(baymap.detect_slots([]), {})
+
+    def test_auto_detect_end_to_end_full_enclosure(self):
+        # No slots_per_enclosure on the panel -> the count comes entirely from
+        # the hint. A fully-populated 24-bay enclosure (slots 0..23 seen)
+        # reverses correctly at both ends.
+        panel = [{"panel": "front", "type": "sas", "reverse_slots": True}]
+        hint = baymap.detect_slots(["32:0", "32:23"])
+        self.assertEqual(hint, {"32": 24})
+        self.assertEqual(baymap.remap_slot("32:0", panel, hint), "32:23")
+        self.assertEqual(baymap.remap_slot("32:23", panel, hint), "32:0")
+
+    def test_auto_detect_warns_that_it_guessed(self):
+        # Only 3 of 24 bays populated: the hint detects as 3, not 24. The
+        # reversal still "succeeds" (slot 0 -> 2, a valid slot in a 3-count
+        # world) but is silently WRONG for the real 24-bay chassis — exactly
+        # the bad-label case that sends an operator to pull the wrong drive.
+        panel = [{"panel": "front", "type": "sas", "reverse_slots": True}]
+        hint = baymap.detect_slots(["32:0", "32:1", "32:2"])
+        self.assertEqual(hint, {"32": 3})
+        result = baymap.remap_slot("32:0", panel, hint)
+        self.assertEqual(result, "32:2")             # right-looking, wrong
+        warnings = common.take_warnings()
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("slots_per_enclosure", warnings[0])
+
+    def test_explicit_count_beats_the_auto_detected_hint(self):
+        panel = [{"panel": "front", "type": "sas", "reverse_slots": True,
+                  "slots_per_enclosure": 8}]
+        hint = {"32": 24}           # would reverse very differently if used
+        self.assertEqual(baymap.remap_slot("32:0", panel, hint), "32:7")
+
+    def test_map_still_beats_reverse_slots(self):
+        # Existing precedence (map > reverse_slots > identity) must not
+        # regress even when both are configured on the same panel.
+        panel = [{"panel": "front", "type": "sas", "reverse_slots": True,
+                  "slots_per_enclosure": 8, "map": {"32:0": "OVERRIDE"}}]
+        self.assertEqual(baymap.remap_slot("32:0", panel), "OVERRIDE")
+
+
+class TestAssignBaysSafetyInvariant(unittest.TestCase):
+    """§9: assign_bays may only ever touch d.bay (the display label).
+    RAID-mode actions (locate/offline/replace) target d.ctrl_slot — if a
+    remapped display label ever overwrote it, an action would fire on the
+    wrong physical slot."""
+
+    def test_assign_bays_leaves_ctrl_slot_untouched(self):
+        d = Disk(dev="/dev/sda", serial="S1234", ctrl_slot="0:5")
+        panel = [{"panel": "front", "type": "sas", "reverse_slots": True,
+                  "slots_per_enclosure": 8, "map": {}}]
+        baymap.assign_bays([d], {"S1234": "32:0"}, panel)
+        self.assertEqual(d.bay, "32:7")              # bay WAS remapped
+        self.assertEqual(d.ctrl_slot, "0:5")          # ctrl_slot untouched
 
 
 if __name__ == "__main__":

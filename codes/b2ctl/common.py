@@ -13,6 +13,7 @@ pd_state); a HW member is treated as 'assigned' and graded by its PERC PD state.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -41,6 +42,41 @@ def set_dry_run(value: bool) -> None:
 
 def is_dry_run() -> bool:
     return DRY_RUN
+
+
+# ---- JSON-mode warning collector (single owner at the bottom layer) ------- #
+# b2ctl --json must put the JSON envelope alone on stdout: a stray print() from
+# a read-path warning (spec.py/baymap.py) would corrupt the stream for the
+# MCP/web client (F-139). Same shape/placement as the dry-run flag above.
+JSON_MODE = False
+_ANSI_RE = re.compile(r"\033\[[0-9;]*m")
+_pending_warnings: list[str] = []
+
+
+def set_json_mode(value: bool) -> None:
+    global JSON_MODE
+    JSON_MODE = bool(value)
+
+
+def is_json_mode() -> bool:
+    return JSON_MODE
+
+
+def warn(msg: str) -> None:
+    """In JSON mode append to the pending list; otherwise print as today."""
+    if JSON_MODE:
+        plain = _ANSI_RE.sub("", msg)
+        if plain not in _pending_warnings:     # F-139: dedup within one run
+            _pending_warnings.append(plain)
+    else:
+        print(msg)
+
+
+def take_warnings() -> list:
+    """Return the pending JSON-mode warnings and clear them."""
+    out = list(_pending_warnings)
+    _pending_warnings.clear()
+    return out
 
 
 def die(msg: str) -> None:

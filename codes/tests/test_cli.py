@@ -4,7 +4,34 @@ import json
 import os
 import tempfile
 import unittest
+from contextlib import ExitStack
+from types import SimpleNamespace
 from unittest.mock import patch
+
+from b2ctl import common
+
+
+def _mock_hardware(stack: ExitStack) -> SimpleNamespace:
+    """Patch every hardware-facing seam a read verb might touch, so `cli.main`
+    runs on a dev laptop with no real disks/controller/PERC (ADR-007's machine
+    contract must be testable without hardware). Mirrors the idiom already used
+    by test_core.py's scan() patches and test_schema.py's TestBackendJson.
+    Returns the fake backend in case a test wants to tweak it further."""
+    fake_bk = SimpleNamespace(name="it", bay_source=None, raid_volumes=lambda: [])
+    stack.enter_context(patch("b2ctl.core.scan", return_value=[]))
+    stack.enter_context(patch("b2ctl.core.scan_light", return_value=[]))
+    stack.enter_context(patch("b2ctl.zfs.list_pools", return_value=[]))
+    stack.enter_context(patch("b2ctl.backend.get_backend", return_value=fake_bk))
+    stack.enter_context(patch("b2ctl.config.controller_mode", return_value="it"))
+    stack.enter_context(patch("b2ctl.hba_raid.have_tool", return_value=False))
+    stack.enter_context(patch("b2ctl.hba_raid.foreign_config", return_value=[]))
+    stack.enter_context(patch("b2ctl.hba_raid.foreign_bays", return_value=set()))
+    stack.enter_context(patch("b2ctl.maint.load_events", return_value=[]))
+    stack.enter_context(patch("b2ctl.safety.load_log", return_value=[]))
+    stack.enter_context(patch("b2ctl.config.load_bay_map", return_value=[]))
+    stack.enter_context(patch("b2ctl.config.bay_map_write_path",
+                              return_value="/nonexistent/b2ctl-test/bay_map.json"))
+    return fake_bk
 
 
 class TestCliLog(unittest.TestCase):
@@ -860,6 +887,249 @@ class TestPager(unittest.TestCase):
         sp, pr = self._run(self._TALL, tty=True, spawn=OSError("boom"))
         sp.assert_called_once()
         pr.assert_called_once()
+
+
+class TestJsonEnvelopeEveryReadVerb(unittest.TestCase):
+    """v0.22.0 machine contract (ADR-007): every read verb must put ONE JSON
+    envelope on stdout and nothing else — a stray print() from anywhere on the
+    read path corrupts the stream for an MCP/web client (F-139). Table-driven
+    over the whole read surface; `_mock_hardware` stands in for the disks/
+    controller so this runs with no real hardware."""
+
+    ENVELOPE_KEYS = {"schema_version", "ok", "command", "data", "warnings", "error"}
+
+    # (argv, expected command field)
+    CASES = (
+        (["status", "--json"], "status"),
+        (["disks", "--json"], "disks"),
+        (["pools", "--json"], "pools"),
+        (["volumes", "--json"], "volumes"),
+        (["bays", "--json"], "bays"),
+        (["check", "--json"], "check"),
+        (["log", "--json"], "log"),
+        (["version", "--json"], "version"),
+        (["raid-foreign", "--json"], "raid-foreign"),
+        (["maint", "--log", "--json"], "maint"),
+        (["config", "show", "--json"], "config"),
+    )
+
+    def setUp(self):
+        common.set_json_mode(False)
+        common.take_warnings()
+
+    def tearDown(self):
+        common.set_json_mode(False)
+        common.take_warnings()
+
+    def test_every_read_verb_emits_one_parseable_envelope(self):
+        import b2ctl.cli as cli
+        for argv, expected_command in self.CASES:
+            with self.subTest(argv=argv):
+                with ExitStack() as stack:
+                    stack.enter_context(patch("os.geteuid", return_value=0))
+                    _mock_hardware(stack)
+                    buf = io.StringIO()
+                    with patch("sys.stdout", buf):
+                        rc = cli.main(argv)
+                raw = buf.getvalue()
+                # The critical assertion: json.loads on the WHOLE capture proves
+                # nothing else landed on stdout alongside the envelope.
+                out = json.loads(raw)
+                self.assertEqual(set(out), self.ENVELOPE_KEYS)
+                self.assertEqual(out["command"], expected_command)
+                self.assertIs(out["ok"], True)
+                self.assertEqual(out["schema_version"], 1)
+                self.assertEqual(out["error"], None)
+                self.assertEqual(rc, 0)
+
+
+class TestJsonWarningsCaptured(unittest.TestCase):
+    """--json must route non-fatal notices into the envelope's warnings[]
+    instead of printing them (ADR-007) — exercised through cli.main() end to
+    end, on top of jsonout's own unit coverage in test_jsonout.py."""
+
+    def setUp(self):
+        common.set_json_mode(False)
+        common.take_warnings()
+
+    def tearDown(self):
+        common.set_json_mode(False)
+        common.take_warnings()
+
+    def _run(self, argv, scan_side_effect):
+        import b2ctl.cli as cli
+        with ExitStack() as stack:
+            stack.enter_context(patch("os.geteuid", return_value=0))
+            _mock_hardware(stack)
+            # override the no-op scan() from _mock_hardware with one that warns
+            stack.enter_context(patch("b2ctl.core.scan", side_effect=scan_side_effect))
+            buf = io.StringIO()
+            with patch("sys.stdout", buf):
+                rc = cli.main(argv)
+        return rc, json.loads(buf.getvalue())
+
+    def test_warning_lands_in_envelope_and_stdout_still_parses(self):
+        def scan(*_a, **_kw):
+            common.warn("bay_map.json unreadable — using scrambled raw slots")
+            return []
+        rc, out = self._run(["status", "--json"], scan)
+        self.assertEqual(rc, 0)
+        self.assertEqual(out["warnings"],
+                         ["bay_map.json unreadable — using scrambled raw slots"])
+
+    def test_same_message_twice_dedups_to_one_entry(self):
+        # common.warn() dedups within one run (F-139) — assert that holds
+        # through the full cli.main() path, not just the unit-level warn() call.
+        def scan(*_a, **_kw):
+            common.warn("dup notice")
+            common.warn("dup notice")
+            return []
+        _, out = self._run(["status", "--json"], scan)
+        self.assertEqual(out["warnings"], ["dup notice"])
+
+    def test_warnings_do_not_leak_into_the_next_command(self):
+        def warning_scan(*_a, **_kw):
+            common.warn("first-run only")
+            return []
+        rc1, out1 = self._run(["status", "--json"], warning_scan)
+        self.assertEqual(out1["warnings"], ["first-run only"])
+        rc2, out2 = self._run(["status", "--json"], lambda *_a, **_kw: [])
+        self.assertEqual(rc1, 0)
+        self.assertEqual(rc2, 0)
+        self.assertEqual(out2["warnings"], [])
+
+
+class TestJsonFlagPositionMatrix(unittest.TestCase):
+    """F-139 / ADR-007: --json is declared BOTH globally (on the top parser)
+    and on every subparser (`_add_json_flag` recurses into `maint`/`config`),
+    each with default=argparse.SUPPRESS.
+
+    Why SUPPRESS: argparse merges the top-level namespace with the matched
+    subparser's own defaults. If a subparser declared `--json` with its
+    ordinary `default=False`, that False would UNCONDITIONALLY overwrite the
+    True the top-level `--json` already set — so `b2ctl --json status` would
+    silently fall through to the table renderer instead of the envelope. With
+    default=SUPPRESS the subparser copy only ever sets the attribute when
+    --json is literally present at THAT position, so whichever position
+    actually supplies the flag wins and neither copy can clobber the other.
+    This table is the regression test for exactly that trap.
+    """
+
+    CASES = (
+        (["--json", "status"], True),
+        (["status", "--json"], True),
+        (["status"], False),
+        (["--json", "maint", "--log"], True),
+        (["maint", "--log", "--json"], True),
+        (["--json", "config", "show"], True),
+        (["config", "show", "--json"], True),
+    )
+
+    def test_json_resolves_the_same_regardless_of_position(self):
+        import b2ctl.cli as cli
+        for argv, expected in self.CASES:
+            with self.subTest(argv=argv):
+                ns = cli.build_parser().parse_args(argv)
+                self.assertEqual(bool(getattr(ns, "json", False)), expected)
+
+
+class TestJsonLocateMutexBothPositions(unittest.TestCase):
+    """F-069: --locate (blinks a physical LED) and --json (machine output)
+    must never combine. argparse's mutually-exclusive group lives INSIDE the
+    `status` subparser, so it only catches `status --json --locate` — it
+    cannot see `--json status --locate`, where --json is supplied by the
+    top-level parser instead (a mutex group can't span parsers). cli._status()
+    re-checks at runtime so the rule holds at BOTH positions (ADR-007)."""
+
+    def test_json_after_status_rejected_by_argparse(self):
+        import b2ctl.cli as cli
+        with self.assertRaises(SystemExit):
+            cli.build_parser().parse_args(["status", "--json", "--locate"])
+
+    def test_json_before_status_caught_at_runtime(self):
+        import b2ctl.cli as cli
+        with patch("os.geteuid", return_value=0):
+            buf = io.StringIO()
+            with patch("sys.stdout", buf):
+                rc = cli.main(["--json", "status", "--locate"])
+        out = json.loads(buf.getvalue())
+        self.assertEqual(rc, 1)
+        self.assertIs(out["ok"], False)
+        self.assertEqual(out["error"]["code"], "INVALID_ARG")
+
+
+class TestJsonNeedsRootEnvelope(unittest.TestCase):
+    """A machine caller can't read stderr text: NEEDS_ROOT must come back as
+    part of the envelope (rc 1 + error.code), not a bare die()-to-stderr exit
+    that only a terminal operator could read (ADR-007)."""
+
+    def test_non_root_json_returns_needs_root_envelope(self):
+        import b2ctl.cli as cli
+        with patch("os.geteuid", return_value=1000):
+            buf = io.StringIO()
+            with patch("sys.stdout", buf):
+                rc = cli.main(["disks", "--json"])
+        out = json.loads(buf.getvalue())
+        self.assertEqual(rc, 1)
+        self.assertIs(out["ok"], False)
+        self.assertEqual(out["error"]["code"], "NEEDS_ROOT")
+
+
+class TestJsonBaysVerb(unittest.TestCase):
+    """`bays` (ADR-007): a malformed --set value and the interactive-only
+    forms (--calibrate; raid-foreign --clear, mutation is phase 2) must refuse
+    cleanly under --json instead of hanging a machine caller on a prompt or a
+    ValueError traceback."""
+
+    def test_set_without_equals_is_invalid_arg(self):
+        import b2ctl.cli as cli
+        with patch("os.geteuid", return_value=0):
+            buf = io.StringIO()
+            with patch("sys.stdout", buf):
+                rc = cli.main(["bays", "--set", "32:0", "--json"])
+        out = json.loads(buf.getvalue())
+        self.assertEqual(rc, 1)
+        self.assertIs(out["ok"], False)
+        self.assertEqual(out["error"]["code"], "INVALID_ARG")
+
+    def test_calibrate_json_is_unsupported(self):
+        import b2ctl.cli as cli
+        with patch("os.geteuid", return_value=0):
+            buf = io.StringIO()
+            with patch("sys.stdout", buf):
+                rc = cli.main(["bays", "--calibrate", "--json"])
+        out = json.loads(buf.getvalue())
+        self.assertEqual(rc, 1)
+        self.assertIs(out["ok"], False)
+        self.assertEqual(out["error"]["code"], "UNSUPPORTED")
+
+    def test_raid_foreign_clear_json_is_unsupported(self):
+        import b2ctl.cli as cli
+        with patch("os.geteuid", return_value=0):
+            buf = io.StringIO()
+            with patch("sys.stdout", buf):
+                rc = cli.main(["raid-foreign", "--clear", "--json"])
+        out = json.loads(buf.getvalue())
+        self.assertEqual(rc, 1)
+        self.assertIs(out["ok"], False)
+        self.assertEqual(out["error"]["code"], "UNSUPPORTED")
+
+    def test_read_form_returns_expected_data_keys(self):
+        import b2ctl.cli as cli
+        with ExitStack() as stack:
+            stack.enter_context(patch("os.geteuid", return_value=0))
+            stack.enter_context(patch("b2ctl.config.load_bay_map", return_value=[]))
+            stack.enter_context(patch("b2ctl.config.bay_map_write_path",
+                                      return_value="/nonexistent/b2ctl-test/bay_map.json"))
+            stack.enter_context(patch("b2ctl.core.scan_light", return_value=[]))
+            buf = io.StringIO()
+            with patch("sys.stdout", buf):
+                rc = cli.main(["bays", "--json"])
+        out = json.loads(buf.getvalue())
+        self.assertEqual(rc, 0)
+        self.assertIs(out["ok"], True)
+        self.assertEqual(set(out["data"]),
+                         {"panels", "path", "write_path", "detected_slots", "disks"})
 
 
 if __name__ == "__main__":

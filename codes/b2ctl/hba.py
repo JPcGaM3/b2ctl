@@ -226,6 +226,7 @@ def get_ghost_disks(disks: list[Disk], controller: int = CONTROLLER, bm=None) ->
         bm = bay_map(controller)
     os_serials = [d.serial for d in disks if d.serial]
     ghosts = []
+    slots_hint = baymap.detect_slots(bm.values())   # F-140, as the other callers
     for serial, raw_bay in bm.items():
         matched = False
         for os_serial in os_serials:
@@ -234,7 +235,7 @@ def get_ghost_disks(disks: list[Disk], controller: int = CONTROLLER, bm=None) ->
                 break
         if not matched:
             d = Disk(dev="-")
-            d.bay = baymap.remap_slot(raw_bay, panels)
+            d.bay = baymap.remap_slot(raw_bay, panels, slots_hint)
             d.serial = serial
             d.model = "(Ghost / OS Rejected)"
             d.health = "GHOST"

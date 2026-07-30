@@ -12,6 +12,7 @@ import json
 import os
 import re
 
+from . import common
 from .common import Y, N
 
 # rated TBW in terabytes-written
@@ -35,7 +36,7 @@ def load() -> dict:
                 for k, v in json.load(f).items():
                     table[_norm(k)] = float(v)
         except Exception as e:
-            print(f"{Y}[!] cannot read {path}: {e} (using defaults){N}")
+            common.warn(f"{Y}[!] cannot read {path}: {e} (using defaults){N}")
     return table
 
 

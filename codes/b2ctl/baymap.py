@@ -22,8 +22,13 @@ from __future__ import annotations
 import json
 import os
 
+from . import common
 
 _cache: tuple | None = None      # ((path, mtime_ns), panels)
+_slot_warned: set = set()        # (enclosure, n) pairs already warned about
+                                  # (F-140) — remap_slot runs per-drive, so
+                                  # this keeps the out-of-range notice to once
+                                  # per enclosure/count, not once per disk.
 
 
 def load() -> list:
@@ -48,15 +53,16 @@ def load() -> list:
         with open(path) as f:
             data = json.load(f)
     except (OSError, json.JSONDecodeError) as exc:
-        print(f"[!] {path}: {exc} — using scrambled raw slots (fix bay_map.json)")
+        common.warn(f"[!] {path}: {exc} — using scrambled raw slots (fix bay_map.json)")
         return []
     if isinstance(data, dict):
         # Pre-0.8 flat format ({"reverse_slots":…}/{"map":…}) is no longer read.
-        print(f"[!] {path}: old bay_map format — migrate to the panel list; ignoring")
+        common.warn(f"[!] {path}: old bay_map format — migrate to the panel list; ignoring")
         panels: list = []
     else:
         panels = data if isinstance(data, list) else []
     _cache = (key, panels)
+    _slot_warned.clear()   # F-140: a re-parsed file may fix/change the counts
     return panels
 
 
@@ -75,6 +81,25 @@ def serial_match(a: str, b: str) -> bool:
     return a.startswith(b) or b.startswith(a)
 
 
+def detect_slots(enc_slots) -> dict:
+    """{enclosure: slot_count} from an iterable of 'enc:slot' strings —
+    max slot seen + 1. Ignores malformed entries.
+
+    Auto-detects the per-enclosure slot count (F-140) for chassis wider than
+    the 8-slot default (R740xd/HBA330: 24 bays, enc:slot up to '32:23').
+    """
+    highest: dict[str, int] = {}
+    for es in enc_slots:
+        try:
+            enc, slot_s = str(es).split(":")
+            slot = int(slot_s)
+        except (ValueError, AttributeError, TypeError):
+            continue
+        if enc not in highest or slot > highest[enc]:
+            highest[enc] = slot
+    return {enc: n + 1 for enc, n in highest.items()}
+
+
 def assign_bays(disks: list, bm: dict, panels: list) -> None:
     """Fill each disk's display bay from a serial->'enc:slot' map (F-084).
 
@@ -85,15 +110,16 @@ def assign_bays(disks: list, bm: dict, panels: list) -> None:
     chassis label via the front (sas) panel. Only d.bay (the display label) is
     touched — RAID-mode actions target d.ctrl_slot, which is left untouched.
     """
+    slots_hint = detect_slots(bm.values())     # F-140: auto slot count per enc
     for d in disks:
         if not d.serial:
             continue
         if d.serial in bm:
-            d.bay = remap_slot(bm[d.serial], panels)
+            d.bay = remap_slot(bm[d.serial], panels, slots_hint)
             continue
         for bm_serial, bay_val in bm.items():
             if serial_match(d.serial, bm_serial):
-                d.bay = remap_slot(bay_val, panels)
+                d.bay = remap_slot(bay_val, panels, slots_hint)
                 break
 
 
@@ -117,16 +143,25 @@ def assign_sysfs_bays(disks: list, panels: list, enc: str = "0",
         slots = blockdev.sas_bay_slots()
     if not slots:
         return
+    slots_hint = detect_slots(f"{enc}:{s}" for s in slots.values())  # F-140
     for d in disks:
         if d.bay or d.dev not in slots:
             continue
-        d.bay = remap_slot(f"{enc}:{slots[d.dev]}", panels)
+        d.bay = remap_slot(f"{enc}:{slots[d.dev]}", panels, slots_hint)
 
 
-def remap_slot(enc_slot: str, panels: list) -> str:
+def remap_slot(enc_slot: str, panels: list, slots_hint: dict | None = None) -> str:
     """Remap a sas/PERC 'enc:slot' via a front (type=sas) panel.
 
     Explicit "map" override wins; else the reverse-slots rule; else identity.
+
+    The reverse-slots slot count is, in order: the panel's own
+    `slots_per_enclosure` if set; else `slots_hint[enclosure]` (auto-detected
+    by the caller from every disk it is about to map, via detect_slots());
+    else 8. A slot outside [0, n) would flip the reverse math negative — e.g.
+    slot 12 against the 8-slot default renders as the bogus '32:-5' on a
+    24-bay R740xd/HBA330 chassis — so that case SKIPS the rule (identity label)
+    and warns once per (enclosure, n) rather than once per disk (F-140).
     """
     for p in _panels(panels, "sas"):
         table = p.get("map") or {}
@@ -134,9 +169,39 @@ def remap_slot(enc_slot: str, panels: list) -> str:
             return table[enc_slot]
         if p.get("reverse_slots"):
             try:
-                n = int(p.get("slots_per_enclosure", 8))
-                enc, slot = enc_slot.split(":")
-                return f"{enc}:{(n - 1) - int(slot)}"
+                enc, slot_s = enc_slot.split(":")
+                slot = int(slot_s)
+                guessed = False
+                if "slots_per_enclosure" in p:
+                    n = int(p["slots_per_enclosure"])
+                elif slots_hint and enc in slots_hint:
+                    n = int(slots_hint[enc])
+                    guessed = True
+                else:
+                    n = 8
+                if guessed:
+                    # Auto-detect only ever sees POPULATED slots, and the count
+                    # is a property of the chassis. Three disks in a 24-bay
+                    # backplane detect as 3 and reverse to 0->2 instead of
+                    # 0->23 — right-looking and wrong. Say so once; a wrong bay
+                    # label sends someone to pull the wrong drive (§9, F-140).
+                    key = ("guess", enc, n)
+                    if key not in _slot_warned:
+                        _slot_warned.add(key)
+                        common.warn(
+                            f"bay_map.json: reverse_slots is on for enclosure "
+                            f"{enc} with no slots_per_enclosure — assuming {n} "
+                            f"from the drives present. Pin the real bay count "
+                            f"if the chassis is not fully populated.")
+                if slot < 0 or slot >= n:
+                    warn_key = (enc, n)
+                    if warn_key not in _slot_warned:
+                        _slot_warned.add(warn_key)
+                        common.warn(
+                            f"bay_map.json: slots_per_enclosure={n} but slot "
+                            f"{slot} seen on enclosure {enc} — reverse rule skipped")
+                    return enc_slot
+                return f"{enc}:{(n - 1) - slot}"
             except (ValueError, AttributeError, TypeError):
                 pass
     return enc_slot

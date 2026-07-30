@@ -1288,6 +1288,102 @@ A device is claimed at most once, so two same-size volumes cannot both grab it.
 
 ---
 
+## 9.7 The machine contract — `--json` (v0.22.0 / ADR-007)
+
+b2ctl is driven by an MCP server and a web UI as well as by an operator, so every
+read verb emits a versioned envelope and every failure is data.
+
+### The envelope
+
+```json
+{ "schema_version": 1, "ok": true,  "command": "status",
+  "data": {...}, "warnings": [], "error": null }
+
+{ "schema_version": 1, "ok": false, "command": "status",
+  "data": null, "warnings": [],
+  "error": { "code": "INVALID_ARG", "message": "--locate ... cannot be combined with --json" } }
+```
+
+The key set never varies by outcome. `b2ctl/jsonout.py` is the only thing that
+builds one: `emit(command, data, warnings=)` → rc 0, `fail(command, code,
+message, data=)` → rc 1. Exit codes stay 0/1; the envelope carries the detail.
+
+Clients branch on `error.code` — a closed set (`NO_BACKEND`, `TOOL_MISSING`,
+`POOL_NOT_FOUND`, `DISK_NOT_FOUND`, `NEEDS_ROOT`, `INVALID_ARG`, `PARSE_ERROR`,
+`UNSUPPORTED`) — **never** on `message`, which is free to be reworded.
+
+`schema_version` bumps only on a break: adding a key keeps the version, removing
+or renaming one bumps it.
+
+### `--json` is global, and two argparse traps
+
+`--json` sits beside `--dry-run` on the top-level parser, and `_add_json_flag()`
+walks every subparser (recursively, so `maint scrub` and `config show` get it
+too) adding a copy.
+
+Both copies use **`default=argparse.SUPPRESS`**, and that is load-bearing: a
+subparser's ordinary default OVERWRITES whatever the top-level flag already set,
+so `b2ctl --json status` would silently parse as `json=False`. With SUPPRESS the
+subcommand only sets the attribute when the flag is actually typed, and both
+`b2ctl --json <verb>` and `b2ctl <verb> --json` work. `status` declares its own
+`--json` inside the F-069 mutex group and needed the same treatment.
+
+Second trap: an argparse mutually exclusive group **cannot span parsers**, so the
+F-069 rule ("`--locate` is a physical side effect, `--json` is machine output —
+never together") is silently bypassed by `b2ctl --json status --locate`. `_status`
+re-checks it at runtime and returns `INVALID_ARG`.
+
+Bare `b2ctl` re-parses as `status`, which REPLACES the namespace — `main()`
+carries `--json` across by hand.
+
+### `--json` implies total stdout silence
+
+The envelope must be the only thing on stdout. The read path was audited:
+`baymap.py` (×2) and `spec.py` (×1) wrote notices there. They now call
+`common.warn()`, which prints exactly as before in terminal mode and appends to
+`warnings[]` in JSON mode (ANSI stripped, deduplicated). `take_warnings()` is
+drained by `jsonout.emit`/`fail`, so a handler never has to remember to collect.
+
+`safety.py`'s ten stdout writes are on the mutation path — untouched here.
+
+### Projections, never `vars()`
+
+`b2ctl/schema.py` builds each dict from a named tuple of fields
+(`DISK_FIELDS`/`POOL_FIELDS`/`VOLUME_FIELDS`). Publishing a field is a decision;
+a new internal field on `Disk` can no longer reach the wire by accident.
+Deliberately excluded: `pool_token`, `selftest_running`/`_pct`/`_eta`,
+`spare_replacing`, `smart_dtype`, `ctrl`, `lba_written`.
+
+`backend_json()` must never raise or block. Note it catches
+`(Exception, SystemExit)`: `backend.get_backend()` calls `common.die()` →
+`sys.exit()` when no HBA/RAID tool exists at all, and **`SystemExit` is not an
+`Exception` subclass**.
+
+### Read verbs
+
+| verb | `data` keys |
+|---|---|
+| `status` | `backend, disks, pools, volumes, summary` |
+| `disks` | `disks` (SMART scan) |
+| `pools` | `pools` (no SMART — cheap to poll) |
+| `volumes` | `volumes` (`[]` in IT mode) |
+| `check` | `root, backend, tools` |
+| `log` | `entries` (ops.jsonl) |
+| `maint --log` | `events` (maint.jsonl) |
+| `raid-foreign` | `controller, groups, bays` |
+| `config show` | `config, paths` |
+| `version` | `version, schema_version` |
+
+`pools` merges `zfs.pool_level()` and `core.pool_maint()` into each row —
+`zfs.list_pools()` alone carries neither, so without the merge every pool would
+report `level: null`.
+
+**Mutating verbs still prompt** and are not part of the contract yet; an MCP
+server must not call them until phase 2 (v0.23.0). `raid-foreign --import/--clear`
+with `--json` returns `UNSUPPORTED` rather than hanging on a confirm.
+
+---
+
 ## 10. Config file (`config.py`)
 
 Config file: `/etc/b2ctl/config.json`. **Optional** — missing or malformed

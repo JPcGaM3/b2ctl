@@ -979,6 +979,69 @@ state was reached. If something looks wrong:
 
 ---
 
+## 7.7 Scripting b2ctl — `--json` (v0.22.0)
+
+Every **read** command can return JSON instead of a table, so scripts, a web UI
+or an MCP server can use b2ctl directly. `--json` works before or after the verb:
+
+```
+b2ctl --json status        # same as
+b2ctl status --json
+```
+
+You always get one envelope, and it looks the same whether the command worked:
+
+```json
+{ "schema_version": 1, "ok": true, "command": "pools",
+  "data": { "pools": [ … ] }, "warnings": [], "error": null }
+```
+
+```json
+{ "schema_version": 1, "ok": false, "command": "disks",
+  "data": null, "warnings": [],
+  "error": { "code": "NEEDS_ROOT", "message": "run as root (…)" } }
+```
+
+- **`ok`** — did it work. **`error.code`** is a fixed word to branch on
+  (`NEEDS_ROOT`, `NO_BACKEND`, `TOOL_MISSING`, `POOL_NOT_FOUND`,
+  `DISK_NOT_FOUND`, `INVALID_ARG`, `PARSE_ERROR`, `UNSUPPORTED`). Don't match on
+  `message` — the wording can change.
+- **`warnings`** — non-fatal notices (e.g. an unreadable `bay_map.json`). In
+  table mode these print as `[!] …`; with `--json` they move in here so the
+  output stays valid JSON.
+- **`schema_version`** — only changes if a field is removed or renamed. New
+  fields can appear at any time.
+
+Which verbs:
+
+| command | what `data` holds |
+|---|---|
+| `status --json` | `backend`, `disks`, `pools`, `volumes`, `summary` — everything at once |
+| `disks --json` | `disks` (full SMART scan) |
+| `pools --json` | `pools` — no SMART, cheap enough to poll often |
+| `volumes --json` | `volumes` (hardware RAID; empty list in IT mode) |
+| `bays --json` | `panels`, `disks`, `detected_slots`, `path` |
+| `check --json` | `root`, `backend`, `tools` |
+| `log --json` / `maint --log --json` | `entries` / `events` |
+| `raid-foreign --json` | `controller`, `groups`, `bays` |
+| `config show --json` | `config`, `paths` |
+| `version --json` | `version`, `schema_version` |
+
+Examples:
+
+```bash
+b2ctl pools --json | jq -r '.data.pools[] | "\(.name) \(.health) \(.free)"'
+b2ctl disks --json | jq '.data.disks[] | select(.level != "NORMAL")'
+b2ctl status --json | jq -r '.warnings[]'
+```
+
+> ⚠️ **Commands that CHANGE something are not scriptable yet.** `create`,
+> `destroy`, `replace`, `offload`, `raid-foreign --clear` and friends still stop
+> and ask you to confirm, by design — so they will hang if a program calls them.
+> That is the next release. For now, point automation at the read commands only.
+
+---
+
 ## 8. Warnings
 
 ### The table adapts to your terminal (v0.21.0)
@@ -1046,7 +1109,12 @@ ESP partition **manually**. b2ctl does not touch Proxmox boot config.
 |---------|--------------|
 | `b2ctl status` | health table + pool summary + details block |
 | `b2ctl status --locate` | same + blink LEDs on WARNING/CRITICAL disks |
-| `b2ctl status --json` | JSON output |
+| `b2ctl status --json` | JSON output (see *Scripting b2ctl* below) |
+| `b2ctl disks` / `pools` / `volumes` | one slice each — `pools` skips the SMART scan, so it is cheap to poll |
+| `b2ctl bays` | show what each drive's bay label resolves to |
+| `b2ctl bays --calibrate` | blink each bay, ask which slot lit, write the rule |
+| `b2ctl bays --set-reverse on\|off [--slots N]` | mirror-reverse the front panel's numbering |
+| `b2ctl bays --set 32:0=32:7` / `--clear` | relabel one bay / drop all bay customisation |
 | `b2ctl status --full` | every column at full width, no pager (for copy/paste) |
 | `b2ctl status --no-pager` | never page, even when taller than the screen |
 | `b2ctl --dry-run <cmd>` | preview what commands would run — no writes |

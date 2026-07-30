@@ -984,6 +984,67 @@ b2ctl rollback 20260617-143022-replace
 
 ---
 
+## 7.6 เรียก b2ctl จากสคริปต์ — `--json` (v0.22.0)
+
+คำสั่งที่ **อ่านอย่างเดียว** คืนค่าเป็น JSON ได้ทุกตัว เพื่อให้สคริปต์ / web UI / MCP server
+เรียกใช้ b2ctl ตรงๆ ได้ `--json` ใส่ก่อนหรือหลังคำสั่งก็ได้:
+
+```
+b2ctl --json status        # เหมือนกับ
+b2ctl status --json
+```
+
+ได้ envelope หน้าตาเดียวกันเสมอ ไม่ว่าจะสำเร็จหรือพัง:
+
+```json
+{ "schema_version": 1, "ok": true, "command": "pools",
+  "data": { "pools": [ … ] }, "warnings": [], "error": null }
+```
+
+```json
+{ "schema_version": 1, "ok": false, "command": "disks",
+  "data": null, "warnings": [],
+  "error": { "code": "NEEDS_ROOT", "message": "run as root (…)" } }
+```
+
+- **`ok`** — สำเร็จไหม **`error.code`** เป็นคำตายตัวไว้ให้โปรแกรมเช็ค
+  (`NEEDS_ROOT`, `NO_BACKEND`, `TOOL_MISSING`, `POOL_NOT_FOUND`, `DISK_NOT_FOUND`,
+  `INVALID_ARG`, `PARSE_ERROR`, `UNSUPPORTED`) **อย่าไปเช็คที่ `message`** เพราะข้อความ
+  เปลี่ยนได้
+- **`warnings`** — เรื่องเตือนที่ไม่ถึงกับพัง (เช่น `bay_map.json` อ่านไม่ออก) โหมดตารางมันพิมพ์
+  เป็น `[!] …` พอใส่ `--json` จะย้ายมาอยู่ในนี้แทน output จะได้ยังเป็น JSON ที่ parse ได้
+- **`schema_version`** — เปลี่ยนเฉพาะตอนลบหรือเปลี่ยนชื่อ field ส่วนการเพิ่ม field ใหม่
+  เกิดขึ้นได้ตลอดโดยเลขไม่ขยับ
+
+มีคำสั่งอะไรบ้าง:
+
+| คำสั่ง | ใน `data` มีอะไร |
+|---|---|
+| `status --json` | `backend`, `disks`, `pools`, `volumes`, `summary` — ครบในครั้งเดียว |
+| `disks --json` | `disks` (scan SMART เต็ม) |
+| `pools --json` | `pools` — ไม่ scan SMART เรียกถี่ได้ |
+| `volumes --json` | `volumes` (hardware RAID; IT mode ได้ list ว่าง) |
+| `bays --json` | `panels`, `disks`, `detected_slots`, `path` |
+| `check --json` | `root`, `backend`, `tools` |
+| `log --json` / `maint --log --json` | `entries` / `events` |
+| `raid-foreign --json` | `controller`, `groups`, `bays` |
+| `config show --json` | `config`, `paths` |
+| `version --json` | `version`, `schema_version` |
+
+ตัวอย่าง:
+
+```bash
+b2ctl pools --json | jq -r '.data.pools[] | "\(.name) \(.health) \(.free)"'
+b2ctl disks --json | jq '.data.disks[] | select(.level != "NORMAL")'
+b2ctl status --json | jq -r '.warnings[]'
+```
+
+> ⚠️ **คำสั่งที่เปลี่ยนแปลงระบบยังเรียกจากสคริปต์ไม่ได้** — `create`, `destroy`, `replace`,
+> `offload`, `raid-foreign --clear` ฯลฯ ยังหยุดถามยืนยันอยู่ (ตั้งใจให้เป็นแบบนั้น) ถ้าโปรแกรม
+> เรียกมันจะค้าง เอาไว้ release หน้า ตอนนี้ให้ automation ยิงเฉพาะคำสั่งอ่านก่อน
+
+---
+
 ## 8. ข้อควรระวัง
 
 ### 📐 ตารางปรับตามขนาดจอเอง (v0.21.0)
@@ -1039,7 +1100,10 @@ pipe หรือ redirect ไม่โดนผลกระทบ: `b2ctl statu
 |--------|--------|
 | `sudo b2ctl status` | ดูตารางสุขภาพดิสก์ครั้งเดียว |
 | `sudo b2ctl status --locate` | ดูตาราง + กะพริบไฟดิสก์ที่มีปัญหา |
-| `sudo b2ctl status --json` | แสดงผลเป็น JSON |
+| `sudo b2ctl status --json` | แสดงผลเป็น JSON (ดู *เรียก b2ctl จากสคริปต์*) |
+| `sudo b2ctl disks` / `pools` / `volumes` | ดูทีละส่วน — `pools` ไม่ scan SMART เรียกถี่ได้ |
+| `sudo b2ctl bays [--calibrate]` | ดู/แก้ป้าย bay; `--calibrate` กะพริบไฟทีละช่องแล้วเขียนกฎให้ |
+| `sudo b2ctl bays --set-reverse on\|off [--slots N]` | กลับด้านเลขช่องของ front panel |
 | `sudo b2ctl status --full` | โชว์ทุก column เต็มความกว้าง ไม่เข้า pager (ไว้ copy/paste) |
 | `sudo b2ctl status --no-pager` | ไม่ต้องเข้า pager ถึงตารางจะสูงเกินจอ |
 | `sudo b2ctl watch` | ⭐ เข้าโหมดเฝ้าดู (แนะนำ) |

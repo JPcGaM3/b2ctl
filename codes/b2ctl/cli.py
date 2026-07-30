@@ -58,11 +58,28 @@ def _page(text: str, no_pager: bool = False) -> None:
 
 
 def _status(args) -> int:
+    # F-069 says --locate (a physical side effect) and --json (machine output)
+    # must not combine. The argparse mutex only covers `status --json --locate`;
+    # it CANNOT see `b2ctl --json status --locate`, because a mutually exclusive
+    # group lives in one parser and --json is now also global. Re-check here so
+    # the rule holds at every position (ADR-007).
+    if getattr(args, "json", False) and getattr(args, "locate", False):
+        from . import jsonout
+        return jsonout.fail("status", jsonout.ERR_INVALID_ARG,
+                            "--locate blinks physical LEDs and cannot be "
+                            "combined with --json")
     tbw = spec.load()
     disks = core.scan(tbw)
     if args.json:
-        print(json.dumps([vars(d) for d in disks], indent=2, default=str))
-        return 0
+        from . import jsonout, schema
+        return jsonout.emit("status", {
+            "backend": schema.backend_json(),
+            "disks": [schema.disk_json(d) for d in disks],
+            "pools": _pools_payload(),
+            "volumes": _volumes_payload(),
+            "summary": core.assemble_storage(disks, zfs.list_pools(),
+                                             _raid_volumes()),
+        })
     width = None if getattr(args, "full", False) else ui.auto_width()
     pools = zfs.list_pools()
     vols = _backend_mod.get_backend().raid_volumes()
@@ -98,6 +115,234 @@ def _status(args) -> int:
             results = list(ex.map(lambda d: locatemod.blink_disk(d, args.seconds), risky))
         lit = sum(1 for ok, _ in results if ok)
         print(f"{G}[+] blinked {lit}/{len(risky)} disk(s){N}")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# Read-verb payloads for the machine contract (ADR-007). Each reuses the same
+# scan/list path the table renderer uses — the JSON face adds no new probing.
+# --------------------------------------------------------------------------- #
+
+def _raid_volumes() -> list:
+    """Hardware volumes, or [] on a box whose controller/tool is absent.
+
+    A read verb must never die because there is no PERC: `get_backend()` calls
+    common.die() (SystemExit) when no tool is found at all (ADR-007)."""
+    try:
+        return _backend_mod.get_backend().raid_volumes()
+    except (Exception, SystemExit):
+        return []
+
+
+def _pools_payload() -> list:
+    """ZFS pools with the level and maintenance columns merged in.
+
+    `zfs.list_pools()` alone carries no `level` and no scrub/trim history — the
+    table gets those from `zfs.pool_level` + `core.pool_maint`, so the wire
+    format has to merge them too or every pool reports level: null.
+    """
+    from . import schema
+    out = []
+    for p in zfs.list_pools():
+        row = dict(p)
+        row["level"] = zfs.pool_level(p["name"])
+        row.update(core.pool_maint(p["name"]))
+        out.append(schema.pool_json(row))
+    return out
+
+
+def _volumes_payload() -> list:
+    from . import schema
+    return [schema.volume_json(v) for v in _raid_volumes()]
+
+
+def _disks(args) -> int:
+    """`b2ctl disks` — every disk with SMART, machine-readable."""
+    from . import jsonout, schema
+    disks = core.scan(spec.load())
+    if not getattr(args, "json", False):
+        print(ui.render_table(disks, ui.auto_width()))
+        return 0
+    return jsonout.emit("disks", {"disks": [schema.disk_json(d) for d in disks]})
+
+
+def _pools(args) -> int:
+    """`b2ctl pools` — pool health without a SMART scan (cheap to poll)."""
+    from . import jsonout
+    data = _pools_payload()
+    if not getattr(args, "json", False):
+        print(ui.render_pools(zfs.list_pools()))
+        return 0
+    return jsonout.emit("pools", {"pools": data})
+
+
+def _volumes(args) -> int:
+    """`b2ctl volumes` — hardware RAID volumes; [] in IT mode."""
+    from . import jsonout
+    data = _volumes_payload()
+    if not getattr(args, "json", False):
+        for v in data:
+            print(f"vd{v.get('vd')}  {v.get('name') or '-':<16} "
+                  f"{str(v.get('raid') or '?'):<8} {v.get('state') or '?':<6} "
+                  f"{v.get('size') or '-'}")
+        if not data:
+            print("no hardware RAID volumes (IT/HBA mode, or no controller)")
+        return 0
+    return jsonout.emit("volumes", {"volumes": data})
+
+
+def _bays_payload() -> dict:
+    """Current bay labelling: the panel rules, and what each disk resolves to."""
+    from . import baymap
+    disks = core.scan_light()           # identity only — bays never need SMART
+    rows = []
+    raws = []
+    for d in disks:
+        raw = d.ctrl_slot or ""
+        rows.append({"bay": d.bay, "raw_slot": raw or None, "dev": d.dev,
+                     "serial": d.serial or None, "model": d.model or None})
+        if raw:
+            raws.append(raw)
+    return {"panels": _cfg_mod.load_bay_map(),
+            "path": _cfg_mod.bay_map_path(),
+            "write_path": _cfg_mod.bay_map_write_path(),
+            "detected_slots": baymap.detect_slots(raws),
+            "disks": rows}
+
+
+def _bays(args) -> int:
+    """`b2ctl bays` — inspect and fix front-panel bay labelling.
+
+    Read is side-effect-free (§9). The write forms exist so a web UI / MCP server
+    can fix numbering without hand-editing bay_map.json, which is what an
+    operator had to do before (F-140).
+    """
+    from . import jsonout
+    as_json = getattr(args, "json", False)
+
+    if getattr(args, "calibrate", False):
+        return _bays_calibrate(as_json)
+
+    try:
+        if getattr(args, "set_reverse", None) is not None:
+            panels = _cfg_mod.set_front_reverse(args.set_reverse == "on",
+                                                slots=getattr(args, "slots", None))
+        elif getattr(args, "set", None):
+            raw, _, label = str(args.set).partition("=")
+            if not label:
+                raise ValueError("expected RAW=LABEL, e.g. --set 32:0=32:7")
+            panels = _cfg_mod.set_bay_label(raw.strip(), label.strip())
+        elif getattr(args, "clear", False):
+            panels = _cfg_mod.clear_bay_map()
+        else:
+            panels = None                       # read-only form
+    except ValueError as exc:
+        if as_json:
+            return jsonout.fail("bays", jsonout.ERR_INVALID_ARG, str(exc))
+        print(f"{R}[-] {exc}{N}")
+        return 1
+    except OSError as exc:
+        if as_json:
+            return jsonout.fail("bays", jsonout.ERR_NEEDS_ROOT,
+                                f"cannot write {_cfg_mod.bay_map_write_path()}: {exc}")
+        print(f"{R}[-] cannot write {_cfg_mod.bay_map_write_path()} — "
+              f"run as root ({exc}){N}")
+        return 1
+
+    if panels is not None and not as_json:
+        print(f"{G}[+] wrote {_cfg_mod.bay_map_write_path()}{N}")
+
+    data = _bays_payload()
+    if as_json:
+        return jsonout.emit("bays", data)
+    print(f"bay_map: {data['path']}")
+    print(f"  {'BAY':<10}{'RAW':<10}{'DEV':<12}{'SERIAL':<20}MODEL")
+    for r in data["disks"]:
+        print(f"  {str(r['bay'] or '-'):<10}{str(r['raw_slot'] or '-'):<10}"
+              f"{str(r['dev']):<12}{str(r['serial'] or '-'):<20}{r['model'] or '-'}")
+    if data["detected_slots"]:
+        print(f"  detected slot counts: {data['detected_slots']}")
+    return 0
+
+
+def _bays_calibrate(as_json: bool) -> int:
+    """Blink each bay, ask which slot lit, then propose a rule and write it.
+
+    Replaces the old "calibrate with b2ctl locate <serial>, then hand-edit JSON"
+    loop. Interactive by nature, so it refuses under --json rather than hanging
+    a machine caller on a prompt (ADR-007).
+    """
+    from . import jsonout
+    if as_json:
+        return jsonout.fail("bays", jsonout.ERR_UNSUPPORTED,
+                            "--calibrate is interactive; use --set-reverse/--set "
+                            "for non-interactive changes")
+    # Only real enc:slot drives. An NVMe's bay is a PCIe address ("PCIe2:0")
+    # relabelled by the `type:nvme` back panel — the reverse-slots rule does not
+    # apply to it, and splitting it would feed "PCIe2" in as an enclosure number.
+    import re as _re
+    disks = [d for d in core.scan_light()
+             if _re.fullmatch(r"\d+:\d+", d.ctrl_slot or d.bay or "")]
+    if not disks:
+        print(f"{Y}[!] no enc:slot drives to calibrate (NVMe bays are set in the "
+              f"`type:nvme` back panel of bay_map.json, not by slot reversal){N}")
+        return 1
+    print(f"{C}Calibrating {len(disks)} bay(s). For each drive b2ctl blinks its "
+          f"LED — type the slot number you SEE lit, or blank to skip.{N}")
+    observed = {}
+    for d in disks:
+        raw = d.ctrl_slot or d.bay
+        print(f"  blinking {ui.disk_label(d)} (raw {raw}) ...")
+        if not common.is_dry_run():
+            locatemod.blink_disk(d, 3)
+        ans = common.ask("    which slot lit up? > ")
+        if ans.isdigit():
+            observed[raw] = int(ans)
+    if not observed:
+        print("nothing observed — cancelled")
+        return 1
+
+    encs = {raw.split(":")[0] for raw in observed}
+    reversal = None
+    if len(encs) == 1:
+        enc = encs.pop()
+        n = max(max(int(r.split(":")[1]) for r in observed),
+                max(observed.values())) + 1
+        if all((n - 1) - int(raw.split(":")[1]) == seen
+               for raw, seen in observed.items()):
+            reversal = (enc, n)
+
+    if reversal:
+        enc, n = reversal
+        print(f"{G}  every bay matches a clean mirror-reversal across {n} slots.{N}")
+        if not common.confirm(f"  set reverse_slots=true, slots_per_enclosure={n}?"):
+            print("cancelled")
+            return 1
+        path = _cfg_mod.bay_map_write_path()
+        try:
+            _cfg_mod.set_front_reverse(True, slots=n)
+        except OSError as exc:
+            print(f"{R}[-] cannot write {path} — run as root ({exc}){N}")
+            return 1
+        print(f"{G}[+] wrote {path}{N}")
+        return 0
+
+    # Not a clean reversal — write the observed permutation verbatim. An explicit
+    # map wins over reverse_slots in baymap.remap_slot, so this is exact.
+    print(f"{Y}  not a clean reversal — writing {len(observed)} explicit "
+          f"map entries instead.{N}")
+    for raw, seen in sorted(observed.items()):
+        print(f"    {raw} -> {raw.split(':')[0]}:{seen}")
+    if not common.confirm("  write these entries?"):
+        print("cancelled")
+        return 1
+    try:
+        for raw, seen in observed.items():
+            _cfg_mod.set_bay_label(raw, f"{raw.split(':')[0]}:{seen}")
+    except (OSError, ValueError) as exc:
+        print(f"{R}[-] cannot write: {exc}{N}")
+        return 1
+    print(f"{G}[+] wrote {_cfg_mod.bay_map_write_path()}{N}")
     return 0
 
 
@@ -164,6 +409,9 @@ def _maint(args) -> int:
     """`b2ctl maint --log` — read-only maintenance history (scrub/trim/health)."""
     from . import maint as _maint_mod
     events = _maint_mod.load_events(last=getattr(args, "last", 30))
+    if getattr(args, "json", False):
+        from . import jsonout
+        return jsonout.emit("maint", {"events": events})
     if not events:
         print("No maintenance events logged yet.")
         return 0
@@ -370,15 +618,58 @@ def _raid_del(args) -> int:
     return raid_actions.delete_vd(args.vd)
 
 
+def _version(args) -> int:
+    from . import jsonout
+    if getattr(args, "json", False):
+        # schema_version rides along so a client can negotiate the wire format
+        # without parsing the product version (ADR-007).
+        return jsonout.emit("version", {"version": __version__,
+                                        "schema_version": jsonout.SCHEMA_VERSION})
+    print(f"b2ctl {__version__}")
+    return 0
+
+
 def _raid_foreign(args) -> int:
     from . import raid_actions
     action = ("import" if getattr(args, "do_import", False)
               else "clear" if getattr(args, "clear", False) else "show")
-    return raid_actions.foreign(action, getattr(args, "controller", None))
+    ctrl = getattr(args, "controller", None)
+    if getattr(args, "json", False):
+        from . import hba_raid, jsonout
+        if action != "show":
+            # Import/clear mutate the controller and go through the interactive
+            # confirms; machine-driven mutation lands in phase 2 (ADR-007).
+            return jsonout.fail("raid-foreign", jsonout.ERR_UNSUPPORTED,
+                                "--import/--clear are interactive; JSON output "
+                                "covers the read form only in this release")
+        c = ctrl if ctrl is not None else hba_raid.CONTROLLER
+        try:
+            groups = hba_raid.foreign_config(c)
+            bays = sorted(hba_raid.foreign_bays(c))
+        except (Exception, SystemExit):
+            return jsonout.fail("raid-foreign", jsonout.ERR_TOOL_MISSING,
+                                "perccli is not available on this host")
+        return jsonout.emit("raid-foreign",
+                            {"controller": c, "groups": groups, "bays": bays})
+    return raid_actions.foreign(action, ctrl)
 
 
 def _check(_args) -> int:
     """Check all required tools and show environment summary."""
+    if getattr(_args, "json", False):
+        from . import jsonout, schema
+        import shutil as _sh
+        tools = []
+        for name in ("smartctl", "lsblk", "zpool", "sas2ircu", "perccli",
+                     "perccli64", "ledctl", "badblocks", "sgdisk", "wipefs"):
+            path = _cfg_mod.tool(name)
+            tools.append({"name": name, "path": _sh.which(path) or None,
+                          "present": bool(_sh.which(path))})
+        return jsonout.emit("check", {
+            "root": os.geteuid() == 0,
+            "backend": schema.backend_json(),
+            "tools": tools,
+        })
     ok_mark = f"{G}[✔]{N}"
     fail_mark = f"{R}[✗]{N}"
     warn_mark = f"{Y}[!]{N}"
@@ -579,7 +870,15 @@ def _update(args) -> int:
     return 0
 
 
-def _config_show(_args) -> int:
+def _config_show(args) -> int:
+    if getattr(args, "json", False):
+        from . import jsonout
+        return jsonout.emit("config", {
+            "config": _cfg_mod.load(),
+            "paths": {"config": _cfg_mod.CONFIG_PATH,
+                      "bay_map": _cfg_mod.bay_map_path(),
+                      "ssd_spec": _cfg_mod.ssd_spec_path()},
+        })
     print(_cfg_mod.as_json())
     return 0
 
@@ -609,9 +908,12 @@ def _config_init(_args) -> int:
 def _log_cmd(args):
     from . import safety
     entries = safety.load_log(last=getattr(args, "last", 20))
+    if getattr(args, "json", False):
+        from . import jsonout
+        return jsonout.emit("log", {"entries": entries})
     if not entries:
         print("No operations logged yet.")
-        return
+        return 0
     print(f"\n{'OP_ID':<28} {'OP':<10} {'BAY':<4} {'SERIAL':<16} {'POOL':<8} {'STATUS':<7} {'STARTED'}")
     print("─" * 100)
     for e in entries:
@@ -684,12 +986,37 @@ def _pos_int(s: str) -> int:
     return v
 
 
+_JSON_HELP = ("machine-readable output: a single JSON envelope on stdout "
+              "(schema_version/ok/data/warnings/error) and nothing else")
+
+
+def _add_json_flag(parser) -> None:
+    """Accept --json on every subcommand, at any position (F-139 / ADR-007).
+
+    default=SUPPRESS is load-bearing. A subparser's own default would OVERWRITE
+    the value the top-level flag already set, so `b2ctl --json status` would
+    silently parse as json=False. With SUPPRESS the subcommand copy only sets the
+    attribute when the flag is actually present, and both `b2ctl --json <verb>`
+    and `b2ctl <verb> --json` work.
+    """
+    try:
+        parser.add_argument("--json", action="store_true",
+                            default=argparse.SUPPRESS, help=_JSON_HELP)
+    except argparse.ArgumentError:
+        pass                    # this subcommand already declares --json itself
+    for act in parser._actions:                     # recurse into `maint`, `config`
+        if isinstance(act, argparse._SubParsersAction):
+            for sp in act.choices.values():
+                _add_json_flag(sp)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="b2ctl",
                                 description="ZFS/HBA disk health & lifecycle "
                                             "(IT-mode, LSI SAS2308)")
     p.add_argument("--dry-run", action="store_true", default=False,
                    help="preview write commands without executing them")
+    p.add_argument("--json", action="store_true", default=False, help=_JSON_HELP)
     sub = p.add_subparsers(dest="cmd")
 
     st = sub.add_parser("status", help="health table + details")
@@ -698,7 +1025,10 @@ def build_parser() -> argparse.ArgumentParser:
     st_mode = st.add_mutually_exclusive_group()
     st_mode.add_argument("--locate", action="store_true",
                          help="blink LEDs on at-risk disks for a few seconds")
-    st_mode.add_argument("--json", action="store_true", help="machine-readable output")
+    # default=SUPPRESS for the same reason as _add_json_flag: a plain default here
+    # would overwrite the value `b2ctl --json status` already set (ADR-007).
+    st_mode.add_argument("--json", action="store_true",
+                         default=argparse.SUPPRESS, help=_JSON_HELP)
     st.add_argument("--seconds", type=_pos_int, default=locatemod.DEFAULT_SECONDS,
                     help="blink duration in seconds (default 5, must be > 0)")
     st.add_argument("--full", action="store_true",
@@ -706,6 +1036,27 @@ def build_parser() -> argparse.ArgumentParser:
     st.add_argument("--no-pager", action="store_true",
                     help="never page, even when the output is taller than the screen")
     st.set_defaults(func=_status)
+
+    # Granular read verbs for the machine contract (ADR-007): a client polling
+    # pool health should not pay for a full SMART scan the way `status` does.
+    sub.add_parser("disks", help="per-disk health (SMART scan)").set_defaults(func=_disks)
+    sub.add_parser("pools", help="ZFS pool health (no SMART scan)").set_defaults(func=_pools)
+    sub.add_parser("volumes", help="hardware RAID volumes ([] in IT mode)").set_defaults(func=_volumes)
+
+    by = sub.add_parser("bays", help="inspect / fix front-panel bay labelling")
+    by_act = by.add_mutually_exclusive_group()
+    by_act.add_argument("--calibrate", action="store_true",
+                        help="blink each bay, ask which slot lit, write the rule")
+    by_act.add_argument("--set-reverse", choices=("on", "off"), dest="set_reverse",
+                        help="mirror-reverse the front panel's slot numbering")
+    by_act.add_argument("--set", metavar="RAW=LABEL",
+                        help="explicit relabel, e.g. --set 32:0=32:7 (wins over --set-reverse)")
+    by_act.add_argument("--clear", action="store_true",
+                        help="drop all bay customisation (other panels untouched)")
+    by.add_argument("--slots", type=_pos_int,
+                    help="bay count for --set-reverse (omit to auto-detect from "
+                         "the drives present)")
+    by.set_defaults(func=_bays)
 
     w = sub.add_parser("watch", help="interactive hotplug-aware loop")
     w.set_defaults(func=_watch)
@@ -832,7 +1183,7 @@ def build_parser() -> argparse.ArgumentParser:
     # NOTE: `burnin` merged into `maint health` (v0.18.0) — see the `maint` parser.
 
     v = sub.add_parser("version", help="print version")
-    v.set_defaults(func=lambda _a: (print(f"b2ctl {__version__}") or 0))
+    v.set_defaults(func=_version)
 
     # check
     chk = sub.add_parser("check", help="verify tools and environment on this server")
@@ -914,9 +1265,13 @@ def build_parser() -> argparse.ArgumentParser:
                       help="controller index (default 0)")
     rf_p.set_defaults(func=_raid_foreign)
 
+    _add_json_flag(p)           # after every subparser exists (ADR-007)
     return p
 
 
+# disks/pools/volumes/bays are NOT listed: they probe real hardware (smartctl,
+# zpool, sas2ircu/perccli), exactly like `status`, so they need root for the same
+# reason. Being machine-readable does not make a probe cheaper (ADR-007).
 _ROOT_EXEMPT = ("version", "check", "config", "log", "rollback",
                 "install", "update", "maint", "raid-foreign")
 
@@ -950,9 +1305,24 @@ def main(argv=None) -> int:
         from . import watch as _watch
         _watch._DRY_RUN = True
         common.set_dry_run(True)      # bottom-layer owner read by raid_actions/burnin
+    want_json = bool(getattr(args, "json", False))
     if not getattr(args, "cmd", None):
+        # Bare `b2ctl` defaults to status. Re-parsing REPLACES args, so carry the
+        # flag over by hand or `b2ctl --json` would silently print a table.
         args = parser.parse_args(["status"])
+        args.json = want_json
+    # Set BEFORE any handler runs: read-path modules route notices through
+    # common.warn(), which must already know to collect instead of print, or the
+    # first warning lands on stdout and corrupts the envelope (ADR-007).
+    common.set_json_mode(want_json)
     if _needs_root(args):
+        if want_json and os.geteuid() != 0:
+            # need_root() dies to stderr with a bare exit code — useless to a
+            # machine caller, which must get the same envelope as any other
+            # failure so it can branch on error.code (ADR-007).
+            from . import jsonout
+            return jsonout.fail(getattr(args, "cmd", "?"), jsonout.ERR_NEEDS_ROOT,
+                                "run as root (smartctl / sas2ircu / zpool need it)")
         need_root()
     try:
         return args.func(args)

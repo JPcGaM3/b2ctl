@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 
@@ -208,23 +209,40 @@ def tool(name: str) -> str:
     return found if found else name
 
 
-def _resource_path(cfg_key: str, std: str, bundled: str) -> str:
-    """Resolve a data file: config override > /etc standard > bundled next to code.
+def _bundled_path(name: str) -> str:
+    """Absolute path to a data file bundled next to the installed package
+    (__file__-relative, so cwd/copy-sensitive — callers prefer /etc first)."""
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", name))
 
-    The bundled fallback is __file__-relative (cwd/copy-sensitive); the /etc
-    standard is absolute, so preferring it keeps resolution directory-independent.
-    """
+
+def _resource_path(cfg_key: str, std: str, bundled: str) -> str:
+    """Resolve a data file: config override > /etc standard > bundled next to code."""
     p = _get()[cfg_key]
     if p:
         return p
     if os.path.exists(std):
         return std
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", bundled))
+    return _bundled_path(bundled)
 
 
 def bay_map_path() -> str:
     """Return path to bay_map.json (override > /etc > bundled)."""
     return _resource_path("bay_map_path", STD_BAY_MAP, "bay_map.json")
+
+
+def bay_map_write_path() -> str:
+    """Return the path an operator edit of bay_map.json should be WRITTEN to.
+
+    Same resolution as bay_map_path() (override > /etc > bundled), except the
+    bundled case is redirected to STD_BAY_MAP: the bundled copy lives inside the
+    installed package (or this repo checkout), and writing there would edit the
+    source tree on a dev box and be lost on redeploy — the operator's /etc copy
+    is the only sane write target.
+    """
+    p = bay_map_path()
+    if p == _bundled_path("bay_map.json"):
+        return STD_BAY_MAP
+    return p
 
 
 def ssd_spec_path() -> str:
@@ -339,6 +357,108 @@ def remove_pool_settings(name: str) -> None:
     if isinstance(pools, dict) and pools.pop(name, None) is not None:
         _atomic_write(data)
         _cache = None
+
+
+_DEFAULT_BAY_MAP: list = [
+    {"panel": "front", "type": "sas", "reverse_slots": False, "map": {}}
+]
+
+_BAY_KEY_RE = re.compile(r"^\d+:\d+$")
+
+
+def load_bay_map() -> list:
+    """Return the current bay_map.json panel list.
+
+    Falls back to a single default front/sas panel when the file is absent,
+    unreadable, or not a list — same 'malformed -> defaults' contract as
+    load(); never raises. Parses the file directly rather than importing
+    b2ctl.baymap, which imports this module (would be circular).
+    """
+    path = bay_map_path()
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return list(_DEFAULT_BAY_MAP)
+    if isinstance(data, list):
+        return data
+    return list(_DEFAULT_BAY_MAP)
+
+
+def write_bay_map(panels: list) -> str:
+    """Write the bay_map.json panel list atomically (tmp in same dir +
+    os.replace), mirroring _atomic_write()'s crash-safety contract — but for
+    bay_map_write_path(), not CONFIG_PATH, so _atomic_write() itself can't be
+    reused. Raises OSError naturally on permission failure (caller reports it).
+    Returns the path actually written.
+    """
+    path = bay_map_write_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(panels, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
+    return path
+
+
+def _sas_panel(panels: list) -> dict:
+    """Find the first type=='sas' panel, creating a default one (appended) if
+    none exists yet. Mutating the returned dict in place preserves every other
+    key on it (e.g. '_comment') and leaves every other panel untouched."""
+    for p in panels:
+        if isinstance(p, dict) and p.get("type") == "sas":
+            return p
+    p = {"panel": "front", "type": "sas", "reverse_slots": False, "map": {}}
+    panels.append(p)
+    return p
+
+
+def set_front_reverse(on: bool, slots: int | None = None) -> list:
+    """Set reverse_slots on the front sas panel; slots=None clears
+    slots_per_enclosure so baymap.remap_slot's auto-detection takes over."""
+    if slots is not None and (isinstance(slots, bool) or not isinstance(slots, int) or slots <= 0):
+        raise ValueError(f"slots must be a positive int, got {slots!r}")
+    panels = load_bay_map()
+    p = _sas_panel(panels)
+    p["reverse_slots"] = bool(on)
+    if slots is None:
+        p.pop("slots_per_enclosure", None)
+    else:
+        p["slots_per_enclosure"] = slots
+    write_bay_map(panels)
+    return panels
+
+
+def set_bay_label(raw: str, label: str) -> list:
+    """Set map[raw] = label on the front sas panel. `raw` must be 'enc:slot'
+    (a malformed key would silently never match in baymap.remap_slot)."""
+    if not isinstance(raw, str) or not _BAY_KEY_RE.match(raw):
+        raise ValueError(f"raw bay key must look like 'enc:slot', got {raw!r}")
+    if not label:
+        raise ValueError("label must be non-empty")
+    panels = load_bay_map()
+    p = _sas_panel(panels)
+    m = p.get("map")
+    if not isinstance(m, dict):
+        m = {}
+        p["map"] = m
+    m[raw] = label
+    write_bay_map(panels)
+    return panels
+
+
+def clear_bay_map() -> list:
+    """Reset the front sas panel's map to {} and drop reverse_slots /
+    slots_per_enclosure — 'undo my bay customisation', not 'delete the file'.
+    Other panels (e.g. the nvme back panel) are left untouched."""
+    panels = load_bay_map()
+    p = _sas_panel(panels)
+    p["map"] = {}
+    p.pop("reverse_slots", None)
+    p.pop("slots_per_enclosure", None)
+    write_bay_map(panels)
+    return panels
 
 
 def as_json() -> str:

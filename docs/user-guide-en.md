@@ -281,6 +281,36 @@ with `[m]aint` or `b2ctl maint scrub|trim <pool>`.
 | **WARNING** | endurance/wear getting low, vdev DEGRADED, or an **HDD** with a moderate defect count (`>50` grown defects, or any pending sector) — prepare to act soon |
 | **CRITICAL** | SMART failed, near-zero endurance, FAULTED/UNAVAIL vdev, GHOST (OS rejected drive), **any** bad sector on an SSD/NVMe, or an **HDD** with heavy defects (`>200`) or uncorrectable errors — act immediately |
 
+### When b2ctl says "pool membership UNKNOWN" (v0.24.1)
+
+If you ever see this line at the top of `status` or `watch`:
+
+```
+⚠ zpool did not answer (...) — pool membership is UNKNOWN.
+  Disk assignment and pool creation are disabled until it does.
+```
+
+…then `zpool` itself did not respond — it hung, it is missing, or the path in
+`/etc/b2ctl/config.json` is wrong. **This is not a disk problem.**
+
+What b2ctl does about it:
+
+- The **disk table still prints** — that table is how you diagnose why ZFS went
+  quiet, so you do not lose it.
+- The `POOL` column is blank for every disk and each one is graded `CONFIG` with
+  *"pool membership UNKNOWN"*. That does **not** mean the disk is free.
+- **`[a]ssign`, `[n]ew-pool` and the aux-vdev menus offer nothing.** They refuse
+  on purpose: b2ctl will not call a disk "available" on the word of a question
+  nobody answered. Before v0.24.1 they listed every live `rpool`/`tank` member as
+  a free disk.
+- `b2ctl <verb> --json` returns `ok: false` with `error.code: "TOOL_MISSING"`
+  rather than an empty pool list, so a script never mistakes it for "no pools".
+
+**What to do:** run `zpool status` by hand. If it hangs, ZFS is stuck (usually a
+failing disk or a stalled resilver) — deal with that first. If it says "command
+not found", ZFS is not installed or `/sbin` is not mounted. Once `zpool` answers,
+press `[r]` in watch and everything comes back.
+
 **Bad-sector grading is type-aware and tunable (v0.13.0).** SSD/NVMe are strict
 (any reallocated/pending/uncorrectable sector → CRITICAL); HDDs tolerate stable,
 already-remapped grown defects (`>50 → WARNING`, `>200 → CRITICAL`). Adjust the

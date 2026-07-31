@@ -10,7 +10,26 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 
 from . import backend as _backend_mod, baymap, smart, zfs, spec
-from .common import Disk, assess
+from .common import Disk, assess, warn, Y, N
+
+
+def _attach_membership(disks: list[Disk]) -> None:
+    """Attach ZFS membership, or mark every disk pool-UNKNOWN if zpool is silent.
+
+    The ONE place the unknown state is set. Every 'is this disk free?' question in
+    the codebase already routes through Disk.is_poolable, so clearing pool_known
+    here makes watch's [a]ssign / [c]reate / aux-vdev menus refuse without any of
+    them growing a check of their own (F-143). warn() is the JSON-mode collector,
+    so an MCP/web client gets the same sentence in warnings[] rather than a
+    confidently empty disk list.
+    """
+    try:
+        zfs.attach_membership(disks, zfs.topology())
+    except zfs.ZfsUnavailable as exc:
+        warn(f"{Y}⚠ zpool did not answer ({exc}) — pool membership is UNKNOWN. "
+             f"Disk assignment and pool creation are disabled until it does.{N}")
+        for d in disks:
+            d.pool_known = False
 
 
 def _bay_sort_key(d: Disk):
@@ -93,7 +112,7 @@ def scan(tbw_table=None, *, rescue: bool = False) -> list[Disk]:
              if not (d.health == "GHOST" and d.serial
                      and any(baymap.serial_match(d.serial, rs) for rs in real_serials))]
 
-    zfs.attach_membership(disks, zfs.topology())
+    _attach_membership(disks)
 
     inuse_spare_pools = {d.pool for d in disks
                          if d.is_spare and d.vdev_state == "INUSE" and d.pool}
@@ -135,7 +154,7 @@ def scan_light(tbw_table=None) -> list[Disk]:
         g.reasons = ["OS_REJECTED",
                      "run [u]dev rescue in watch to recover, or wipe via [a]ssign"]
     disks.extend(ghosts)
-    zfs.attach_membership(disks, zfs.topology())
+    _attach_membership(disks)
     disks.sort(key=_bay_sort_key)
     return disks
 
@@ -214,7 +233,7 @@ def scan_one(dev: str, tbw_table=None) -> Disk:
     bk.attach_bays([d], bm=bm)
     tbw_table = tbw_table if tbw_table is not None else spec.load()
     smart.read(d, tbw_table)
-    zfs.attach_membership([d], zfs.topology())
+    _attach_membership([d])
     if d.health != "GHOST":
         assess(d)
     return d

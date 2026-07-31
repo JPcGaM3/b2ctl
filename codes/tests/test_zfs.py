@@ -884,14 +884,18 @@ class TestFeatureFixPoolToken(unittest.TestCase):
 # ========================================================================== #
 
 class TestListPools:
-    """F-104: list_pools() parses the tab-separated `zpool list -H` dump."""
+    """F-104: list_pools() parses the tab-separated `zpool list -H` dump.
 
-    @patch("b2ctl.zfs.run")
-    def test_parses_tab_output(self, mock_run):
-        mock_run.return_value = (
+    F-143 moved it from run() to run_check(): the parse is unchanged, but a
+    non-zero exit is now an exception instead of an empty list.
+    """
+
+    @patch("b2ctl.zfs.run_check")
+    def test_parses_tab_output(self, mock_run_check):
+        mock_run_check.return_value = (True, (
             "rpool\t952G\t120G\t832G\tONLINE\t3%\t12%\n"
             "tank\t2.72T\t1.20T\t1.52T\tONLINE\t8%\t44%\n"
-        )
+        ))
         pools = zfs.list_pools()
         assert [p["name"] for p in pools] == ["rpool", "tank"]
         assert pools[0] == {"name": "rpool", "size": "952G", "alloc": "120G",
@@ -899,13 +903,37 @@ class TestListPools:
                             "cap": "12%"}
         assert pools[1]["health"] == "ONLINE" and pools[1]["cap"] == "44%"
 
-    @patch("b2ctl.zfs.run")
-    def test_short_lines_ignored(self, mock_run):
+    @patch("b2ctl.zfs.run_check")
+    def test_short_lines_ignored(self, mock_run_check):
         # A locale-/space-mangled line lacking the 7 tab fields must be dropped,
-        # never half-parsed into a bogus pool (blast radius: prune_orphan_crons
-        # deletes crons of any pool NOT in list_pools()).
-        mock_run.return_value = "rpool 952G ONLINE\n\n"
+        # never half-parsed into a bogus pool (blast radius: prune_orphan_timers
+        # disables the timers of any pool NOT in list_pools()).
+        # zpool ANSWERED here — an empty result is a real answer and stays [].
+        mock_run_check.return_value = (True, "rpool 952G ONLINE\n\n")
         assert zfs.list_pools() == []
+
+    @patch("b2ctl.zfs.run_check", return_value=(False, "command not found: zpool"))
+    def test_unanswered_zpool_raises_instead_of_reporting_no_pools(self, _mrc):
+        # F-143: this assertion used to read `== []`, which pinned the bug — a
+        # hung/missing zpool reported a machine with no pools, so every live
+        # member looked unassigned and reached the free-disk menus.
+        with pytest.raises(zfs.ZfsUnavailable) as exc:
+            zfs.list_pools()
+        assert "zpool" in str(exc.value)
+
+    @patch("b2ctl.zfs.run_check", return_value=(False, ""))
+    def test_silent_failure_still_names_the_command(self, _mrc):
+        # run_check gives back '' when the tool produced no output at all; the
+        # exception must still say what did not answer.
+        with pytest.raises(zfs.ZfsUnavailable, match="zpool list failed"):
+            zfs.list_pools()
+
+    @patch("b2ctl.zfs.run_check", return_value=(False, "boom"))
+    def test_topology_propagates_rather_than_returning_empty(self, _mrc):
+        # An empty topology must never stand in for an unanswered one: that is
+        # what made attach_membership leave every disk pool-less.
+        with pytest.raises(zfs.ZfsUnavailable):
+            zfs.topology()
 
 
 class TestSparesReadHelper:

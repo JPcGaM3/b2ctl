@@ -1112,6 +1112,33 @@ pipe หรือ redirect ไม่โดนผลกระทบ: `b2ctl statu
 
 `watch` ปรับ column เหมือนกัน แต่ **ไม่เข้า pager** เพราะมันต้องใช้ terminal ตรวจจับ hot-plug
 
+### ถ้าขึ้นว่า "pool membership UNKNOWN" (v0.24.1)
+
+ถ้าเห็นบรรทัดนี้โผล่บนหัว `status` หรือ `watch`:
+
+```
+⚠ zpool did not answer (...) — pool membership is UNKNOWN.
+  Disk assignment and pool creation are disabled until it does.
+```
+
+แปลว่า **`zpool` ไม่ตอบ** — ค้าง, ไม่ได้ติดตั้ง, หรือ path ใน `/etc/b2ctl/config.json` ผิด
+**ไม่ใช่ปัญหาที่ดิสก์**
+
+b2ctl ทำอะไรตอนนั้น:
+
+- **ตารางดิสก์ยังขึ้นปกติ** — เพราะตารางนี้แหละคือเครื่องมือที่ใช้หาสาเหตุว่าทำไม ZFS เงียบ
+- column `POOL` ว่างทุกแถว และทุกลูกขึ้น `CONFIG` ว่า *"pool membership UNKNOWN"*
+  ซึ่ง**ไม่ได้แปลว่าดิสก์ว่าง**
+- **`[a]ssign`, `[n]ew-pool` และเมนู aux-vdev จะไม่มีดิสก์ให้เลือกเลย** — ตั้งใจให้ปฏิเสธ
+  b2ctl จะไม่บอกว่าดิสก์ "ว่าง" จากคำถามที่ไม่มีใครตอบ ก่อน v0.24.1 มันจะลิสต์สมาชิกที่ยังทำงานอยู่
+  ของ `rpool`/`tank` ออกมาเป็นดิสก์ว่าง
+- `b2ctl <verb> --json` คืน `ok: false` พร้อม `error.code: "TOOL_MISSING"` แทนที่จะคืน
+  pool ว่างๆ สคริปต์จะได้ไม่เข้าใจผิดว่า "ไม่มี pool"
+
+**ต้องทำอะไร:** สั่ง `zpool status` ด้วยมือ ถ้าค้าง = ZFS ติดอยู่ (ปกติเพราะดิสก์กำลังจะพัง หรือ
+resilver ค้าง) แก้อันนั้นก่อน ถ้าขึ้น "command not found" = ยังไม่ได้ลง ZFS หรือ `/sbin` ไม่ได้ mount
+พอ `zpool` ตอบได้แล้ว กด `[r]` ใน watch ทุกอย่างกลับมาเอง
+
 ### END(left) ตรงกับ iDRAC แล้ว (v0.24.0)
 
 `END(left)` คือ **remaining rated write endurance** — เขียนได้อีกกี่ % ของอายุที่ผู้ผลิตรับประกัน

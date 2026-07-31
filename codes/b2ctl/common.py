@@ -261,6 +261,14 @@ class Disk:
                                          # makes them drift apart over time)
     pool_token: str | None = None  # exact leaf token from `zpool status -P`, e.g. wwn-...-part1
     pool: str | None = None
+    pool_known: bool = True        # did zpool actually ANSWER when we asked?
+                                   # `pool is None` used to carry two meanings —
+                                   # "this disk is free" and "we never found out" —
+                                   # so a hung or missing zpool made every live
+                                   # member look unassigned and offered the running
+                                   # boot mirror up for wipe (F-143). core.scan()
+                                   # clears this for every disk when zfs raises
+                                   # ZfsUnavailable; is_poolable then refuses.
     vdev: str | None = None
     vdev_state: str | None = None  # ONLINE / DEGRADED / FAULTED / AVAIL ...
     level: str = "NORMAL"
@@ -316,8 +324,12 @@ class Disk:
         HIDDEN PERC member shares the VD's /dev/sda (smart_dtype set) and MUST
         never reach `sgdisk --zap-all` — that would destroy the OS's hardware VD.
         Ghosts have dev == '-'.
+
+        pool_known comes FIRST: 'not in a pool' is only a fact once zpool has
+        answered. Without it an unanswered probe reads as 'nothing is in a pool',
+        which is the most dangerous possible default here (F-143).
         """
-        return (not self.in_pool and self.dev != "-"
+        return (self.pool_known and not self.in_pool and self.dev != "-"
                 and not self.smart_dtype and self.health != "GHOST")
 
     @property
@@ -416,6 +428,13 @@ def assess(d: Disk) -> None:
             bump("CRITICAL", f"PD state={d.pd_state}")
         else:
             bump("CONFIG", f"PD state={d.pd_state}")
+    elif not d.pool_known:
+        # zpool never answered, so "not in a pool" was never established. Saying
+        # "unassigned — add to a pool" here would tell the operator to do the one
+        # thing b2ctl is now refusing, about a disk that may well be a live rpool
+        # member. Name the real problem instead (F-143).
+        bump("CONFIG", "pool membership UNKNOWN — zpool did not answer, so this "
+                       "disk cannot be graded as free; fix ZFS, then re-run")
     elif not d.in_pool and not d.is_spare:
         bump("CONFIG", "unassigned (not in any pool — add to a pool or set as spare)")
 

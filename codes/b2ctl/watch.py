@@ -560,16 +560,31 @@ def _handle_removed(devs: set) -> None:
     for dev in sorted(devs):
         print(f"\n{Y}■ disk removed: /dev/{dev}{N}")
     print(f"{C}  current pool health:{N}")
-    print(ui.render_pools(zfs.list_pools()))
+    print(ui.render_pools(_pools_or_empty()))
 
 
 # --------------------------------------------------------------------------- #
 # typed commands
 # --------------------------------------------------------------------------- #
+def _pools_or_empty() -> list:
+    """Pools for a DISPLAY block, or [] when zpool is silent.
+
+    Only for rendering. A silent zpool must not cost the operator the disk table —
+    that table is how they diagnose why it went silent — and core.scan() has
+    already warned and marked every disk pool-unknown, so nothing downstream can
+    mistake this [] for 'no pools exist' (F-143). Every path that ACTS on pools
+    lets ZfsUnavailable propagate to run()'s dispatch instead.
+    """
+    try:
+        return zfs.list_pools()
+    except zfs.ZfsUnavailable:
+        return []
+
+
 def _cmd_refresh(tbw) -> None:
     _reconcile_scrub_history()      # sync background scrub completions (mutating, watch-only)
     disks = core.scan(tbw)
-    pools = zfs.list_pools()
+    pools = _pools_or_empty()
     # Auto-fit only — watch NEVER pages. It owns the terminal for its select()
     # hotplug loop, and handing that to `less` would freeze the poll (F-137).
     print("\n" + ui.render_table(disks, ui.auto_width()))
@@ -1407,7 +1422,14 @@ def _reconcile_scrub_history() -> None:
     if _DRY_RUN:
         return
     events = maint.load_events()
-    for p in zfs.list_pools():
+    # Runs FIRST in every refresh, so a silent zpool would raise here before
+    # core.scan() ever got to warn. Nothing to reconcile is the honest answer
+    # when there is nothing to ask (F-143).
+    try:
+        pools = zfs.list_pools()
+    except zfs.ZfsUnavailable:
+        return
+    for p in pools:
         name = p["name"]
         iso = zfs.last_scrub_date(name)
         if not iso:
@@ -1652,6 +1674,14 @@ def run() -> int:
             except KeyboardInterrupt:
                 # Ctrl-C inside a command aborts that command, not the whole session.
                 print(f"\n{Y}  (cancelled — back to prompt){N}")
+            except zfs.ZfsUnavailable as exc:
+                # zpool went silent mid-session. Refuse the command and stay in the
+                # loop: the operator is most likely here BECAUSE something is wrong,
+                # and a traceback would end the session they are diagnosing from
+                # (F-143). Guards that need the topology raise rather than pass.
+                print(f"\n{R}  ✗ zpool did not answer ({exc}){N}")
+                print(f"{Y}  pool state is unknown — this command is refused. "
+                      f"Check `zpool status` and the zfs module, then [r]efresh.{N}")
             needs_prompt = True
 
         current = _block_devs()

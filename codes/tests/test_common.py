@@ -412,3 +412,35 @@ class TestSelftestPassed(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAssessPoolUnknown:
+    """F-143: with the pool picture unknown, the advice must not be 'add it to
+    a pool'. The disks most likely to be graded here are live rpool/tank
+    members that zpool simply failed to describe."""
+
+    def test_unknown_membership_reports_the_real_problem(self):
+        d = _disk(pool=None)
+        d.pool_known = False
+        assess(d)
+        assert d.level == "CONFIG"
+        joined = " ".join(d.reasons)
+        assert "UNKNOWN" in joined and "zpool did not answer" in joined
+        # the actively wrong advice must be gone
+        assert "add to a pool" not in joined
+
+    def test_a_genuinely_free_disk_still_says_unassigned(self):
+        # Same disk, once zpool answers: the normal CONFIG advice is unchanged.
+        d = _disk(pool=None)
+        assert d.pool_known is True
+        assess(d)
+        assert d.level == "CONFIG"
+        assert any("unassigned" in r for r in d.reasons)
+
+    def test_unknown_does_not_mask_a_failing_disk(self):
+        # The pool branch is CONFIG; a SMART failure must still dominate.
+        d = _disk(pool=None, readable=False)
+        d.pool_known = False
+        assess(d)
+        assert d.level == "CRITICAL"
+        assert any("SMART unreadable" in r for r in d.reasons)

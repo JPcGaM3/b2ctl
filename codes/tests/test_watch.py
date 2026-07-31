@@ -88,6 +88,10 @@ class TestWatchOffloadGuard:
         # op recorded as failure
         assert mock_end.call_args.args[1] is False
 
+    # list_pools is stubbed so the real topology() sees an empty pool set, which
+    # is what run() used to hand it for free. F-143 made an unanswered zpool an
+    # exception, so a test that leaves it real now aborts the flow it is testing.
+    @patch("b2ctl.watch.zfs.list_pools", return_value=[])
     @patch("b2ctl.watch._assign_free_disk")
     @patch("b2ctl.watch._replace_onto_spare", return_value=False)
     @patch("b2ctl.watch.core")
@@ -95,7 +99,8 @@ class TestWatchOffloadGuard:
     def test_cmd_offload_does_not_assign_when_replace_declines(self, mock_ask,
                                                                 mock_core,
                                                                 mock_replace,
-                                                                mock_assign):
+                                                                mock_assign,
+                                                                _mock_pools):
         from b2ctl.watch import _cmd_offload
         d = _disk(bay="1:4", vdev="raidz1-0")
         spare = _disk(dev="/dev/sdb", vdev="spares", vdev_state="AVAIL",
@@ -105,6 +110,7 @@ class TestWatchOffloadGuard:
         _cmd_offload({})
         mock_assign.assert_not_called()
 
+    @patch("b2ctl.watch.zfs.list_pools", return_value=[])
     @patch("b2ctl.watch._assign_free_disk")
     @patch("b2ctl.watch._replace_onto_spare", return_value=True)
     @patch("b2ctl.watch.core")
@@ -112,7 +118,8 @@ class TestWatchOffloadGuard:
     def test_cmd_offload_assigns_when_replace_succeeds(self, mock_ask,
                                                         mock_core,
                                                         mock_replace,
-                                                        mock_assign):
+                                                        mock_assign,
+                                                        _mock_pools):
         from b2ctl.watch import _cmd_offload
         d = _disk(bay="1:4", vdev="raidz1-0")
         spare = _disk(dev="/dev/sdb", vdev="spares", vdev_state="AVAIL",
@@ -1574,3 +1581,68 @@ class TestMaybePartition(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPoolUnknownRefusesAssignment:
+    """F-143: with the pool picture unknown, no disk is offerable.
+
+    The regression this pins: `zpool` going silent used to make every live
+    member read as unassigned, so [c]reate and [a]ssign listed the running
+    rpool/tank members as free disks — one confirm away from `zpool create -f`
+    or `sgdisk --zap-all` on the boot mirror. The refusal is inherited from
+    Disk.is_poolable, so neither command needed a check of its own.
+    """
+
+    def _members(self):
+        """Two disks that ARE live pool members, as a silent zpool renders them:
+        pool/vdev unattached (nothing told us) and pool_known cleared."""
+        out = []
+        for dev, serial in (("/dev/sda", "M1"), ("/dev/sdb", "M2")):
+            d = _disk(dev=dev, serial=serial)
+            d.pool = None                      # membership never attached
+            d.pool_known = False               # ...because zpool never answered
+            out.append(d)
+        return out
+
+    def test_is_poolable_is_false_while_the_pool_picture_is_unknown(self):
+        d = self._members()[0]
+        assert d.is_poolable is False
+        d.pool_known = True                    # same disk, once zpool answers
+        assert d.is_poolable is True
+
+    @patch("b2ctl.watch.zfs")
+    @patch("b2ctl.watch.core")
+    @patch("b2ctl.watch._ask")
+    def test_create_refuses_and_never_reaches_zpool_create(self, mock_ask, mock_core, mock_zfs):
+        from b2ctl.watch import _cmd_create
+        mock_core.scan.return_value = self._members()
+        assert _cmd_create({}) is False
+        mock_zfs.create_pool.assert_not_called()
+        mock_zfs.wipe.assert_not_called()
+        mock_ask.assert_not_called()           # never even offered a choice
+
+    @patch("b2ctl.watch.zfs")
+    @patch("b2ctl.watch.core")
+    @patch("b2ctl.watch._ask")
+    def test_assign_refuses_and_never_reaches_wipe(self, mock_ask, mock_core, mock_zfs):
+        from b2ctl.watch import _cmd_assign
+        mock_core.scan.return_value = self._members()
+        _cmd_assign({})
+        mock_zfs.wipe.assert_not_called()
+        mock_zfs.add_spare.assert_not_called()
+        mock_ask.assert_not_called()
+
+    @patch("b2ctl.watch.zfs")
+    @patch("b2ctl.watch.core")
+    @patch("b2ctl.watch._ask")
+    def test_the_same_disks_are_offered_once_zpool_answers(self, mock_ask, mock_core, mock_zfs):
+        # Guard against over-correcting: a genuinely free disk must still be
+        # assignable. Same fixtures, pool_known restored.
+        from b2ctl.watch import _cmd_create
+        disks = self._members()
+        for d in disks:
+            d.pool_known = True
+        mock_core.scan.return_value = disks
+        mock_ask.return_value = ""             # cancel at the first prompt
+        _cmd_create({})
+        mock_ask.assert_called()               # got as far as offering them

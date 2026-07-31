@@ -298,6 +298,39 @@ class TestHaveSas2ircuMemo:
         assert mock_run.call_count == 1        # second call hit the memo
         hba._reset_have_cache()
 
+    def test_timeout_is_not_an_answer_and_is_not_latched(self):
+        # F-143: run(none_on_timeout=True) returns None when the 32-bit sas2ircu
+        # never replied. Memoizing that hid every bay and ghost disk for the rest
+        # of a watch session after ONE slow probe under a resilver.
+        hba._reset_have_cache()
+        with patch("b2ctl.hba.run", return_value=None) as mock_run, \
+             patch("b2ctl.config.tool", return_value="sas2ircu"):
+            assert hba.have_sas2ircu() is False
+            assert hba.have_sas2ircu() is False
+            assert hba._HAVE_CACHE is None      # nothing latched
+        assert mock_run.call_count == 2         # re-probed, did not trust the memo
+        hba._reset_have_cache()
+
+    def test_a_definite_no_is_still_latched(self):
+        # An absent binary answers '' every time — that IS an answer, so the
+        # F-037 memo must survive. Only "no reply" is treated as unknown.
+        hba._reset_have_cache()
+        with patch("b2ctl.hba.run", return_value="") as mock_run, \
+             patch("b2ctl.config.tool", return_value="sas2ircu"):
+            assert hba.have_sas2ircu() is False
+            assert hba.have_sas2ircu() is False
+        assert mock_run.call_count == 1
+        hba._reset_have_cache()
+
+    def test_timeout_then_success_answers_true(self):
+        # The point of not latching: the next probe can still succeed.
+        hba._reset_have_cache()
+        with patch("b2ctl.hba.run", side_effect=[None, "  0  SAS2308_2  ...\n"]), \
+             patch("b2ctl.config.tool", return_value="sas2ircu"):
+            assert hba.have_sas2ircu() is False
+            assert hba.have_sas2ircu() is True
+        hba._reset_have_cache()
+
 
 class TestVdUsage(unittest.TestCase):
     """vd_usage reads lsblk FS columns of a VD block device's mounted FS."""

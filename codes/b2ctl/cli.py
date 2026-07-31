@@ -81,7 +81,16 @@ def _status(args) -> int:
                                              _raid_volumes()),
         })
     width = None if getattr(args, "full", False) else ui.auto_width()
-    pools = zfs.list_pools()
+    # A silent zpool must not cost the operator the disk table — that table is
+    # how they diagnose WHY it went silent. core.scan() has already warned and
+    # marked every disk pool-unknown, so the pool/summary blocks degrade to empty
+    # rather than the whole verb dying (F-143). The machine face does NOT degrade:
+    # the JSON branch above lets ZfsUnavailable reach main() and become a
+    # TOOL_MISSING envelope, because 'pools: []' with ok:true is a lie.
+    try:
+        pools = zfs.list_pools()
+    except zfs.ZfsUnavailable:
+        pools = []
     vols = _backend_mod.get_backend().raid_volumes()
     # Rendered as ONE string so the pager decision is made on the real height —
     # table + summary + details together are what overflows, not any one block.
@@ -1484,6 +1493,19 @@ def main(argv=None) -> int:
             from . import jsonout
             return jsonout.fail(getattr(args, "cmd", "?"),
                                 jsonout.ERR_INVALID_ARG, msg)
+        print(f"{R}[-] {msg}{N}", file=sys.stderr)
+        return 1
+    except zfs.ZfsUnavailable as exc:
+        # zpool did not answer. Every verb that reports or mutates pools reaches
+        # here rather than presenting an empty machine as fact (F-143). Both faces
+        # say the same thing: rc 1, and a machine caller gets a code it can branch
+        # on instead of `pools: []` with ok:true.
+        msg = (f"zpool did not answer ({exc}) — the pool picture is unknown, "
+               f"so this command cannot report or change it")
+        if want_json:
+            from . import jsonout
+            return jsonout.fail(getattr(args, "cmd", "?"),
+                                jsonout.ERR_TOOL_MISSING, msg)
         print(f"{R}[-] {msg}{N}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

@@ -9,6 +9,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from b2ctl import common
+from b2ctl import zfs
+from b2ctl import cli as cli_mod
 
 
 def _mock_hardware(stack: ExitStack) -> SimpleNamespace:
@@ -1134,3 +1136,59 @@ class TestJsonBaysVerb(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSilentZpoolIsNotAnEmptyMachine(unittest.TestCase):
+    """F-143: `zpool` not answering must be a typed failure, never `pools: []`
+    with ok:true. A poller that trusts an empty list will conclude the machine
+    has no pools at the exact moment it has lost sight of them."""
+
+    def setUp(self):
+        common.set_json_mode(False)
+        common.take_warnings()
+
+    tearDown = setUp
+
+    def _run(self, argv, stack):
+        stack.enter_context(patch("os.geteuid", return_value=0))
+        _mock_hardware(stack)
+        stack.enter_context(patch("b2ctl.zfs.list_pools",
+                                  side_effect=zfs.ZfsUnavailable("zpool: not found")))
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            rc = cli_mod.main(argv)
+        return rc, buf.getvalue()
+
+    def test_pools_json_reports_tool_missing_not_an_empty_list(self):
+        with ExitStack() as stack:
+            rc, raw = self._run(["pools", "--json"], stack)
+        out = json.loads(raw)                    # still ONE parseable envelope
+        self.assertIs(out["ok"], False)
+        self.assertEqual(out["error"]["code"], "TOOL_MISSING")
+        self.assertEqual(out["command"], "pools")
+        self.assertEqual(out["data"], None)
+        self.assertEqual(rc, 1)
+
+    def test_status_json_fails_rather_than_publishing_a_partial_picture(self):
+        with ExitStack() as stack:
+            rc, raw = self._run(["status", "--json"], stack)
+        out = json.loads(raw)
+        self.assertIs(out["ok"], False)
+        self.assertEqual(out["error"]["code"], "TOOL_MISSING")
+        self.assertEqual(rc, 1)
+
+    def test_human_status_still_prints_the_disk_table(self):
+        # The operator is looking at `status` BECAUSE something is wrong — the
+        # disk table is how they diagnose it, so the human face degrades (empty
+        # pool/summary blocks) instead of dying. Safety comes from is_poolable,
+        # not from withholding the table.
+        with ExitStack() as stack:
+            stack.enter_context(patch("os.geteuid", return_value=0))
+            _mock_hardware(stack)
+            stack.enter_context(patch("b2ctl.zfs.list_pools",
+                                      side_effect=zfs.ZfsUnavailable("boom")))
+            buf = io.StringIO()
+            with patch("sys.stdout", buf):
+                rc = cli_mod.main(["status"])
+        self.assertEqual(rc, 0)
+        self.assertIn("BAY", buf.getvalue())     # the table rendered

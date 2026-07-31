@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from b2ctl import schema
+from b2ctl import jsonout
 from b2ctl.common import Disk
 from helpers import _disk
 
@@ -226,3 +227,57 @@ class TestBackendJson(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPoolKnownOnTheWire(unittest.TestCase):
+    """F-143: a client must be able to tell `pool: null` = free from
+    `pool: null` = we could not ask. Without pool_known it will treat an
+    unanswered zpool as an empty one — the exact mistake b2ctl itself made."""
+
+    def test_pool_known_is_published(self):
+        self.assertIn("pool_known", schema.DISK_FIELDS)
+        d = Disk(dev="/dev/sda")
+        self.assertIs(schema.disk_json(d)["pool_known"], True)
+
+    def test_it_travels_next_to_pool(self):
+        # Adjacent in the projection so anyone reading the field list sees the
+        # qualifier right beside the thing it qualifies.
+        fields = list(schema.DISK_FIELDS)
+        self.assertEqual(fields[fields.index("pool") + 1], "pool_known")
+
+    def test_unknown_membership_serialises_as_false(self):
+        d = Disk(dev="/dev/sda")
+        d.pool_known = False
+        row = schema.disk_json(d)
+        self.assertIs(row["pool_known"], False)
+        self.assertIsNone(row["pool"])
+        json.dumps(row)                       # still a plain JSON scalar
+
+    def test_schema_version_did_not_bump_for_an_additive_field(self):
+        # ADR-007: additive changes keep schema_version at 1.
+        self.assertEqual(jsonout.SCHEMA_VERSION, 1)
+
+
+class TestVersionDocDrift(unittest.TestCase):
+    """CLAUDE.md is the project contract; a stale version line there sent six
+    releases' worth of readers to the wrong baseline (§1 said v0.18.0 while
+    _version.py said v0.24.0).
+
+    CLAUDE.md is gitignored — it is the maintainer's working handover, not a
+    shipped file — so this SKIPS when it is absent rather than failing a clean
+    checkout. It still fires where it matters: the working tree where the
+    version is actually bumped.
+    """
+
+    def test_claude_md_names_the_current_version(self):
+        import os
+        from b2ctl._version import __version__
+        root = os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))))
+        path = os.path.join(root, "CLAUDE.md")
+        if not os.path.exists(path):
+            self.skipTest("CLAUDE.md not present (gitignored working doc)")
+        with open(path) as f:
+            text = f.read()
+        self.assertIn(__version__, text,
+                      f"CLAUDE.md does not mention {__version__} — bump §1")

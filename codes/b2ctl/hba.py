@@ -127,10 +127,18 @@ def have_sas2ircu() -> bool:
     # A real IT/HBA controller shows a numbered SAS row in `sas2ircu list`; the
     # banner/error output on a RAID box does not (F-010). Memoized: one scan
     # spawns this probe up to 5x, and the 32-bit sas2ircu is slow (F-037).
+    #
+    # Only a DEFINITE answer is latched. none_on_timeout distinguishes "the tool
+    # said no" from "the tool never replied": the second is not an answer, and
+    # memoizing it hid every bay and ghost disk for the rest of a watch session
+    # after one slow probe under a resilver — exactly when the operator is
+    # watching (F-143). An absent binary still returns '' and memoizes False.
     global _HAVE_CACHE
     if _HAVE_CACHE is None:
         from . import config as _cfg
-        out = run([_cfg.tool("sas2ircu"), "list"])
+        out = run([_cfg.tool("sas2ircu"), "list"], none_on_timeout=True)
+        if out is None:
+            return False                  # unknown — ask again next call
         _HAVE_CACHE = bool(re.findall(r"^\s*(\d+)\s+SAS", out, re.MULTILINE))
     return _HAVE_CACHE
 

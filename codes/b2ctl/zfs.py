@@ -30,9 +30,27 @@ _LEAF_RE = re.compile(r"^\s+(\S+)\s+(ONLINE|DEGRADED|FAULTED|OFFLINE|UNAVAIL|"
                       r"REMOVED|AVAIL|INUSE)\b")
 
 
+class ZfsUnavailable(Exception):
+    """`zpool` did not answer — the pool picture is UNKNOWN, not empty.
+
+    common.run() collapses "binary missing", "timed out" and "returned nothing"
+    into '', so list_pools() used to report a hung or absent zpool as a machine
+    with no pools at all. Every live member then looked unassigned and turned up
+    in the free-disk menus of [a]ssign / [c]reate — b2ctl offering to wipe the
+    running boot mirror precisely when it could least see it (F-143). Callers
+    must distinguish the two; this is how they are told apart.
+
+    Same shape as the fix F-063 already applied to prune_orphan_timers' second
+    query: ask with run_check, and treat 'no answer' as a refusal, not as data.
+    """
+
+
 def list_pools() -> list[dict]:
-    out = run([_tool("zpool"), "list", "-H", "-o",
-               "name,size,alloc,free,health,frag,cap"])
+    """Every imported pool. Raises ZfsUnavailable when zpool does not answer."""
+    ok, out = run_check([_tool("zpool"), "list", "-H", "-o",
+                         "name,size,alloc,free,health,frag,cap"], timeout=30)
+    if not ok:
+        raise ZfsUnavailable(out.strip() or "zpool list failed")
     pools = []
     for line in out.splitlines():
         c = line.split("\t")
@@ -46,7 +64,8 @@ def topology() -> dict:
     """Return {device_path: {'pool','vdev','state'}} for every leaf.
 
     Indexed by both the -P leaf path and its realpath so callers can match a
-    by-id link or a /dev/sdX.
+    by-id link or a /dev/sdX. Propagates ZfsUnavailable from list_pools() —
+    an empty topology must never stand in for an unanswered one (F-143).
     """
     topo: dict[str, dict] = {}
     for p in list_pools():

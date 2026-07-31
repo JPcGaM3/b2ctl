@@ -36,8 +36,10 @@ DISK_FIELDS = (
     "health", "readable", "poh", "wear_val", "end_left", "written_tb",
     "tbw_rating", "end_source", "end_left_spec",
     "realloc", "pending", "uncorr", "cmd_timeout",
-    # topology
-    "pool", "vdev", "vdev_state", "array_type", "array_name",
+    # topology — pool_known says whether `pool: null` means "free" or "we could
+    # not ask"; a client that skips it will treat an unanswered zpool as an empty
+    # one, which is the mistake b2ctl itself made (F-143)
+    "pool", "pool_known", "vdev", "vdev_state", "array_type", "array_name",
     # perc
     "pd_state", "pd_foreign", "did",
     # verdict

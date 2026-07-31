@@ -4,6 +4,7 @@ from __future__ import annotations
 from unittest.mock import patch, MagicMock
 
 from b2ctl import core as _core_mod
+from b2ctl import zfs as _zfs_mod
 from b2ctl.common import Disk
 
 
@@ -342,3 +343,80 @@ class TestScanLight:
         mock_bk.attach_bays.assert_called()
         mock_zfs.attach_membership.assert_called_once()
         assert len(result) == 8
+
+
+class TestPoolMembershipUnknown:
+    """F-143: an unanswered zpool marks every disk pool-UNKNOWN, never free.
+
+    common.run() collapses 'binary missing', 'timed out' and 'returned nothing'
+    into '', so list_pools() used to report a silent zpool as a machine with no
+    pools. Every live member then read as unassigned and turned up in the
+    free-disk menus of [a]ssign / [c]reate.
+    """
+
+    def _backend(self, mock_backend_mod, disks):
+        mock_bk = MagicMock()
+        mock_backend_mod.get_backend.return_value = mock_bk
+        mock_bk.have_tool.return_value = True
+        mock_bk.bay_map.return_value = {}
+        mock_bk.enumerate_disks.return_value = disks
+        mock_bk.get_ghost_disks.return_value = []
+        mock_bk.attach_bays.return_value = None
+        return mock_bk
+
+    def _dead_zfs(self, mock_zfs):
+        # The except clause needs the REAL exception class; only topology fails.
+        mock_zfs.ZfsUnavailable = _zfs_mod.ZfsUnavailable
+        mock_zfs.topology.side_effect = _zfs_mod.ZfsUnavailable("zpool: not found")
+        return mock_zfs
+
+    @patch("b2ctl.core.warn")
+    @patch("b2ctl.core.zfs")
+    @patch("b2ctl.core.smart")
+    @patch("b2ctl.core._backend_mod")
+    @patch("b2ctl.core.spec")
+    def test_scan_marks_every_disk_pool_unknown(self, _mock_spec, mock_backend_mod,
+                                                _mock_smart, mock_zfs, mock_warn):
+        disks = _fixture_disks(4)
+        self._backend(mock_backend_mod, disks)
+        self._dead_zfs(mock_zfs)
+        result = _core_mod.scan()
+        assert result and all(not d.pool_known for d in result)
+        # is_poolable is the single authority every menu filters on — with the
+        # pool picture unknown it must answer False for all of them.
+        assert not any(d.is_poolable for d in result)
+        # exactly one warning, naming the cause; warn() is also the JSON-mode
+        # collector, so this is what reaches an MCP client in warnings[]
+        assert mock_warn.call_count == 1
+        assert "zpool did not answer" in mock_warn.call_args.args[0]
+
+    @patch("b2ctl.core.warn")
+    @patch("b2ctl.core.zfs")
+    @patch("b2ctl.core.smart")
+    @patch("b2ctl.core._backend_mod")
+    def test_scan_light_marks_every_disk_pool_unknown(self, mock_backend_mod,
+                                                      _mock_smart, mock_zfs, _mock_warn):
+        # scan_light feeds locate / token resolution — it must refuse for the
+        # same reason scan() does, or the cheap path becomes the unguarded one.
+        disks = _fixture_disks(3)
+        self._backend(mock_backend_mod, disks)
+        self._dead_zfs(mock_zfs)
+        result = _core_mod.scan_light()
+        assert result and all(not d.pool_known for d in result)
+
+    @patch("b2ctl.core.warn")
+    @patch("b2ctl.core.zfs")
+    @patch("b2ctl.core.smart")
+    @patch("b2ctl.core._backend_mod")
+    @patch("b2ctl.core.spec")
+    def test_a_live_zpool_leaves_pool_known_true(self, _mock_spec, mock_backend_mod,
+                                                 _mock_smart, mock_zfs, _mock_warn):
+        # The guard must not fire on the normal path: a disk that zpool says is
+        # unassigned is still assignable.
+        disks = _fixture_disks(2)
+        self._backend(mock_backend_mod, disks)
+        mock_zfs.ZfsUnavailable = _zfs_mod.ZfsUnavailable
+        mock_zfs.topology.return_value = {}
+        result = _core_mod.scan()
+        assert all(d.pool_known for d in result)
+        assert all(d.is_poolable for d in result)

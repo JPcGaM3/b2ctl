@@ -308,6 +308,62 @@ zpool status -P -v <pool>      # for each pool
   realpath. That is why membership still resolves whether the pool was built
   with by-id or `/dev/sdX`.
 
+#### An unanswered `zpool` is not an empty one (v0.24.1 / F-143)
+
+`list_pools()` runs through **`run_check`**, not `run`. `common.run()` returns
+`''` for three different events — binary missing, timeout, non-zero exit — and
+`list_pools()` used to parse that `''` into `[]`. The full chain:
+
+```
+run() -> ''            (zpool hung / absent / typo'd tool_path)
+list_pools() -> []
+topology() -> {}       (loops over zero pools; never runs zpool status)
+attach_membership()    (nothing to attach; every Disk.pool stays None)
+Disk.is_poolable       -> True for every live rpool/tank member
+[a]ssign / [n]ew-pool  -> offers the running boot mirror as a free disk
+```
+
+Now:
+
+| symbol | behaviour |
+|---|---|
+| `zfs.ZfsUnavailable` | raised by `list_pools()` on `not ok`; `topology()` propagates |
+| `Disk.pool_known` | default `True`; **first** clause of `is_poolable` |
+| `core._attach_membership(disks)` | the ONE catch site — warns once, clears `pool_known` on every disk. Used by `scan`, `scan_light`, `scan_one` |
+| `common.assess()` | grades it `CONFIG "pool membership UNKNOWN"`, replacing `"unassigned — add to a pool"` |
+
+`common.run()` is deliberately **unchanged**: its docstring documents callers that
+`splitlines()` the result unguarded (F-049), so flipping the global would trade
+this bug for a crash elsewhere. The fix is per-caller — the same shape F-063
+applied to `prune_orphan_timers`' second query.
+
+Catch sites, and why each behaves differently:
+
+| caller | on `ZfsUnavailable` |
+|---|---|
+| `core._attach_membership` | warn + `pool_known = False`; scan still returns disks |
+| `cli._status` (human) | `pools = []`, table still renders — it is the diagnostic |
+| `cli.main()` | `--json` → `TOOL_MISSING` envelope, rc 1; human → `die()`, rc 1 |
+| `watch.run()` dispatch | prints a refusal, stays in the select loop |
+| `watch._pools_or_empty` | `[]` for DISPLAY blocks only |
+| `watch._reconcile_scrub_history` | returns — nothing to reconcile |
+
+`disks --json` still succeeds (it reports no pools) with every row carrying
+`"pool_known": false`. `pools --json` / `status --json` fail with `TOOL_MISSING`
+— a poller that reads `{"pools": []}` with `ok:true` concludes the machine has no
+pools at the exact moment b2ctl has lost sight of them.
+
+Reproduce without hardware:
+
+```bash
+# any nonexistent tool path produces the same state as a hung zpool
+python3 - <<'PY'
+import b2ctl.config as c
+_t = c.tool; c.tool = lambda n: "/nonexistent/zpool" if n == "zpool" else _t(n)
+from b2ctl.cli import main; main(["pools", "--json"])
+PY
+```
+
 `zfs.spares_replacing(pool)` — called from `core.scan()` for any pool that has at
 least one INUSE spare. Parses `zpool status -P -v <pool>` again (one extra call per
 resilvering pool, which is rare). Finds `replacing-N` vdev blocks; returns

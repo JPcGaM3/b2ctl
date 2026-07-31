@@ -1116,6 +1116,43 @@ forces every column, `--no-pager` disables paging, and `PAGER=cat` does too.
 `watch` fits its columns the same way but **never** pages — it needs the terminal
 for hot-plug detection.
 
+### END(left) now matches iDRAC (v0.24.0)
+
+`END(left)` is **remaining rated write endurance** — how much of the drive's rated
+lifetime writing is left. It now comes from the drive itself, which is the same
+place iDRAC gets **"Remaining Rated Write Endurance"**, so the two agree:
+
+```
+BAY     WEAR(used) END(left)
+32:12   0%         100.0%       ← iDRAC shows 100%
+32:4    1%         99.0%        ← iDRAC shows 99%
+```
+
+Before v0.24.0, b2ctl computed this itself as *(rated TBW − TB written) ÷ rated
+TBW*, using a small built-in table of drive models. That number did **not** match
+iDRAC, and any model missing from the table showed `N/A`.
+
+The old estimate is still calculated and kept for comparison — the two drift
+apart over time, because the drive counts what it actually wrote to flash while
+the estimate only counts what the host sent it.
+
+With `--json` you can see which source was used:
+
+```bash
+b2ctl disks --json | jq -r '.data.disks[] | "\(.bay) \(.end_left) \(.end_source) (spec est \(.end_left_spec))"'
+# 32:4 99.0 drive (spec est 98.4)
+```
+
+- `end_source: "drive"` — from the disk, matches iDRAC.
+- `end_source: "spec"` — the disk doesn't report it, so this is our estimate.
+  Those are the models worth adding to `ssd_spec.json`.
+
+Cross-check against the BMC any time:
+
+```bash
+racadm storage get pdisks -o | grep -iA2 RemainingRatedWriteEndurance
+```
+
 ### "uncorrectable errors" vs "command timeouts" — different problems (v0.23.1)
 
 Two reasons look similar in the details block but mean opposite things, and they

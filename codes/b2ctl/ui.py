@@ -314,7 +314,11 @@ def render_details(disks: list[Disk], pools: list[dict] | None = None) -> str:
 def render_new_disk(d: Disk) -> str:
     """One-disk panel shown when a hot-plugged disk is detected."""
     size = human_size(d.size_bytes)
-    end = "N/A" if d.end_left is None else f"{d.end_left:.1f}% left"
+    # Name the source: "drive" is the value iDRAC also reports, "spec" is our own
+    # host-writes-vs-datasheet estimate, and the operator should know which they
+    # are looking at before comparing the two tools (F-142).
+    end = ("N/A" if d.end_left is None
+           else f"{d.end_left:.1f}% left" + (f" ({d.end_source})" if d.end_source else ""))
     wear = "N/A" if d.wear_val is None else f"{100 - d.wear_val}% used"
     return (f"{C}  device : {d.dev}  ({d.by_id or 'no by-id'}){N}\n"
             f"  model  : {d.model or '?'}   SN {d.serial or 'N/A'}\n"

@@ -1112,6 +1112,41 @@ pipe หรือ redirect ไม่โดนผลกระทบ: `b2ctl statu
 
 `watch` ปรับ column เหมือนกัน แต่ **ไม่เข้า pager** เพราะมันต้องใช้ terminal ตรวจจับ hot-plug
 
+### END(left) ตรงกับ iDRAC แล้ว (v0.24.0)
+
+`END(left)` คือ **remaining rated write endurance** — เขียนได้อีกกี่ % ของอายุที่ผู้ผลิตรับประกัน
+ตอนนี้เอาค่ามาจากตัวดิสก์โดยตรง ซึ่งเป็นที่เดียวกับที่ iDRAC อ่าน **"Remaining Rated Write
+Endurance"** เลข 2 ที่จึงตรงกัน:
+
+```
+BAY     WEAR(used) END(left)
+32:12   0%         100.0%       ← iDRAC ขึ้น 100%
+32:4    1%         99.0%        ← iDRAC ขึ้น 99%
+```
+
+ก่อน v0.24.0 b2ctl คำนวณเองจาก *(TBW ที่รับประกัน − TB ที่เขียนไป) ÷ TBW* โดยใช้ตารางรุ่นดิสก์
+เล็กๆ ที่ฝังไว้ เลขนั้น**ไม่ตรงกับ iDRAC** และรุ่นที่ไม่มีในตารางจะขึ้น `N/A`
+
+ค่าประมาณแบบเดิมยังคำนวณอยู่ เก็บไว้เทียบ — สองค่านี้จะห่างกันขึ้นเรื่อยๆ ตามเวลา เพราะดิสก์นับสิ่งที่
+เขียนลง flash จริง ส่วนค่าประมาณนับแค่สิ่งที่ host ส่งไปให้
+
+ใส่ `--json` จะเห็นว่าเลขมาจากไหน:
+
+```bash
+b2ctl disks --json | jq -r '.data.disks[] | "\(.bay) \(.end_left) \(.end_source) (spec est \(.end_left_spec))"'
+# 32:4 99.0 drive (spec est 98.4)
+```
+
+- `end_source: "drive"` — มาจากดิสก์ ตรงกับ iDRAC
+- `end_source: "spec"` — ดิสก์ไม่รายงาน อันนี้คือค่าประมาณของเรา รุ่นพวกนี้แหละที่ควรเอาไปเพิ่มใน
+  `ssd_spec.json`
+
+เทียบกับ BMC ได้ตลอด:
+
+```bash
+racadm storage get pdisks -o | grep -iA2 RemainingRatedWriteEndurance
+```
+
 ### ⚠️ "uncorrectable errors" กับ "command timeouts" คนละเรื่องกัน (v0.23.1)
 
 สองบรรทัดนี้หน้าตาคล้ายกันในบล็อกรายละเอียด แต่ความหมายตรงข้าม และพาไปคนละทาง:

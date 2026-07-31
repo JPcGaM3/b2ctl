@@ -597,6 +597,69 @@ class TestCommandTimeoutIsNotAMediaError(unittest.TestCase):
         self.assertEqual(d.cmd_timeout, 9)
 
 
+class TestEnduranceSource(unittest.TestCase):
+    """F-142: END(left) now prefers the drive's own endurance indicator — the
+    same value iDRAC/OMSA reports as 'Remaining Rated Write Endurance'. iDRAC
+    cannot be doing the TBW arithmetic (it has no table of every drive's rating),
+    so preferring the drive is what makes the two comparable 1:1. The
+    host-writes-vs-datasheet estimate stays as the fallback and is kept for
+    comparison."""
+
+    def _disk_ssd(self, **kw):
+        d = Disk(dev="/dev/sda")
+        d.is_ssd = True
+        for k, v in kw.items():
+            setattr(d, k, v)
+        return d
+
+    def test_drive_indicator_wins(self):
+        d = self._disk_ssd(model="Samsung SSD 870 EVO 1TB", wear_val=88,
+                           lba_written=int(60e12 / 512))       # 60 TB of 600 TBW
+        smart._endurance(d, {"samsung ssd 870 evo 1tb": 600.0})
+        self.assertEqual(d.end_left, 88.0)
+        self.assertEqual(d.end_source, "drive")
+        self.assertEqual(d.end_left_spec, 90.0)   # kept, so the two are comparable
+
+    def test_falls_back_to_the_spec_table(self):
+        d = self._disk_ssd(model="Samsung SSD 870 EVO 1TB", wear_val=None,
+                           lba_written=int(60e12 / 512))
+        smart._endurance(d, {"samsung ssd 870 evo 1tb": 600.0})
+        self.assertEqual(d.end_left, 90.0)
+        self.assertEqual(d.end_source, "spec")
+
+    def test_unknown_model_still_answers_from_the_drive(self):
+        """The regression that prompted this: a model absent from the 8-entry
+        ssd_spec.json used to show END(left) = N/A even though the drive was
+        reporting the answer."""
+        d = self._disk_ssd(model="SOME UNLISTED SSD", wear_val=73,
+                           lba_written=int(10e12 / 512))
+        smart._endurance(d, {})
+        self.assertEqual(d.end_left, 73.0)
+        self.assertEqual(d.end_source, "drive")
+        self.assertIsNone(d.end_left_spec)        # no rating to compute one from
+
+    def test_nothing_to_go_on(self):
+        d = self._disk_ssd(model="SOME UNLISTED SSD", wear_val=None,
+                           lba_written=int(10e12 / 512))
+        smart._endurance(d, {})
+        self.assertIsNone(d.end_left)
+        self.assertEqual(d.end_source, "")
+
+    def test_hdd_is_untouched(self):
+        d = Disk(dev="/dev/sdb")
+        d.is_ssd = False
+        d.wear_val, d.lba_written = 90, int(10e12 / 512)
+        smart._endurance(d, {})
+        self.assertIsNone(d.wear_val)             # wear is meaningless on an HDD
+        self.assertIsNone(d.end_left)
+        self.assertEqual(d.end_source, "")
+
+    def test_spec_value_is_rounded_for_the_wire(self):
+        d = self._disk_ssd(model="x", wear_val=None, lba_written=int(43.17e12 / 512))
+        smart._endurance(d, {"x": 2733.0})
+        self.assertEqual(d.end_left_spec, round(d.end_left_spec, 2))
+
+
 class TestSasNvmeUncorrUnaffected(unittest.TestCase):
     """The F-141 split is ATA-ONLY. SAS reads column 7 of the error-counter log
     and NVMe reads 'Media and Data Integrity Errors' — both are genuine

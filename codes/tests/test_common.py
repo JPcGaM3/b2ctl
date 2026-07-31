@@ -78,6 +78,34 @@ class TestDiskAssessment:
         assert d.level == "CONFIG"
         assert any("FOREIGN" in r for r in d.reasons)
 
+    def test_drive_sourced_endurance_is_not_double_reported(self):
+        # F-142: once end_left IS wear_val, endurance_* and wear_* both default
+        # to 30/20 and graded the same fact twice with near-identical wording.
+        d = _disk(pool=None, vdev=None, vdev_state=None)
+        d.wear_val, d.end_left, d.end_source = 18, 18.0, "drive"
+        assess(d)
+        assert d.level == "CRITICAL"
+        endurance = [r for r in d.reasons if "endurance left" in r]
+        wear = [r for r in d.reasons if "wear left" in r]
+        assert len(endurance) == 1
+        assert wear == []                      # the duplicate is gone
+
+    def test_spec_sourced_endurance_still_reports_wear_separately(self):
+        # When they are genuinely different numbers, both are still worth saying.
+        d = _disk(pool=None, vdev=None, vdev_state=None)
+        d.wear_val, d.end_left, d.end_source = 25, 18.0, "spec"
+        assess(d)
+        assert any("endurance left" in r for r in d.reasons)
+        assert any("wear left 25%" in r for r in d.reasons)
+
+    def test_endurance_bands_unchanged(self):
+        for left, expect in ((35.0, "NORMAL"), (25.0, "WARNING"), (15.0, "CRITICAL")):
+            d = _disk(pool="tank", vdev="mirror-0", vdev_state="ONLINE")
+            d.end_left, d.end_source = left, "drive"
+            d.wear_val = int(left)
+            assess(d)
+            assert d.level == expect, left
+
     def test_command_timeout_warns_and_blames_the_link(self):
         # F-141: attr 188 is a link symptom, not lost data. It must not reach
         # CRITICAL on its own, and the reason has to send the operator to the

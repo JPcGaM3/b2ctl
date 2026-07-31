@@ -280,5 +280,21 @@ def _endurance(d: Disk, tbw_table: dict) -> None:
         return
     d.tbw_rating = spec_mod.lookup(d.model, tbw_table)
     if d.tbw_rating and d.written_tb is not None:
-        d.end_left = max(0.0, min(100.0,
-                         (d.tbw_rating - d.written_tb) / d.tbw_rating * 100))
+        # Rounded at the source: the table renders one decimal, and an
+        # unrounded 98.38207999999999 on the JSON wire is just noise for a client.
+        d.end_left_spec = round(max(0.0, min(100.0,
+                                (d.tbw_rating - d.written_tb) / d.tbw_rating * 100)), 2)
+    # The drive's own indicator wins. It is what iDRAC/OMSA reports as "Remaining
+    # Rated Write Endurance" — iDRAC cannot be doing the TBW arithmetic, because
+    # it has no table of every drive's rating — so preferring it is what makes
+    # b2ctl's number comparable to the BMC's 1:1. It also accounts for write
+    # amplification, which host-writes-vs-datasheet cannot, and it works on models
+    # ssd_spec.json has never heard of (F-142).
+    #
+    # ATA caveat: `wear_val` there comes from a wear attribute's NORMALISED value,
+    # a vendor-defined 100->0 scale rather than a strict percentage. That is the
+    # same number iDRAC reads, so parity holds either way.
+    if d.wear_val is not None:
+        d.end_left, d.end_source = float(d.wear_val), "drive"
+    elif d.end_left_spec is not None:
+        d.end_left, d.end_source = d.end_left_spec, "spec"

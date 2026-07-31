@@ -1503,6 +1503,50 @@ with `<` (`_grade_low`, % remaining). Defaults:
 | `wear_warn` / `wear_crit` | `30` / `20` | `null` / `null` |
 | `poh_warn` (burn-in) | `null` (off) | `null` (off) |
 
+**Where `END(left)` comes from, and why it matches iDRAC (v0.24.0 / F-142).**
+
+Every SSD reports its own remaining endurance, and b2ctl already read it:
+
+| interface | field | parsed at |
+|---|---|---|
+| SAS | `Percentage used endurance indicator` (log page 0x11) | `smart.py` `_parse_sas` |
+| NVMe | `Percentage Used` | `_parse_nvme` |
+| ATA | normalised VALUE of attr 177/233/231/202/173/169/232 (`WEAR_ATTR_IDS`) | `_parse_ata` |
+
+All three land in `Disk.wear_val` as **% remaining**. That is the same number
+iDRAC/OMSA publishes as **"Remaining Rated Write Endurance"** — and it has to be,
+because iDRAC has no table of every drive's rated TBW and therefore cannot be
+doing any `written ÷ rating` arithmetic.
+
+Until v0.24.0 `end_left` ignored it and was computed independently from
+`ssd_spec.json` (8 models). So the column named `END(left)` did **not** match
+iDRAC, while `WEAR(used)` — the same fact, inverted — did. Models absent from the
+table showed `N/A` despite the drive reporting the answer.
+
+`_endurance()` now prefers the drive:
+
+```python
+if d.wear_val is not None:          # what iDRAC reports
+    d.end_left, d.end_source = float(d.wear_val), "drive"
+elif d.end_left_spec is not None:   # host writes vs datasheet
+    d.end_left, d.end_source = d.end_left_spec, "spec"
+```
+
+`end_left_spec` is still computed whenever a rating exists (rounded to 2 dp for
+the wire) so the two remain comparable — they drift apart as write amplification
+grows, because the drive counts NAND writes and the estimate counts host writes.
+`end_source` (`"drive"` / `"spec"` / `""`) is on the wire and in the details
+block; `disks --json | jq '.data.disks[] | select(.end_source=="spec")'` lists
+exactly the models worth adding to `ssd_spec.json`.
+
+**Grading consequence:** `endurance_warn/crit` and `wear_warn/crit` both default
+to 30/20, and once `end_left == wear_val` they graded one fact twice with
+near-identical wording. `assess()` now grades `wear_val` separately only when
+`end_source != "drive"`.
+
+ATA caveat: a wear attribute's normalised VALUE is a vendor-defined 100→0 scale
+rather than a strict percentage. That is what iDRAC reads too, so parity holds.
+
 **`uncorr` vs `cmdto` — why one is fatal and the other is not (F-141).**
 `uncorr` is zero-tolerance on *both* types because an uncorrectable read means
 the drive tried ECC, retried, and gave up: that data is already lost. `realloc`

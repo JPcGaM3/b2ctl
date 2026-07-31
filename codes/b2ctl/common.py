@@ -249,7 +249,16 @@ class Disk:
     lba_written: int | None = None
     written_tb: float | None = None
     tbw_rating: float | None = None
-    end_left: float | None = None  # TBW-based endurance remaining %
+    end_left: float | None = None  # Remaining rated write endurance %, PREFERRING
+                                   # the drive's own indicator — the same value
+                                   # iDRAC/OMSA reports as "Remaining Rated Write
+                                   # Endurance". Falls back to the TBW estimate
+                                   # when the drive reports nothing (F-142).
+    end_source: str = ""           # "drive" | "spec" | "" (nothing to go on)
+    end_left_spec: float | None = None   # the TBW-table estimate, computed
+                                         # whenever possible so the two sources
+                                         # stay comparable (write amplification
+                                         # makes them drift apart over time)
     pool_token: str | None = None  # exact leaf token from `zpool status -P`, e.g. wwn-...-part1
     pool: str | None = None
     vdev: str | None = None
@@ -442,7 +451,10 @@ def assess(d: Disk) -> None:
             lvl = _grade_low(d.end_left, h.get("endurance_warn"), h.get("endurance_crit"))
             if lvl:
                 bump(lvl, f"endurance left {d.end_left:.1f}%")
-        if d.wear_val is not None:
+        # Only when it is a DIFFERENT number: once end_left is drive-sourced it
+        # IS wear_val, and both bands default to 30/20, so grading both emitted
+        # two near-identical reasons for one fact (F-142).
+        if d.wear_val is not None and d.end_source != "drive":
             lvl = _grade_low(d.wear_val, h.get("wear_warn"), h.get("wear_crit"))
             if lvl:
                 bump(lvl, f"wear left {d.wear_val}%")

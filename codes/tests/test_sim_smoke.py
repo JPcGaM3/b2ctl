@@ -275,3 +275,58 @@ def test_pull_nvme_by_bay_label(tmp_path):
     assert "nvme0n1" in r.stdout
     assert "PCIe2:0" in r.stdout
     assert "None" not in r.stdout
+
+
+# --------------------------------------------------------------------------- #
+# F-149 — `install` runs end-to-end in the sim, offline
+# --------------------------------------------------------------------------- #
+
+def test_install_downloads_and_prints_a_pasteable_digest(tmp_path):
+    """`install` was the ONE verb the sim could not exercise (real network, real
+    apt, real /usr/sbin), so the download policy F-147 broke and F-149 fixed had
+    no end-to-end coverage on the harness that exists to provide it.
+
+    sim/_siminstall serves real archives over file:// — download() itself is not
+    stubbed, so the size floor, magic bytes, digest and pin comparison all run.
+    """
+    state = str(tmp_path / "state.json")
+    _sim("simctl", "init", state=state)
+    r = _sim("run", "install", "--perc", state=state)
+    assert r.returncode == 0, r.stderr
+    # It installed rather than refusing (the F-147 regression this reverses)...
+    assert "perccli ->" in r.stdout, r.stdout
+    # ...and it was honest about not having verified, with a pasteable line.
+    assert "UNVERIFIED" in r.stdout
+    assert re.search(r'"perccli":\s*"[0-9a-f]{64}",', r.stdout), r.stdout
+
+
+def test_install_refuses_when_the_operator_demands_a_pin(tmp_path):
+    """B2CTL_REQUIRE_PINNED=1 restores F-147's fail-closed behaviour as an opt-in."""
+    state = str(tmp_path / "state.json")
+    _sim("simctl", "init", state=state)
+    env = dict(os.environ, B2CTL_STATE=state, B2CTL_REQUIRE_PINNED="1")
+    r = subprocess.run(
+        [sys.executable, os.path.join(SIM, "run"), "install", "--perc"],
+        capture_output=True, text=True, env=env, timeout=60,
+    )
+    assert "refusing" in r.stdout, r.stdout
+    assert "B2CTL_REQUIRE_PINNED" in r.stdout
+    assert "perccli ->" not in r.stdout        # nothing installed
+
+
+def test_a_matching_pin_is_verified_and_a_wrong_one_is_refused(tmp_path):
+    """The pin, once present, is still enforced on both outcomes."""
+    sys.path.insert(0, SIM)
+    import _siminstall
+    from b2ctl import installer
+
+    simvar = str(tmp_path / "var")
+    d = os.path.abspath(_siminstall.build_archives(simvar))
+    good = installer._sha256_file(os.path.join(d, "perccli.tar.gz"))
+    assert re.fullmatch(r"[0-9a-f]{64}", good)
+
+    # Deterministic fixtures: the digest is stable across rebuilds, which is what
+    # makes pinning testable at all.
+    again = _siminstall.build_archives(str(tmp_path / "var2"))
+    assert installer._sha256_file(os.path.join(os.path.abspath(again),
+                                               "perccli.tar.gz")) == good

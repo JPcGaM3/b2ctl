@@ -21,17 +21,21 @@ _GDRIVE = {
     "perccli":  "1hJt5Sr2xNW4OHCD-AoefiHhjJCeWVWVk",
 }
 # Pinned SHA-256 per archive. These binaries run as root on both nodes, so a
-# swapped/tampered Drive file must be rejected before extraction (F-043). Fill
-# from a trusted copy: `sha256sum SAS2IRCU_P20.zip`. Left empty = download()
-# REFUSES by default (F-147 — an empty table used to mean "unverified but
-# still proceeds", making the F-043 comment describe a check that ran on
-# neither this path nor install.sh's, since install.sh has no sha256sum -c at
-# all). See download()'s allow_unverified for the one-time bootstrap opt-out.
+# pinned archive that does not match is rejected before it is installed (F-043).
+#
+# THE TABLE IS EMPTY, AND THAT IS AN HONEST DEFAULT — not a claim that verification
+# happens. With no pin, download() fetches the archive and says so, printing the
+# digest of what it just got in a form you can paste back into this dict; the next
+# install then verifies. F-147 made an empty table REFUSE instead, which bought
+# nothing (the archive was exactly as unverified either way) and only stopped
+# `b2ctl install --with-tools` from working at all (F-149).
+#
+# To pin: get the archive from a copy you trust, `sha256sum SAS2IRCU_P20.zip`,
+# and add it here. install.sh reads this same dict, so the two paths cannot drift.
 _SHA256: dict[str, str] = {}
-# Set B2CTL_ALLOW_UNVERIFIED=1 to bootstrap once without a pin (install_tools
-# reads this; download() itself never touches the environment — the opt-out
-# is the CALLER's decision, not a hidden default).
-_ALLOW_UNVERIFIED_ENV = "B2CTL_ALLOW_UNVERIFIED"
+# Set B2CTL_REQUIRE_PINNED=1 to demand a pin — F-147's fail-closed behaviour, kept
+# as an opt-IN for an operator who wants it rather than a default nobody asked for.
+_REQUIRE_PINNED_ENV = "B2CTL_REQUIRE_PINNED"
 _BASE = "https://drive.usercontent.google.com/download?export=download&confirm=t&id="
 _ARCHIVE_NAME = {
     "sas2ircu": "SAS2IRCU_P20.zip",
@@ -64,28 +68,49 @@ def tool_ok(name: str) -> bool:
     return path is not None and _executes(path, _PROBE.get(name, []))
 
 
+def _sha256_file(path: str) -> str:
+    """SHA-256 of a file, streamed in 1 MiB chunks (archives are tens of MB)."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _warn_unpinned(name: str, digest: str) -> None:
+    """Say the archive was not verified, and hand over the line that fixes it.
+
+    The point of F-149: pinning should be a copy-paste, not homework. Refusing to
+    install (F-147) protected nothing — the archive was unverified either way —
+    so the useful thing is to install, be honest about it, and print the digest
+    in exactly the form `_SHA256` wants.
+    """
+    print(f"  [!] UNVERIFIED — no pinned digest for {name}.")
+    print(f"      It came from Google Drive and will run as root on this host.")
+    print(f"      To pin it for every future install, add to installer._SHA256:")
+    print(f'          "{name}": "{digest}",')
+
+
 def download(file_id: str, dest_path: str, *, sha256: str | None = None,
-             allow_unverified: bool = False) -> None:
+             name: str = "") -> None:
     """Download a Google Drive file to dest_path.
 
     Uses urlopen with a 60 s timeout so a black-holed connection can't hang the
     install forever (F-043). Raises RuntimeError on a <1 KB result (HTML error
     page) or, when a hash is pinned, on a SHA-256 mismatch (tampered archive).
 
-    FAILS CLOSED (F-147): with no `sha256` pin, this refuses BEFORE opening
-    any connection rather than silently downloading unverified content that
-    is about to run as root. `allow_unverified=True` is the explicit,
-    caller-stated opt-out for bootstrapping before a pin exists — see
-    install_tools(), which is the only place that sets it, gated on the
-    B2CTL_ALLOW_UNVERIFIED env var.
+    With NO pin the download proceeds and `_warn_unpinned` states that plainly,
+    printing the digest so the operator can pin it in one paste (F-149). Set
+    B2CTL_REQUIRE_PINNED=1 to demand a pin instead — that refuses before opening
+    a connection, which is F-147's behaviour kept as an opt-in.
     """
-    if not sha256 and not allow_unverified:
+    name = name or os.path.basename(dest_path)
+    if not sha256 and os.environ.get(_REQUIRE_PINNED_ENV) == "1":
         raise RuntimeError(
-            f"no pinned SHA-256 for this archive — refusing to download "
-            f"unverified content that will run as root. Get the trusted "
-            f"digest (sha256sum {os.path.basename(dest_path)}) and add it to "
-            f"installer._SHA256, or set {_ALLOW_UNVERIFIED_ENV}=1 to "
-            f"bootstrap once without a pin.")
+            f"no pinned SHA-256 for {name} and {_REQUIRE_PINNED_ENV}=1 — "
+            f"refusing to download unverified content that will run as root. "
+            f"Add the trusted digest (sha256sum {os.path.basename(dest_path)}) "
+            f"to installer._SHA256, or unset {_REQUIRE_PINNED_ENV}.")
     url = _BASE + file_id
     print(f"    downloading...", end="", flush=True)
     with urllib.request.urlopen(url, timeout=60) as resp, open(dest_path, "wb") as f:
@@ -93,16 +118,15 @@ def download(file_id: str, dest_path: str, *, sha256: str | None = None,
     size = os.path.getsize(dest_path)
     if size < 1024:
         raise RuntimeError(f"download too small ({size} bytes) — may be HTML error page")
+    got = _sha256_file(dest_path)          # always computed: it is the thing to print
     if sha256:
-        h = hashlib.sha256()
-        with open(dest_path, "rb") as f:
-            for chunk in iter(lambda: f.read(1 << 20), b""):
-                h.update(chunk)
-        got = h.hexdigest()
         if got != sha256:
             raise RuntimeError(f"sha256 mismatch — expected {sha256}, got {got}; "
                                f"refusing to install a tampered archive")
+        print(f" {size // 1024} KB (sha256 verified)")
+        return
     print(f" {size // 1024} KB")
+    _warn_unpinned(name, got)
 
 
 def _install_to_usr_sbin(src: str, name: str, probe: list[str]) -> tuple[bool, str]:
@@ -241,12 +265,6 @@ def install_tools(tools: list[str] | None = None) -> None:
             return
     ensure_prereqs(tools)                # only the prereqs the subset needs (F-111)
 
-    # The ONE place allow_unverified is set — an explicit env var, read once
-    # per install run, not a hidden default inside download() (F-147).
-    allow_unverified = os.environ.get(_ALLOW_UNVERIFIED_ENV) == "1"
-    if allow_unverified:
-        print(f"  [!] {_ALLOW_UNVERIFIED_ENV}=1 — downloading WITHOUT SHA-256 verification")
-
     tmp = tempfile.mkdtemp()
     try:
         for name in tools:
@@ -258,7 +276,7 @@ def install_tools(tools: list[str] | None = None) -> None:
             archive = os.path.join(tmp, _ARCHIVE_NAME[name])
             try:
                 download(_GDRIVE[name], archive, sha256=_SHA256.get(name),
-                         allow_unverified=allow_unverified)
+                         name=name)
             except (RuntimeError, OSError) as exc:
                 # OSError covers urllib URLError/HTTPError/socket errors on an
                 # offline box — print the clean line, don't traceback (F-044).

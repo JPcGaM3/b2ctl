@@ -88,11 +88,11 @@ class TestMaintLogPermissions(unittest.TestCase):
         safety.LOG_DIR = self._old
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_log_and_dir_are_not_world_readable(self):
+    def test_log_and_dir_modes_are_stated_not_inherited(self):
         maint.log_event("scrub", "tank", "ok", "completed")
-        self.assertEqual(os.stat(safety.LOG_DIR).st_mode & 0o777, 0o700)
+        self.assertEqual(os.stat(safety.LOG_DIR).st_mode & 0o777, 0o755)
         self.assertEqual(os.stat(os.path.join(safety.LOG_DIR, "maint.jsonl")
-                                 ).st_mode & 0o777, 0o600)
+                                 ).st_mode & 0o777, 0o644)
 
     def test_the_event_is_still_readable_back(self):
         # Anti-overcorrection: tightening the mode must not break the writer.

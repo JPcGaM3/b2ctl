@@ -324,7 +324,7 @@ def _load_for_write() -> dict:
     return data
 
 
-def atomic_write_json(path: str, data, *, mode: int = 0o600) -> None:
+def atomic_write_json(path: str, data, *, mode: int = 0o644) -> None:
     """Write `data` as JSON to `path` atomically and crash-safely.
 
     Public + reusable (not just by this module): `cli._update` and
@@ -341,9 +341,15 @@ def atomic_write_json(path: str, data, *, mode: int = 0o600) -> None:
     (F-147, was F-075's docstring promise without the mechanism to back it).
 
     `mode` is applied via chmod (not open()'s create mode), so it wins over
-    whatever the process umask would otherwise leave — these files can carry
-    root-execution-affecting data (tool_paths) or an audit trail, and default
-    to 0600. The tmp file is unlinked if anything raises before the rename.
+    whatever the process umask would otherwise leave — the file's permissions are
+    a decision, not a side effect of the operator's shell.
+
+    0644, not 0600: `config` and `log` are in cli._ROOT_EXEMPT, so a non-root
+    operator is MEANT to read these. 0600 broke that, and silently — config.load()
+    swallows PermissionError and returns defaults, so `b2ctl config show` printed
+    the wrong answer rather than refusing (F-149). Reading tool_paths was never
+    the attack; WRITING them is, and _untrusted_reason() covers that. The tmp
+    file is unlinked if anything raises before the rename.
     """
     dirpath = os.path.dirname(path) or "."
     os.makedirs(dirpath, exist_ok=True)

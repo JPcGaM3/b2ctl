@@ -1644,17 +1644,26 @@ before the rename closes the second hole: a crash between write and rename could
 otherwise publish an empty file.
 
 **Modes.** Nothing in `config.py` or `safety.py` ever stated one, so every
-root-written file took whatever the ambient umask gave it:
+root-written file took whatever the ambient umask gave it. They are stated now —
+that is the durable part — but at values that preserve non-root reads:
 
-| path | now | via |
+| path | mode | why not tighter |
 |---|---|---|
-| `/etc/b2ctl/config.json`, `bay_map.json` | 0600 | `atomic_write_json`'s explicit `chmod` (beats umask, unlike `open()`'s create mode) |
-| `/var/log/b2ctl/`, `…/snapshots/` | 0700 | `safety._ensure_dir()` (`makedirs` + unconditional `chmod`) |
-| `ops.jsonl`, `maint.jsonl` | 0600 | `os.open(…, O_WRONLY\|O_APPEND\|O_CREAT, 0o600)` — **keeps F-093's O_APPEND atomicity**; an existing file keeps its mode, matching O_CREAT semantics |
-| pre-op snapshots | 0600 | `chmod` after write |
-| install-time dirs | 0700 | `mkdir -p -m 700` in `install.sh` |
+| `/etc/b2ctl/config.json`, `bay_map.json` | 0644 | `config` is in `cli._ROOT_EXEMPT`, so a non-root operator is MEANT to run `config show`. At 0600 they got **defaults, silently** — `config.load()` swallows `PermissionError` and falls back, so the answer was wrong rather than refused |
+| `/var/log/b2ctl/`, `…/snapshots/` | 0755 | `log` is root-exempt too, and a non-root operator could always read the audit trail |
+| `ops.jsonl`, `maint.jsonl`, snapshots | 0644 | device paths, pool names and command output — operational data, not secrets |
+| install-time dirs | `mkdir -p -m 755` in `install.sh` | matches `_ensure_dir` |
 
-**Config trust.** `config.load()` now drops `tool_paths`, `bay_map_path` and
+`_append_jsonl` still uses `os.open(…, O_WRONLY|O_APPEND|O_CREAT, 0o644)` rather
+than `open()`, which is what makes the mode a *decision* — and it **preserves
+F-093's O_APPEND atomicity**, which the append-only audit log depends on.
+
+> v0.24.3 set these to 0600/0700. That protected nothing (reading `tool_paths`
+> was never the attack — *writing* them is, and the trust check below covers
+> that) and broke two root-exempt verbs, so **v0.25.2 reverted the values while
+> keeping them explicit**.
+
+**Config trust.** `config.load()` drops `tool_paths`, `bay_map_path` and
 `ssd_spec_path` — the three keys that turn into root execution, `tool_paths` most
 directly (`config.tool()` hands them straight to subprocess argv) — and warns once
 via `common.warn()` when `/etc/b2ctl/config.json` is not root-owned or is
@@ -1668,27 +1677,42 @@ read-only caller. It also means the sim and the tests — which redirect
 `CONFIG_PATH` under `sim/var/` or a tempdir — are never under `/etc` and never
 trip it.
 
-**Supply chain.** `installer._SHA256` was `{}` while the comment above it claimed
-pinning, so `download()`'s verification block was dead code and the only surviving
-check was `size < 1024` — on an archive that is then extracted, copied to
-`/usr/sbin`, `chmod 0755`'d and executed as root. Both download paths now **fail
-closed**:
+**Supply chain (v0.25.2 / F-149).** `installer._SHA256` is empty, and that is an
+honest default rather than a claim. The accounting that decided this:
 
-- `installer.download(..., allow_unverified=False)` refuses before opening a
-  connection when there is no pin, naming `sha256sum <archive>` and the opt-out.
-- `install.sh`'s `_gdrive_get` gained the same refusal plus `sha256sum -c`,
-  reading `installer._SHA256` through the same `_gid`-style single-source trick
-  F-122 already used for `_GDRIVE`, so the two cannot drift again.
-- `B2CTL_ALLOW_UNVERIFIED=1` is the explicit, loudly-announced bootstrap opt-out —
-  `install_tools()` is the only caller that sets it.
-- `alien --scripts -i` → **`alien -i`** on both paths. `--scripts` runs the vendor
-  RPM's maintainer scriptlets as root; the only artefact consumed afterwards is
-  `/opt/MegaRAID/perccli/perccli64`, which plain `alien -i` extracts on its own.
+| | before v0.24.3 | v0.24.3 | v0.25.2 |
+|---|---|---|---|
+| installs? | yes | **no** | yes |
+| archive verified? | no | **no** — table still empty | no, **and it says so** |
+| pinning cost | find a trusted copy, hash it | same | **copy one printed line** |
 
-**The pin table is still empty.** The trusted digests are the operator's to
-supply from a known-good copy; until they are added, `b2ctl install --with-tools`
-and `./install.sh --perc` both refuse rather than silently installing unverified
-root binaries.
+`download()` always computes the digest (`_sha256_file`) and branches:
+
+- **pin present + match** → `sha256 verified`;
+- **pin present + mismatch** → `RuntimeError` naming both digests, nothing installed;
+- **no pin** → installs, then `_warn_unpinned()` prints the paste-ready
+  `"perccli": "<64 hex>",` line;
+- **no pin + `B2CTL_REQUIRE_PINNED=1`** → refuses before opening a connection.
+  This is v0.24.3's behaviour, kept as an **opt-in** rather than a default.
+
+`install.sh`'s `_gdrive_get` mirrors all four, reading `installer._SHA256` through
+the same `_gid`/`_sha` single-source trick F-122 used for the IDs — extended so the
+**policy** cannot drift either, which `TestPinPolicyParity` asserts against the
+shell source.
+
+`alien --scripts -i` → **`alien -i`** on both paths, unchanged from v0.24.3:
+`--scripts` runs the vendor RPM's maintainer scriptlets as root, and the only
+artefact consumed afterwards is `/opt/MegaRAID/perccli/perccli64`, which plain
+`alien -i` extracts on its own. That one was pure gain and stays.
+
+**Sim coverage.** `install` used to be the one verb the harness could not run at
+all. `sim/_siminstall.py` builds byte-reproducible zip/tar.gz fixtures, serves them
+over `file://` by pointing `installer._BASE` at the fixture dir, and sandboxes the
+install target into `sim/var/usr-sbin/`. `download()` is **not** stubbed — the size
+floor, the magic-byte check, the digest and the pin comparison all execute. Note
+the two traps that fixture hit: a `file://` base must be **absolute** (urllib reads
+the first segment as a hostname), and the payload must be **incompressible** or the
+archive gzips below the 1 KB floor and trips b2ctl's own HTML-error-page guard.
 
 ### Tool path resolution — `config.tool(name)`
 

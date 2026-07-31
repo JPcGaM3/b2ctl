@@ -86,24 +86,29 @@ no internet needed.
 - Pick `--perc` **or** `--flash` to match your hardware — it installs just that
   backend's tool and sets the controller mode in `/etc/b2ctl/config.json`.
 
-> **⚠ Tool downloads now REFUSE without a checksum (v0.24.3).** `sas2ircu` and
-> `perccli` are fetched from Google Drive and then run **as root** on every
-> `b2ctl status`. The checksum table (`installer._SHA256`) shipped **empty**, so
-> nothing was ever verified — only "is this file bigger than 1 KB". Both
-> `b2ctl install --with-tools` and `./install.sh --perc` now stop with:
+> **The installer tells you what it installed (v0.25.2).** `sas2ircu` and
+> `perccli` come from Google Drive and then run **as root** on every
+> `b2ctl status`. The checksum table (`installer._SHA256`) ships **empty**, so
+> nothing verifies them — and b2ctl now says so instead of pretending:
 >
 > ```
-> [✗] no pinned SHA-256 for perccli — refusing to download
->     unverified content that will run as root.
+>   [*] perccli...
+>     downloading... 4821 KB
+>   [!] UNVERIFIED — no pinned digest for perccli.
+>       It came from Google Drive and will run as root on this host.
+>       To pin it for every future install, add to installer._SHA256:
+>           "perccli": "a3f5c8…e91b",
+>   [✔] perccli -> /usr/sbin/perccli
 > ```
 >
-> **To fix it properly:** get the archive from a copy you trust, run
-> `sha256sum perccli.tar.gz`, and add the digest to `installer._SHA256`. Both
-> install paths read that one table, so they cannot drift apart.
+> **The install works** — copy that line into `installer._SHA256` and the next
+> install says `sha256 verified` instead, and a changed archive is refused. Both
+> install paths read the same table, so they cannot drift apart.
 >
-> **To bootstrap once anyway:** `B2CTL_ALLOW_UNVERIFIED=1 b2ctl install --perc`.
-> It says so loudly while it runs. Use it only if you can verify the binary some
-> other way afterwards.
+> (v0.24.3 briefly made a missing digest *refuse* the download. That protected
+> nothing — the archive was unverified either way — it only stopped the install
+> from working, so v0.25.2 reverted it. If you do want the strict behaviour,
+> `B2CTL_REQUIRE_PINNED=1` brings it back.)
 >
 > Related: b2ctl no longer passes `--scripts` to `alien`, so installing perccli
 > no longer executes the vendor RPM's own install scripts as root. Nothing else

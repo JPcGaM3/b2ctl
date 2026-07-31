@@ -412,17 +412,17 @@ class TestDirModesAndFilePerms(unittest.TestCase):
         safety.LOG_FILE = self.log_file
         return safety
 
-    def test_begin_op_creates_log_and_snap_dir_0700(self):
+    def test_begin_op_states_the_log_and_snap_dir_mode(self):
         import stat
         safety = self._import_safety()
         cmds = [["zpool", "offline", "tank", "/dev/disk/by-id/x"]]
         with patch.object(safety, "_capture_snapshot", return_value=None):
             safety.begin_op("offline", "S1", 1, "/dev/disk/by-id/x", "tank",
                              "raidz1-0", cmds)
-        self.assertEqual(stat.S_IMODE(os.stat(self.log_dir).st_mode), 0o700)
-        self.assertEqual(stat.S_IMODE(os.stat(self.snap_dir).st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(os.stat(self.log_dir).st_mode), 0o755)
+        self.assertEqual(stat.S_IMODE(os.stat(self.snap_dir).st_mode), 0o755)
 
-    def test_snapshot_file_is_0600(self):
+    def test_snapshot_file_states_its_mode(self):
         import stat
         safety = self._import_safety()
         os.makedirs(self.snap_dir, exist_ok=True)
@@ -432,9 +432,9 @@ class TestDirModesAndFilePerms(unittest.TestCase):
                                      "tank", "spares", cmds)
         snap_path = os.path.join(self.snap_dir, f"{op_id}.txt")
         self.assertTrue(os.path.exists(snap_path))
-        self.assertEqual(stat.S_IMODE(os.stat(snap_path).st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(os.stat(snap_path).st_mode), 0o644)
 
-    def test_appended_jsonl_is_0600(self):
+    def test_appended_jsonl_states_its_mode(self):
         import stat
         safety = self._import_safety()
         os.makedirs(self.log_dir, exist_ok=True)
@@ -443,7 +443,7 @@ class TestDirModesAndFilePerms(unittest.TestCase):
             safety.begin_op("offline", "S1", 1, "/dev/disk/by-id/x", "tank",
                              "raidz1-0", cmds)
         self.assertTrue(os.path.exists(self.log_file))
-        self.assertEqual(stat.S_IMODE(os.stat(self.log_file).st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(os.stat(self.log_file).st_mode), 0o644)
 
     def test_unwritable_log_still_warns_exactly_once(self):
         # Existing behaviour (F-092) must survive the os.open() rewrite:

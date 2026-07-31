@@ -1370,12 +1370,15 @@ class TestRollbackReturnsExplicitInt(unittest.TestCase):
         run_mock.assert_not_called()
         begin_mock.assert_not_called()
 
-    def test_rollback_root_gating(self):
-        # F-146: rollback MUTATES (runs a stored zpool/wipefs/sgdisk command),
-        # so it must no longer be in the read-only root-exempt list.
+    def test_rollback_stays_root_exempt(self):
+        # F-146 dropped rollback from _ROOT_EXEMPT because it mutates; F-149 put
+        # it back. It worked without root before (the stored zpool command fails
+        # on its own if you lack the privilege), and "what already worked must
+        # keep working" outranks tidying the exempt list. The mutation is still
+        # gated by the WRITE_CMDS allowlist and a confirm.
         import b2ctl.cli as cli
         ns = cli.build_parser().parse_args(["rollback", "some-op"])
-        self.assertTrue(cli._needs_root(ns))
+        self.assertFalse(cli._needs_root(ns))
 
 
 class TestJsonPoolAndDiskNotFound(unittest.TestCase):
@@ -1541,13 +1544,28 @@ class TestConfigInitWritesLikeEveryOtherWriter(unittest.TestCase):
         _cfg._cache = None
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_created_config_is_0600_even_under_umask_zero(self):
+    def test_created_config_mode_is_stated_not_inherited_from_umask(self):
+        # F-148 routed this through atomic_write_json; F-149 set that helper's
+        # default to 0644. 0600 broke non-root `b2ctl config show` SILENTLY —
+        # config.load() swallows PermissionError and returns defaults, so the
+        # answer was wrong rather than refused, on a verb that is root-exempt
+        # by design.
         from b2ctl import config as _cfg
         buf = io.StringIO()
         with patch("sys.stdout", buf):
             rc = cli_mod.main(["config", "init"])
         self.assertEqual(rc, 0)
-        self.assertEqual(os.stat(_cfg.CONFIG_PATH).st_mode & 0o777, 0o600)
+        self.assertEqual(os.stat(_cfg.CONFIG_PATH).st_mode & 0o777, 0o644)
+
+    def test_a_non_root_reader_gets_the_real_config_not_defaults(self):
+        # The regression F-149 is really about: the file must be READABLE by the
+        # operator who is allowed to run `config show` without sudo.
+        from b2ctl import config as _cfg
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            cli_mod.main(["config", "init"])
+        mode = os.stat(_cfg.CONFIG_PATH).st_mode & 0o777
+        self.assertTrue(mode & 0o044, f"config.json is {oct(mode)} — not readable")
 
     def test_the_content_is_unchanged_and_reads_back(self):
         # Anti-overcorrection: swapping the writer must not alter what is written.

@@ -69,22 +69,28 @@ sudo ./install.sh
 - เลือก `--perc` **หรือ** `--flash` ตามฮาร์ดแวร์ — ลงเฉพาะ tool ของ backend นั้น +
   ตั้ง mode ใน `/etc/b2ctl/config.json`
 
-> **⚠ ดาวน์โหลด tool จะถูกปฏิเสธถ้าไม่มี checksum (v0.24.3)** — `sas2ircu` กับ `perccli`
-> โหลดมาจาก Google Drive แล้วรัน**ในสิทธิ์ root**ทุกครั้งที่สั่ง `b2ctl status` แต่ตาราง
-> checksum (`installer._SHA256`) ที่ให้มาด้วย **ว่างเปล่า** เลยไม่เคยมีการตรวจสอบอะไรเลย
-> มีแค่เช็คว่า "ไฟล์ใหญ่กว่า 1 KB มั้ย" ตอนนี้ทั้ง `b2ctl install --with-tools` และ
-> `./install.sh --perc` จะหยุดพร้อมข้อความ:
+> **installer บอกว่ามันติดตั้งอะไรลงไป (v0.25.2)** — `sas2ircu` กับ `perccli` โหลดจาก
+> Google Drive แล้วรัน**ในสิทธิ์ root** ทุกครั้งที่สั่ง `b2ctl status` ตาราง checksum
+> (`installer._SHA256`) ที่ให้มาด้วย **ว่างเปล่า** เลยไม่มีการตรวจสอบอะไร — ตอนนี้ b2ctl
+> พูดตรงๆ แทนที่จะทำเป็นว่าตรวจแล้ว:
 >
 > ```
-> [✗] no pinned SHA-256 for perccli — refusing to download
->     unverified content that will run as root.
+>   [*] perccli...
+>     downloading... 4821 KB
+>   [!] UNVERIFIED — no pinned digest for perccli.
+>       It came from Google Drive and will run as root on this host.
+>       To pin it for every future install, add to installer._SHA256:
+>           "perccli": "a3f5c8…e91b",
+>   [✔] perccli -> /usr/sbin/perccli
 > ```
 >
-> **วิธีแก้ที่ถูกต้อง:** เอา archive จากแหล่งที่เชื่อถือได้ สั่ง `sha256sum perccli.tar.gz`
-> แล้วเอา digest ไปใส่ใน `installer._SHA256` ทั้งสองทางอ่านตารางเดียวกัน เลยไม่มีทางหลุดจากกัน
+> **ติดตั้งได้ปกติ** — เอาบรรทัดนั้นไปวางใน `installer._SHA256` ครั้งต่อไปจะขึ้น
+> `sha256 verified` แทน และถ้า archive เปลี่ยนจะถูกปฏิเสธ ทั้งสองทางอ่านตารางเดียวกัน
+> จึงไม่มีทางหลุดจากกัน
 >
-> **ถ้าจะข้ามไปก่อนครั้งเดียว:** `B2CTL_ALLOW_UNVERIFIED=1 b2ctl install --perc`
-> มันจะประกาศเสียงดังตอนรัน ใช้เฉพาะกรณีที่มีทางตรวจ binary ด้วยวิธีอื่นทีหลัง
+> (v0.24.3 เคยทำให้ "ไม่มี digest = ปฏิเสธการโหลด" ซึ่ง**ไม่ได้ป้องกันอะไรเลย** — archive
+> ก็ไม่ได้ถูกตรวจอยู่ดีทั้งสองแบบ มีแต่ทำให้ติดตั้งไม่ได้ v0.25.2 จึงย้อนกลับ ถ้าอยากได้แบบเข้ม
+> จริงๆ ใช้ `B2CTL_REQUIRE_PINNED=1`)
 >
 > ที่เกี่ยวกัน: b2ctl เลิกส่ง `--scripts` ให้ `alien` แล้ว ติดตั้ง perccli จึงไม่รัน install
 > script ของ RPM ผู้ผลิตด้วยสิทธิ์ root อีก นอกนั้นไม่มีอะไรเปลี่ยน — ของที่ b2ctl ใช้จริงมีแค่

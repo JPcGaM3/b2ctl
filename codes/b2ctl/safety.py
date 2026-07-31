@@ -55,12 +55,16 @@ _PENDING: dict = {}
 _log_warned = False
 
 
-def _ensure_dir(path: str, mode: int = 0o700) -> None:
-    """mkdir -p `path` and force `mode` regardless of the process umask or a
-    pre-existing looser mode (F-147). LOG_DIR/SNAP_DIR hold the audit trail
-    and pre-op SMART/zpool snapshots — never group/world-readable. Silent on
-    failure, same as every other caller of these dirs (a read-only /var must
-    not crash the operation the audit trail is trying to record)."""
+def _ensure_dir(path: str, mode: int = 0o755) -> None:
+    """mkdir -p `path` and force `mode` regardless of the process umask (F-147).
+
+    0755, not 0700: `b2ctl log` is in cli._ROOT_EXEMPT and a non-root operator
+    could always read the audit trail — 0700 took that away for no gain (device
+    paths, pool names and command output are operational data, not secrets), so
+    F-149 put it back. The value being STATED rather than inherited from the
+    umask is the part worth keeping. Silent on failure, same as every other
+    caller of these dirs (a read-only /var must not crash the operation the
+    audit trail is trying to record)."""
     try:
         os.makedirs(path, exist_ok=True)
         os.chmod(path, mode)
@@ -181,7 +185,7 @@ def _capture_snapshot(op_id: str, pool: str, dev_path: str) -> str | None:
     try:
         with open(path, "w") as f:
             f.write("".join(lines))
-        os.chmod(path, 0o600)   # snapshot can contain device paths/pool state (F-147)
+        os.chmod(path, 0o644)   # stated, not umask-dependent (F-147/F-149)
         return path
     except OSError:
         return None
@@ -190,14 +194,14 @@ def _capture_snapshot(op_id: str, pool: str, dev_path: str) -> str | None:
 def _append_jsonl(entry: dict) -> None:
     # O_APPEND of one small line is atomic on POSIX, so concurrent b2ctl
     # processes never interleave (F-093) — no locking or rewrite needed.
-    # os.open with an explicit 0600 (rather than open()'s umask-dependent
-    # create mode) so a freshly-created audit log — device paths, pool names,
-    # command output — is never group/world-readable (F-147); an
-    # already-existing file keeps whatever mode it has (chmod is not reapplied
-    # on every append, matching O_CREAT semantics for an existing file).
+    # os.open with an explicit mode (rather than open()'s umask-dependent create
+    # mode) so the audit log's permissions are a decision, not a side effect of
+    # the operator's shell (F-147). 0644 because `b2ctl log` is root-exempt and a
+    # non-root operator could always read it (F-149). An already-existing file
+    # keeps whatever mode it has, matching O_CREAT semantics.
     global _log_warned
     try:
-        fd = os.open(LOG_FILE, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        fd = os.open(LOG_FILE, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
         try:
             os.write(fd, (json.dumps(entry) + "\n").encode())
         finally:

@@ -50,6 +50,15 @@ _safety.LOG_FILE = os.path.join(_simvar, "ops.jsonl")
 # redirect it under sim/var/ so the sim never writes the real /etc/b2ctl/config.json.
 _cfg.CONFIG_PATH = os.path.join(_simvar, "config.json")
 
+# v0.25.2: `install` was the one verb the sim could not run at all (real network,
+# real apt, real /usr/sbin), so the download policy F-147 broke and F-149 fixed
+# had no end-to-end coverage. _siminstall serves real archives over file:// and
+# sandboxes the install target — download() itself is NOT stubbed, so the size,
+# magic-byte, digest and pin checks all execute for real.
+sys.path.insert(0, HERE)
+import _siminstall  # noqa: E402
+_siminstall.install(_simvar)
+
 from b2ctl.cli import main  # noqa: E402
 
 sys.exit(main(sys.argv[1:]))

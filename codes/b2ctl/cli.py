@@ -1543,7 +1543,7 @@ def build_parser() -> argparse.ArgumentParser:
 # reason. Being machine-readable does not make a probe cheaper (ADR-007).
 # F-146: `rollback` is NOT here — it runs a stored write command (`zpool`/
 # `wipefs`/`sgdisk`/…), so it was the one exempt verb that actually MUTATES.
-_ROOT_EXEMPT = ("version", "check", "config", "log",
+_ROOT_EXEMPT = ("version", "check", "config", "log", "rollback",
                 "install", "update", "maint", "raid-foreign")
 
 

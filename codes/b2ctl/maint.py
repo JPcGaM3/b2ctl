@@ -49,13 +49,13 @@ def log_event(kind: str, target: str, status: str, detail: str = "") -> dict:
     }
     try:
         from . import safety
-        safety._ensure_dir(_state_dir())        # 0700, not umask's guess (F-147)
+        safety._ensure_dir(_state_dir())        # stated, not umask's guess (F-147)
         # O_APPEND of one small line is atomic on POSIX, so concurrent b2ctl
         # processes never interleave (mirrors safety._append_jsonl). os.open with
-        # an explicit 0600 for the same reason it does: this file records pool
-        # names and maintenance outcomes and must not be world-readable just
-        # because the operator's umask was loose (F-147).
-        fd = os.open(_path(), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        # an explicit mode for the same reason it does: the permissions are a
+        # decision, not whatever the operator's umask happened to be (F-147),
+        # and 0644 keeps the history readable without root (F-149).
+        fd = os.open(_path(), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
         try:
             os.write(fd, (json.dumps(rec) + "\n").encode())
         finally:

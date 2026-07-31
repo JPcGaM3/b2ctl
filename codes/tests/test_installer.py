@@ -209,9 +209,14 @@ class TestPrereqParity(unittest.TestCase):
                          f"installer prereqs missing from install.sh: {missing}")
 
 
-class TestDownloadFailsClosed(unittest.TestCase):
-    """F-147 — download() refuses BEFORE opening a connection when no SHA-256
-    pin is available, and the explicit opt-out bypasses that refusal."""
+class TestDownloadPinPolicy(unittest.TestCase):
+    """F-149 — download() FETCHES by default and states that it could not verify,
+    printing the digest to paste into _SHA256. F-147 made a missing pin refuse
+    outright, which bought nothing (the archive was unverified either way) and
+    only stopped `b2ctl install --with-tools` from working; these tests used to
+    pin that refusal and now pin the policy that replaced it. A pin, once
+    present, is still enforced — and B2CTL_REQUIRE_PINNED=1 restores the refusal
+    for an operator who wants it."""
 
     def _fake_urlopen(self, payload):
         import contextlib
@@ -222,55 +227,125 @@ class TestDownloadFailsClosed(unittest.TestCase):
             yield io.BytesIO(payload)
         return _cm
 
-    def test_missing_pin_refuses_without_touching_the_network(self):
-        tmp = tempfile.mkdtemp()
-        dest = os.path.join(tmp, "a.bin")
-        with patch("urllib.request.urlopen") as uo:
-            with self.assertRaises(RuntimeError) as ctx:
-                installer.download("id", dest)          # no sha256, no opt-out
-        uo.assert_not_called()                            # refused before any request
-        self.assertFalse(os.path.exists(dest))             # nothing written
-        self.assertIn("sha256sum", str(ctx.exception))     # tells the operator how to fix it
-        self.assertIn(installer._ALLOW_UNVERIFIED_ENV, str(ctx.exception))
+    def setUp(self):
+        os.environ.pop(installer._REQUIRE_PINNED_ENV, None)
 
-    def test_allow_unverified_bypasses_the_refusal(self):
-        payload = b"z" * 4096
-        tmp = tempfile.mkdtemp()
-        dest = os.path.join(tmp, "a.bin")
-        with patch("urllib.request.urlopen", self._fake_urlopen(payload)):
-            installer.download("id", dest, allow_unverified=True)   # must not raise
-        self.assertTrue(os.path.exists(dest))
+    tearDown = setUp
 
-    def test_pinned_sha256_still_works_without_the_opt_out(self):
-        # A real pin satisfies the gate on its own — allow_unverified stays False.
+    def test_missing_pin_downloads_and_says_so(self):
         import hashlib
+        import io as _io
+        import contextlib as _ctx
+        payload = b"z" * 4096
+        digest = hashlib.sha256(payload).hexdigest()
+        tmp = tempfile.mkdtemp()
+        dest = os.path.join(tmp, "a.bin")
+        buf = _io.StringIO()
+        with patch("urllib.request.urlopen", self._fake_urlopen(payload)), \
+             _ctx.redirect_stdout(buf):
+            installer.download("id", dest, name="perccli")     # must NOT raise
+        self.assertTrue(os.path.exists(dest))
+        out = buf.getvalue()
+        self.assertIn("UNVERIFIED", out)
+        self.assertIn(digest, out)
+
+    def test_the_printed_line_is_paste_ready(self):
+        # The whole point of F-149: pinning is a copy-paste, so the line has to
+        # be exactly what _SHA256 wants.
+        import hashlib
+        import io as _io
+        import contextlib as _ctx
+        import re
+        payload = b"q" * 4096
+        digest = hashlib.sha256(payload).hexdigest()
+        tmp = tempfile.mkdtemp()
+        buf = _io.StringIO()
+        with patch("urllib.request.urlopen", self._fake_urlopen(payload)), \
+             _ctx.redirect_stdout(buf):
+            installer.download("id", os.path.join(tmp, "a.bin"), name="perccli")
+        self.assertRegex(buf.getvalue(), r'"perccli":\s*"[0-9a-f]{64}",')
+        self.assertIn(f'"perccli": "{digest}",', buf.getvalue())
+
+    def test_require_pinned_env_still_refuses_before_the_network(self):
+        # F-147's fail-closed behaviour, kept as an opt-IN.
+        tmp = tempfile.mkdtemp()
+        dest = os.path.join(tmp, "a.bin")
+        with patch.dict(os.environ, {installer._REQUIRE_PINNED_ENV: "1"}), \
+             patch("urllib.request.urlopen") as uo:
+            with self.assertRaises(RuntimeError) as ctx:
+                installer.download("id", dest, name="perccli")
+        uo.assert_not_called()                             # never opened a connection
+        self.assertFalse(os.path.exists(dest))             # nothing written
+        self.assertIn("sha256sum", str(ctx.exception))     # says how to fix it
+        self.assertIn(installer._REQUIRE_PINNED_ENV, str(ctx.exception))
+
+    def test_pinned_sha256_verifies_and_says_so(self):
+        import hashlib
+        import io as _io
+        import contextlib as _ctx
         payload = b"y" * 4096
         digest = hashlib.sha256(payload).hexdigest()
         tmp = tempfile.mkdtemp()
         dest = os.path.join(tmp, "a.bin")
-        with patch("urllib.request.urlopen", self._fake_urlopen(payload)):
-            installer.download("id", dest, sha256=digest)   # must not raise
+        buf = _io.StringIO()
+        with patch("urllib.request.urlopen", self._fake_urlopen(payload)), \
+             _ctx.redirect_stdout(buf):
+            installer.download("id", dest, sha256=digest, name="perccli")
         self.assertTrue(os.path.exists(dest))
+        self.assertIn("sha256 verified", buf.getvalue())
+        self.assertNotIn("UNVERIFIED", buf.getvalue())
+
+    def test_pinned_mismatch_raises_naming_both_digests(self):
+        import hashlib
+        payload = b"y" * 4096
+        wrong = hashlib.sha256(b"something else").hexdigest()
+        real = hashlib.sha256(payload).hexdigest()
+        tmp = tempfile.mkdtemp()
+        with patch("urllib.request.urlopen", self._fake_urlopen(payload)):
+            with self.assertRaises(RuntimeError) as ctx:
+                installer.download("id", os.path.join(tmp, "a.bin"), sha256=wrong)
+        msg = str(ctx.exception)
+        self.assertIn(wrong, msg)
+        self.assertIn(real, msg)
+        self.assertIn("tampered", msg)
 
 
-class TestInstallToolsUnverifiedEnv(unittest.TestCase):
-    """install_tools() is the ONLY place the env var opt-out is read; download()
-    itself never touches the environment."""
+class TestInstallToolsPassesTheToolName(unittest.TestCase):
+    """download() needs the tool NAME so the paste-ready line says
+    `"perccli": ...` rather than the archive filename."""
 
-    def test_env_unset_leaves_allow_unverified_false(self):
+    def test_tool_name_is_forwarded(self):
         with patch("b2ctl.installer.ensure_prereqs"), \
-             patch("b2ctl.installer.download") as dl, \
-             patch.dict(os.environ, {}, clear=False):
-            os.environ.pop(installer._ALLOW_UNVERIFIED_ENV, None)
+             patch("b2ctl.installer.download") as dl:
             installer.install_tools(["sas2ircu"])
-        self.assertFalse(dl.call_args.kwargs.get("allow_unverified"))
+        self.assertEqual(dl.call_args.kwargs.get("name"), "sas2ircu")
 
-    def test_env_set_passes_allow_unverified_true(self):
-        with patch("b2ctl.installer.ensure_prereqs"), \
-             patch("b2ctl.installer.download") as dl, \
-             patch.dict(os.environ, {installer._ALLOW_UNVERIFIED_ENV: "1"}):
-            installer.install_tools(["sas2ircu"])
-        self.assertTrue(dl.call_args.kwargs.get("allow_unverified"))
+    def test_the_removed_opt_out_is_really_gone(self):
+        # B2CTL_ALLOW_UNVERIFIED opted OUT of a block that no longer exists;
+        # leaving a dead flag around would be worse than removing it.
+        self.assertFalse(hasattr(installer, "_ALLOW_UNVERIFIED_ENV"))
+        self.assertNotIn("allow_unverified", open("b2ctl/installer.py").read())
+
+
+class TestPinPolicyParity(unittest.TestCase):
+    """install.sh and installer.py must agree on the POLICY, not just the IDs
+    (F-122 covered the IDs, F-149 the policy) — otherwise `./install.sh --perc`
+    and `b2ctl install --perc` behave differently on the same box."""
+
+    def setUp(self):
+        self.sh = open("install.sh").read()
+
+    def test_both_read_the_same_env_var(self):
+        self.assertIn("B2CTL_REQUIRE_PINNED", self.sh)
+        self.assertEqual(installer._REQUIRE_PINNED_ENV, "B2CTL_REQUIRE_PINNED")
+
+    def test_install_sh_does_not_refuse_by_default(self):
+        # The refusal must be gated on the env var being "1".
+        self.assertIn('[ "${B2CTL_REQUIRE_PINNED}" = "1" ]', self.sh)
+
+    def test_install_sh_prints_the_same_paste_ready_line(self):
+        self.assertIn('installer._SHA256', self.sh)
+        self.assertIn('\\"${_tool}\\": \\"${_got}\\",', self.sh)
 
 
 class TestAlienNoScripts(unittest.TestCase):

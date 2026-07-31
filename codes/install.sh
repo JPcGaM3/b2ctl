@@ -20,14 +20,15 @@ _GDRIVE_PERCCLI="$(_gid perccli)";   : "${_GDRIVE_PERCCLI:=1hJt5Sr2xNW4OHCD-Aoef
 _GDRIVE_BASE="$(_gid _base)"
 : "${_GDRIVE_BASE:=https://drive.usercontent.google.com/download?export=download&confirm=t&id=}"
 
-# Same single-source trick for the SHA-256 pins (F-147): read installer._SHA256
-# so this path and `b2ctl install` verify the SAME digests. Both FAIL CLOSED on
-# a missing pin — an unverified archive is extracted, copied to /usr/sbin and
-# then executed as root, so "download it anyway" is not a safe default. Empty
-# output = no pin for that tool.
+# Same single-source trick for the SHA-256 pins: read installer._SHA256 so this
+# path and `b2ctl install` verify the SAME digests AND apply the same policy
+# (F-122 for the IDs, F-149 for the policy). Empty output = no pin for that tool,
+# which downloads anyway and prints the digest to paste back — refusing bought
+# nothing, since the archive is unverified either way. B2CTL_REQUIRE_PINNED=1
+# demands a pin instead.
 _sha() { PYTHONPATH="${SRC_DIR}" python3 -c \
     "import b2ctl.installer as i; print(i._SHA256.get('$1', ''))" 2>/dev/null; }
-: "${B2CTL_ALLOW_UNVERIFIED:=0}"
+: "${B2CTL_REQUIRE_PINNED:=0}"
 
 # Tool selection + optional controller mode:
 #   --with-tools : sas2ircu + perccli (no mode change)
@@ -78,15 +79,15 @@ download_tools() {
         local _url="${_GDRIVE_BASE}${_id}"
         local _want
         _want="$(_sha "${_tool}")"
-        # Refuse BEFORE opening a connection, mirroring installer.download()
-        # (F-147). The size + magic-byte checks below catch a Google error page;
-        # they cannot catch a tampered archive, which is the threat that matters
-        # for a binary about to run as root.
-        if [ -z "${_want}" ] && [ "${B2CTL_ALLOW_UNVERIFIED}" != "1" ]; then
-            echo "  [✗] no pinned SHA-256 for ${_tool} — refusing to download" >&2
-            echo "      unverified content that will run as root." >&2
-            echo "      Add the trusted digest to installer._SHA256, or set" >&2
-            echo "      B2CTL_ALLOW_UNVERIFIED=1 to bootstrap once without a pin." >&2
+        # Only REQUIRE a pin when the operator asked for it (F-149). The size +
+        # magic-byte checks below catch a Google error page; they cannot catch a
+        # tampered archive — which is why an unpinned download says so and prints
+        # the digest to paste back, rather than pretending or refusing.
+        if [ -z "${_want}" ] && [ "${B2CTL_REQUIRE_PINNED}" = "1" ]; then
+            echo "  [✗] no pinned SHA-256 for ${_tool} and B2CTL_REQUIRE_PINNED=1" >&2
+            echo "      — refusing to download unverified content that runs as root." >&2
+            echo "      Add the trusted digest to installer._SHA256, or unset" >&2
+            echo "      B2CTL_REQUIRE_PINNED." >&2
             return 1
         fi
         echo "[*] $(basename "${_out}") ..."
@@ -110,16 +111,24 @@ download_tools() {
         *.zip)    [ "${_magic}" = "504b" ] || { echo "  [✗] $(basename "${_out}"): not a zip (got magic ${_magic})" >&2; return 1; } ;;
         *.tar.gz) [ "${_magic}" = "1f8b" ] || { echo "  [✗] $(basename "${_out}"): not a gzip (got magic ${_magic})" >&2; return 1; } ;;
         esac
+        local _got
+        _got=$(sha256sum "${_out}" | cut -d' ' -f1)
         if [ -n "${_want}" ]; then
-            if ! echo "${_want}  ${_out}" | sha256sum -c - >/dev/null 2>&1; then
-                echo "  [✗] $(basename "${_out}"): SHA-256 mismatch — refusing a tampered archive" >&2
+            if [ "${_got}" != "${_want}" ]; then
+                echo "  [✗] $(basename "${_out}"): sha256 mismatch — expected ${_want}," >&2
+                echo "      got ${_got}; refusing to install a tampered archive" >&2
                 rm -f "${_out}"
                 return 1
             fi
             echo "  [✔] $(basename "${_out}") (sha256 verified)"
             return 0
         fi
-        echo "  [✔] $(basename "${_out}") (UNVERIFIED — B2CTL_ALLOW_UNVERIFIED=1)"
+        # Same message as installer._warn_unpinned — pinning is a copy-paste.
+        echo "  [✔] $(basename "${_out}")"
+        echo "  [!] UNVERIFIED — no pinned digest for ${_tool}."
+        echo "      It came from Google Drive and will run as root on this host."
+        echo "      To pin it for every future install, add to installer._SHA256:"
+        echo "          \"${_tool}\": \"${_got}\","
     }
 
     case " ${TOOLSET} " in
@@ -217,11 +226,12 @@ fi
 
 echo "[*] installing b2ctl package -> ${PREFIX}"
 mkdir -p "${PREFIX}"
-# 0700: audit trail + pre-op snapshots (device paths, pool state) must not be
-# group/world-readable; b2ctl.safety._ensure_dir enforces this at runtime too
-# (F-147), but this creates the dir before b2ctl ever runs.
-mkdir -p -m 700 /var/log/b2ctl/snapshots
-chmod 700 /var/log/b2ctl /var/log/b2ctl/snapshots
+# Mode STATED rather than inherited from the installing shell's umask
+# (b2ctl.safety._ensure_dir enforces the same at runtime, F-147). 0755 because
+# `b2ctl log` is root-exempt and a non-root operator reads the audit trail
+# (F-149 — 0700 took that away for no gain).
+mkdir -p -m 755 /var/log/b2ctl/snapshots
+chmod 755 /var/log/b2ctl /var/log/b2ctl/snapshots
 # Replace the package dir (don't merge): `cp -r` into an existing tree leaves
 # upstream-removed modules importable forever and re-runs are non-idempotent
 # (F-112). Then drop any dev-machine __pycache__ that tagged along.

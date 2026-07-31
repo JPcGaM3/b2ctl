@@ -571,7 +571,7 @@ class TestAtomicWrite:
             cfg_mod.CONFIG_PATH = old
             cfg_mod._cache = None
 
-    def test_written_file_is_0600_even_under_permissive_umask(self):
+    def test_written_file_mode_is_stated_not_inherited_from_umask(self):
         import os
         import stat
         import tempfile
@@ -584,13 +584,13 @@ class TestAtomicWrite:
         try:
             cfg_mod._atomic_write({"controller": {"mode": "it", "index": "all"}})
             mode = stat.S_IMODE(os.stat(path).st_mode)
-            assert mode == 0o600
+            assert mode == 0o644
         finally:
             os.umask(old_umask)
             cfg_mod.CONFIG_PATH = old
             cfg_mod._cache = None
 
-    def test_write_bay_map_is_also_0600(self):
+    def test_write_bay_map_states_its_mode_too(self):
         import os
         import stat
         import tempfile
@@ -606,7 +606,7 @@ class TestAtomicWrite:
             written = cfg_mod.write_bay_map([{"panel": "front", "type": "sas",
                                               "reverse_slots": False, "map": {}}])
             mode = stat.S_IMODE(os.stat(written).st_mode)
-            assert mode == 0o600
+            assert mode == 0o644
         finally:
             os.umask(old_umask)
             cfg_mod.CONFIG_PATH = old

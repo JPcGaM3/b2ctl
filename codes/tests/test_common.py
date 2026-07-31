@@ -78,6 +78,44 @@ class TestDiskAssessment:
         assert d.level == "CONFIG"
         assert any("FOREIGN" in r for r in d.reasons)
 
+    def test_command_timeout_warns_and_blames_the_link(self):
+        # F-141: attr 188 is a link symptom, not lost data. It must not reach
+        # CRITICAL on its own, and the reason has to send the operator to the
+        # cable rather than to a replacement disk.
+        d = _disk(pool=None, vdev=None, vdev_state=None)
+        d.cmd_timeout = 2
+        assess(d)
+        assert d.level == "WARNING"
+        joined = " ".join(d.reasons)
+        assert "command timeouts=2" in joined
+        assert "cabling" in joined
+        assert "uncorrectable" not in joined
+
+    def test_uncorrectable_still_critical_on_both_types(self):
+        # The zero-tolerance grading is correct and must not regress: an
+        # uncorrectable read is data already lost, for an SSD and an HDD alike.
+        for is_ssd in (True, False):
+            d = _disk(pool=None, vdev=None, vdev_state=None)
+            d.is_ssd = is_ssd
+            d.uncorr = 2
+            assess(d)
+            assert d.level == "CRITICAL", is_ssd
+            assert any("uncorrectable errors=2" in r for r in d.reasons), is_ssd
+
+    def test_both_signals_reported_separately(self):
+        d = _disk(pool=None, vdev=None, vdev_state=None)
+        d.uncorr, d.cmd_timeout = 1, 4
+        assess(d)
+        assert d.level == "CRITICAL"          # the media error wins the level
+        joined = " ".join(d.reasons)
+        assert "uncorrectable errors=1" in joined
+        assert "command timeouts=4" in joined
+
+    def test_no_timeouts_is_silent(self):
+        d = _disk(pool=None, vdev=None, vdev_state=None)
+        assess(d)
+        assert not any("command timeout" in r for r in d.reasons)
+
     def test_critical_bad_sectors(self):
         d = _disk(realloc=5)
         assess(d)

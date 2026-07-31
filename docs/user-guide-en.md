@@ -1116,6 +1116,40 @@ forces every column, `--no-pager` disables paging, and `PAGER=cat` does too.
 `watch` fits its columns the same way but **never** pages — it needs the terminal
 for hot-plug detection.
 
+### "uncorrectable errors" vs "command timeouts" — different problems (v0.23.1)
+
+Two reasons look similar in the details block but mean opposite things, and they
+send you to different places:
+
+```
+- bay 1:5 /dev/sde (SN 67P0A07FTF2E) [CRITICAL]
+    - uncorrectable errors=2                      ← the DISK lost data
+```
+
+The drive tried its error correction, retried, and gave up. Those sectors are
+gone. **Any** count above zero is CRITICAL, on SSDs and HDDs alike — unlike
+`reallocated`, where a sector that was successfully moved to spare capacity is
+ordinary wear on an old HDD. Don't put this disk in a pool; replace it.
+
+```
+- bay 1:5 /dev/sde (SN 67P0A07FTF2E) [WARNING]
+    - command timeouts=2 — usually cabling / backplane / power, not the media
+```
+
+The drive didn't answer in time. That is a **link** problem: reseat the cable and
+the drive, check the backplane and the power. The platter is probably fine.
+
+> Before v0.23.1 the second case was reported as the first — SATA attribute 188
+> (`Command_Timeout`) was counted as an uncorrectable error, so a loose cable read
+> as `[CRITICAL] uncorrectable errors=2` and people replaced a healthy disk.
+
+Either way, vet the drive before trusting it:
+
+```bash
+b2ctl maint health 1:5            # long self-test -> PASS / WARN / FAIL
+smartctl -A /dev/sde | grep -E '187|188|198'    # which counter actually moved
+```
+
 ### Bay numbers may be scrambled
 
 On this Dell 12G backplane in IT mode, the controller reports scrambled slot

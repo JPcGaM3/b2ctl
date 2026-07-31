@@ -195,8 +195,16 @@ def _parse_ata(d: Disk, out: str) -> None:
                 d.realloc = raw
             if aid == 197:
                 d.pending = raw
-            if aid in (187, 188, 198):
+            # 187 Reported_Uncorrect / 198 Offline_Uncorrectable are real media
+            # failures. 188 Command_Timeout is NOT — it is a link-layer symptom
+            # (cable/backplane/power), and counting it here graded a cabling
+            # fault CRITICAL as "uncorrectable errors" (F-141). Some vendors pack
+            # three counters into 188's raw value so it can read large; harmless,
+            # since it only warns.
+            if aid in (187, 198):
                 d.uncorr = max(d.uncorr, raw)
+            if aid == 188:
+                d.cmd_timeout = max(d.cmd_timeout, raw)
 
 
 def _lba241(name: str, raw: int) -> int:

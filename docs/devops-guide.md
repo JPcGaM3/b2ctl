@@ -1498,9 +1498,33 @@ with `<` (`_grade_low`, % remaining). Defaults:
 | `realloc_warn` / `realloc_crit` | `null` / `0` (any → CRITICAL) | `50` / `200` |
 | `pending_warn` / `pending_crit` | `null` / `0` (any → CRITICAL) | `0` / `null` (→ WARNING) |
 | `uncorr_warn` / `uncorr_crit` | `null` / `0` (any → CRITICAL) | `null` / `0` (any → CRITICAL) |
+| `cmdto_warn` / `cmdto_crit` (v0.23.1) | `0` / `null` (any → WARNING) | `0` / `null` (any → WARNING) |
 | `endurance_warn` / `endurance_crit` | `30` / `20` | `null` / `null` |
 | `wear_warn` / `wear_crit` | `30` / `20` | `null` / `null` |
 | `poh_warn` (burn-in) | `null` (off) | `null` (off) |
+
+**`uncorr` vs `cmdto` — why one is fatal and the other is not (F-141).**
+`uncorr` is zero-tolerance on *both* types because an uncorrectable read means
+the drive tried ECC, retried, and gave up: that data is already lost. `realloc`
+gets HDD tolerance bands precisely because a *successfully* remapped sector is
+normal wear; an uncorrectable is not.
+
+`cmd_timeout` (ATA attribute **188 Command_Timeout**) is a different failure
+domain entirely — the command did not return in time, which points at the cable,
+backplane, expander, power or controller, not the platter. It used to be folded
+into `uncorr` alongside 187/198 (`smart.py`), so a cabling fault was reported as
+`uncorrectable errors=N` at CRITICAL and sent operators to order a replacement
+disk. It is now its own signal, graded WARNING, with a reason that names the
+likely cause.
+
+The split is **ATA-only**: SAS reads column 7 of the error-counter log
+(`Total uncorrected errors`) and NVMe reads `Media and Data Integrity Errors` —
+both genuine uncorrectables, both still feeding `uncorr`, with `cmd_timeout`
+left at 0. Some vendors pack three counters into attribute 188's raw value, so it
+can read large; harmless, since it only warns.
+
+`Disk.cmd_timeout` is on the machine-contract wire. Adding it kept
+`schema_version` at 1, per ADR-007's rule that additions are backward compatible.
 
 Example — loosen HDD grading, tighten SSD endurance, enable the burn-in POH warn:
 

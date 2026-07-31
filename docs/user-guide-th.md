@@ -1112,6 +1112,38 @@ pipe หรือ redirect ไม่โดนผลกระทบ: `b2ctl statu
 
 `watch` ปรับ column เหมือนกัน แต่ **ไม่เข้า pager** เพราะมันต้องใช้ terminal ตรวจจับ hot-plug
 
+### ⚠️ "uncorrectable errors" กับ "command timeouts" คนละเรื่องกัน (v0.23.1)
+
+สองบรรทัดนี้หน้าตาคล้ายกันในบล็อกรายละเอียด แต่ความหมายตรงข้าม และพาไปคนละทาง:
+
+```
+- bay 1:5 /dev/sde (SN 67P0A07FTF2E) [CRITICAL]
+    - uncorrectable errors=2                      ← ดิสก์ทำข้อมูลหาย
+```
+
+ดิสก์ลองแก้ error แล้ว ลองอ่านซ้ำแล้ว ยอมแพ้ sector พวกนั้นหายไปแล้ว **เกิน 0 เมื่อไหร่ก็
+CRITICAL** ทั้ง SSD และ HDD ต่างจาก `reallocated` ที่ย้าย sector สำเร็จ ซึ่งเป็นเรื่องปกติของ
+HDD เก่า ลูกนี้อย่าเอาเข้า pool เปลี่ยนทิ้ง
+
+```
+- bay 1:5 /dev/sde (SN 67P0A07FTF2E) [WARNING]
+    - command timeouts=2 — usually cabling / backplane / power, not the media
+```
+
+ดิสก์ตอบไม่ทันเวลา อันนี้เป็นปัญหา **การเชื่อมต่อ** — ถอดเสียบสาย ถอดเสียบดิสก์ เช็ค backplane
+เช็คไฟเลี้ยง ตัวจานน่าจะยังดีอยู่
+
+> ก่อน v0.23.1 เคสที่สองถูกรายงานเป็นเคสแรก — attribute 188 (`Command_Timeout`) ของ SATA
+> ถูกนับรวมเป็น uncorrectable error สายหลวมเลยขึ้นเป็น `[CRITICAL] uncorrectable errors=2`
+> แล้วคนไปเปลี่ยนดิสก์ที่ยังดีอยู่
+
+ยังไงก็ตาม ตรวจดิสก์ก่อนเอาไปใช้:
+
+```bash
+b2ctl maint health 1:5            # long self-test -> PASS / WARN / FAIL
+smartctl -A /dev/sde | grep -E '187|188|198'    # ดูว่าตัวนับไหนขยับจริง
+```
+
 ### ⚠️ อย่าผสม SAS กับ SATA โดยไม่ทดสอบก่อน
 
 การเอาดิสก์ SAS มาเป็น spare ในพูลที่เป็น SATA ล้วน อาจมีปัญหาได้ ถ้าไม่แน่ใจ ให้ใช้

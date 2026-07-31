@@ -237,6 +237,15 @@ class Disk:
     realloc: int = 0               # reallocated sectors / grown defects
     pending: int = 0
     uncorr: int = 0
+    cmd_timeout: int = 0           # ATA attr 188 Command_Timeout. NOT a media
+                                   # error — the command did not come back in
+                                   # time, which points at the cable / backplane
+                                   # / expander / power, not the platter. It used
+                                   # to be folded into `uncorr`, so a cabling
+                                   # fault was reported as lost data and sent the
+                                   # operator to buy a disk (F-141). SAS/NVMe
+                                   # never set this: their counters are genuine
+                                   # uncorrectables.
     lba_written: int | None = None
     written_tb: float | None = None
     tbw_rating: float | None = None
@@ -421,6 +430,14 @@ def assess(d: Disk) -> None:
             lvl = _grade_high(val, h.get(f"{sig}_warn"), h.get(f"{sig}_crit"))
             if lvl:
                 bump(lvl, f"{label}={val}")
+        # Kept out of the loop above so the reason can say what it actually
+        # means: the loop only formats "label=value", and the whole point of
+        # splitting 188 off is telling the operator to check a cable rather than
+        # order a disk (F-141).
+        lvl = _grade_high(d.cmd_timeout, h.get("cmdto_warn"), h.get("cmdto_crit"))
+        if lvl:
+            bump(lvl, f"command timeouts={d.cmd_timeout} — usually cabling / "
+                      f"backplane / power, not the media")
         if d.end_left is not None:
             lvl = _grade_low(d.end_left, h.get("endurance_warn"), h.get("endurance_crit"))
             if lvl:

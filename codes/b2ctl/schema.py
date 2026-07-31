@@ -34,7 +34,7 @@ DISK_FIELDS = (
     "size_bytes", "iface", "is_ssd",
     # health
     "health", "readable", "poh", "wear_val", "end_left", "written_tb",
-    "tbw_rating", "realloc", "pending", "uncorr",
+    "tbw_rating", "realloc", "pending", "uncorr", "cmd_timeout",
     # topology
     "pool", "vdev", "vdev_state", "array_type", "array_name",
     # perc

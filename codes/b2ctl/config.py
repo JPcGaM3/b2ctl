@@ -55,6 +55,8 @@ _DEFAULTS: dict = {
             "realloc_warn": None, "realloc_crit": 0,
             "pending_warn": None, "pending_crit": 0,
             "uncorr_warn": None,  "uncorr_crit": 0,
+            # attr 188 Command_Timeout: a link symptom, never fatal on its own
+            "cmdto_warn": 0,      "cmdto_crit": None,
             "endurance_warn": 30, "endurance_crit": 20,
             "wear_warn": 30,      "wear_crit": 20,
             "poh_warn": None,              # burn-in POH warning (off by default)
@@ -63,6 +65,7 @@ _DEFAULTS: dict = {
             "realloc_warn": 50,   "realloc_crit": 200,
             "pending_warn": 0,    "pending_crit": None,
             "uncorr_warn": None,  "uncorr_crit": 0,
+            "cmdto_warn": 0,      "cmdto_crit": None,
             "endurance_warn": None, "endurance_crit": None,
             "wear_warn": None,    "wear_crit": None,
             "poh_warn": None,

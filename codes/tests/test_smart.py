@@ -552,5 +552,70 @@ class TestSmartTargetDevice(unittest.TestCase):
         self.assertEqual(mock_sc.call_args.args[0], "/dev/sda")
 
 
+class TestCommandTimeoutIsNotAMediaError(unittest.TestCase):
+    """F-141: ATA attribute 188 Command_Timeout used to be folded into d.uncorr
+    alongside 187/198, so a link-layer fault (cable / backplane / expander /
+    power) was reported as `uncorrectable errors=N` and graded CRITICAL — which
+    tells the operator to buy a disk instead of reseating a cable."""
+
+    _HEAD = ("smartctl 7.4 2023-08-01 r5530\n"
+             "ID# ATTRIBUTE_NAME          FLAG     VALUE WORST THRESH TYPE"
+             "      UPDATED  WHEN_FAILED RAW_VALUE\n"
+             "  9 Power_On_Hours          0x0032   099   099   000    Old_age"
+             "   Always       -       1234\n")
+
+    def _read(self, attr_lines: str) -> Disk:
+        d = Disk(dev="/dev/sda")
+        with patch("b2ctl.smart._smartctl", return_value=self._HEAD + attr_lines):
+            smart.read(d, {})
+        return d
+
+    def test_188_alone_sets_only_cmd_timeout(self):
+        d = self._read("188 Command_Timeout        0x0032   100   100   000"
+                       "    Old_age   Always       -       2\n")
+        self.assertEqual(d.cmd_timeout, 2)
+        self.assertEqual(d.uncorr, 0)      # the whole point of the split
+
+    def test_187_sets_only_uncorr(self):
+        d = self._read("187 Reported_Uncorrect     0x0032   100   100   000"
+                       "    Old_age   Always       -       3\n")
+        self.assertEqual(d.uncorr, 3)
+        self.assertEqual(d.cmd_timeout, 0)
+
+    def test_198_sets_only_uncorr(self):
+        d = self._read("198 Offline_Uncorrectable   0x0030   100   100   000"
+                       "    Old_age   Offline      -       5\n")
+        self.assertEqual(d.uncorr, 5)
+        self.assertEqual(d.cmd_timeout, 0)
+
+    def test_both_are_counted_independently(self):
+        d = self._read("187 Reported_Uncorrect     0x0032   100   100   000"
+                       "    Old_age   Always       -       1\n"
+                       "188 Command_Timeout        0x0032   100   100   000"
+                       "    Old_age   Always       -       9\n")
+        self.assertEqual(d.uncorr, 1)
+        self.assertEqual(d.cmd_timeout, 9)
+
+
+class TestSasNvmeUncorrUnaffected(unittest.TestCase):
+    """The F-141 split is ATA-ONLY. SAS reads column 7 of the error-counter log
+    and NVMe reads 'Media and Data Integrity Errors' — both are genuine
+    uncorrectables and must keep feeding d.uncorr, with cmd_timeout untouched."""
+
+    def test_sas_uncorr_still_parsed(self):
+        d = Disk(dev="/dev/sdb")
+        with patch("b2ctl.smart._smartctl", return_value=_SAS_UNCORR_OUTPUT):
+            smart.read(d, {})
+        self.assertGreater(d.uncorr, 0)
+        self.assertEqual(d.cmd_timeout, 0)
+
+    def test_nvme_uncorr_still_parsed(self):
+        d = Disk(dev="/dev/nvme0n1")
+        with patch("b2ctl.smart._smartctl", return_value=_NVME_OUTPUT):
+            smart.read(d, {})
+        self.assertEqual(d.uncorr, 7)      # Media and Data Integrity Errors
+        self.assertEqual(d.cmd_timeout, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

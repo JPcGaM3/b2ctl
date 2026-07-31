@@ -401,6 +401,142 @@ class TestWatchCreate:
         assert "invalid raid type" in captured.out
         mock_zfs.create_pool.assert_not_called()
 
+    # ---------------------------------------------------------------------- #
+    # F-150b: `zpool create -f` destroys whatever was on the selected disks —
+    # this is the most consequential gap of the ones this task closes, so it
+    # must gain a `safety` audit op (and therefore the `create` rollback hint
+    # that already existed in safety._ROLLBACK but nothing ever fed).
+    # ---------------------------------------------------------------------- #
+    @patch("b2ctl.safety.end_op")
+    @patch("b2ctl.safety.begin_op", return_value="op-create")
+    @patch("b2ctl.watch._cfg")
+    @patch("b2ctl.watch.ui")
+    @patch("b2ctl.watch.zfs")
+    @patch("b2ctl.watch.core")
+    @patch("b2ctl.watch._confirm", return_value=True)
+    @patch("b2ctl.watch._ask")
+    def test_create_records_op_with_zpool_create_argv(self, mock_ask, _mc, mock_core,
+                                                       mock_zfs, mock_ui, mock_cfg,
+                                                       mock_begin, mock_end):
+        from b2ctl.watch import _cmd_create
+        import b2ctl.zfs as real_zfs
+        mock_cfg.pool_defaults.return_value = {"autotrim": "off", "autoscrub": False}
+        mock_cfg.tool.return_value = "zpool"
+        d1 = _disk(pool=None, vdev=None, vdev_state=None, dev="/dev/sda", by_id="/d/a")
+        d2 = _disk(pool=None, vdev=None, vdev_state=None, dev="/dev/sdb",
+                   serial="S2", by_id="/d/b")
+        mock_core.scan.return_value = [d1, d2]
+        mock_zfs.MIN_DISKS = real_zfs.MIN_DISKS
+        mock_zfs.DEFAULT_POOL_OPTS = real_zfs.DEFAULT_POOL_OPTS
+        mock_zfs.DEFAULT_FS_OPTS = real_zfs.DEFAULT_FS_OPTS
+        mock_zfs.has_zfs_label.return_value = False
+        mock_zfs.create_pool.return_value = (True, "")
+        mock_zfs.install_pool_timers.return_value = (True, "enabled …")
+        mock_ask.side_effect = ["1 2", "", "tank", "mirror"] + [""] * 9
+        ok = _cmd_create({})
+        assert ok is True
+        mock_begin.assert_called_once()
+        op, serial, bay, dev_path, pool, vdev, cmds = mock_begin.call_args.args
+        assert op == "create"
+        assert pool == "tank"
+        assert mock_begin.call_args.kwargs["dry_run"] is False
+        assert len(cmds) == 1
+        argv = cmds[0]
+        assert argv[:3] == ["zpool", "create", "-f"]
+        assert argv[-3:] == ["mirror", "/d/a", "/d/b"]   # vdev layout, real devices
+        assert "tank" in argv
+        mock_end.assert_called_once_with("op-create", True, "", "", 0, dry_run=False)
+
+    @patch("b2ctl.safety.end_op")
+    @patch("b2ctl.safety.begin_op", return_value="op-fail")
+    @patch("b2ctl.watch._cfg")
+    @patch("b2ctl.watch.ui")
+    @patch("b2ctl.watch.zfs")
+    @patch("b2ctl.watch.core")
+    @patch("b2ctl.watch._confirm", return_value=True)
+    @patch("b2ctl.watch._ask")
+    def test_create_failure_ends_op_as_failed(self, mock_ask, _mc, mock_core,
+                                              mock_zfs, mock_ui, mock_cfg,
+                                              mock_begin, mock_end):
+        from b2ctl.watch import _cmd_create
+        import b2ctl.zfs as real_zfs
+        mock_cfg.pool_defaults.return_value = {"autotrim": "off", "autoscrub": False}
+        mock_cfg.tool.return_value = "zpool"
+        d1 = _disk(pool=None, vdev=None, vdev_state=None, dev="/dev/sda", by_id="/d/a")
+        d2 = _disk(pool=None, vdev=None, vdev_state=None, dev="/dev/sdb",
+                   serial="S2", by_id="/d/b")
+        mock_core.scan.return_value = [d1, d2]
+        mock_zfs.MIN_DISKS = real_zfs.MIN_DISKS
+        mock_zfs.DEFAULT_POOL_OPTS = real_zfs.DEFAULT_POOL_OPTS
+        mock_zfs.DEFAULT_FS_OPTS = real_zfs.DEFAULT_FS_OPTS
+        mock_zfs.has_zfs_label.return_value = False
+        mock_zfs.create_pool.return_value = (False, "no such devices")
+        mock_ask.side_effect = ["1 2", "", "tank", "mirror"] + [""] * 9
+        ok = _cmd_create({})
+        assert ok is False
+        mock_end.assert_called_once_with("op-fail", False, "", "no such devices", 1,
+                                         dry_run=False)
+        mock_zfs.install_pool_timers.assert_not_called()
+
+    @patch("b2ctl.safety.end_op")
+    @patch("b2ctl.safety.begin_op")
+    @patch("b2ctl.watch.zfs")
+    @patch("b2ctl.watch.core")
+    @patch("b2ctl.watch._confirm", return_value=False)
+    @patch("b2ctl.watch._ask")
+    def test_create_declined_confirm_records_no_op(self, mock_ask, _mc, mock_core,
+                                                    mock_zfs, mock_begin, mock_end):
+        # The final "create pool ...?" confirm says no — nothing ran, so the
+        # audit trail must gain NO phantom entry (F-150b anti-overcorrection).
+        from b2ctl.watch import _cmd_create
+        import b2ctl.zfs as real_zfs
+        d1 = _disk(pool=None, vdev=None, vdev_state=None, dev="/dev/sda", by_id="/d/a")
+        d2 = _disk(pool=None, vdev=None, vdev_state=None, dev="/dev/sdb",
+                   serial="S2", by_id="/d/b")
+        mock_core.scan.return_value = [d1, d2]
+        mock_zfs.MIN_DISKS = real_zfs.MIN_DISKS
+        mock_zfs.DEFAULT_POOL_OPTS = real_zfs.DEFAULT_POOL_OPTS
+        mock_zfs.DEFAULT_FS_OPTS = real_zfs.DEFAULT_FS_OPTS
+        mock_zfs.has_zfs_label.return_value = False
+        mock_ask.side_effect = ["1 2", "", "tank", "mirror"] + [""] * 9
+        ok = _cmd_create({})
+        assert ok is False
+        mock_zfs.create_pool.assert_not_called()
+        mock_begin.assert_not_called()
+        mock_end.assert_not_called()
+
+    @patch("b2ctl.safety.end_op")
+    @patch("b2ctl.safety.begin_op", return_value="op-dry")
+    @patch("b2ctl.watch._cfg")
+    @patch("b2ctl.watch.ui")
+    @patch("b2ctl.watch.zfs")
+    @patch("b2ctl.watch.core")
+    @patch("b2ctl.watch._confirm", return_value=True)
+    @patch("b2ctl.watch._ask")
+    def test_create_dry_run_passes_dry_run_flag(self, mock_ask, _mc, mock_core,
+                                                mock_zfs, mock_ui, mock_cfg,
+                                                mock_begin, mock_end):
+        import b2ctl.watch as watch_mod
+        import b2ctl.zfs as real_zfs
+        mock_cfg.pool_defaults.return_value = {"autotrim": "off", "autoscrub": False}
+        mock_cfg.tool.return_value = "zpool"
+        d1 = _disk(pool=None, vdev=None, vdev_state=None, dev="/dev/sda", by_id="/d/a")
+        d2 = _disk(pool=None, vdev=None, vdev_state=None, dev="/dev/sdb",
+                   serial="S2", by_id="/d/b")
+        mock_core.scan.return_value = [d1, d2]
+        mock_zfs.MIN_DISKS = real_zfs.MIN_DISKS
+        mock_zfs.DEFAULT_POOL_OPTS = real_zfs.DEFAULT_POOL_OPTS
+        mock_zfs.DEFAULT_FS_OPTS = real_zfs.DEFAULT_FS_OPTS
+        mock_zfs.has_zfs_label.return_value = False
+        mock_zfs.create_pool.return_value = (True, "")
+        mock_zfs.install_pool_timers.return_value = (True, "enabled …")
+        mock_ask.side_effect = ["1 2", "", "tank", "mirror"] + [""] * 9
+        with patch.object(watch_mod, "_DRY_RUN", True):
+            ok = watch_mod._cmd_create({})
+        assert ok is True
+        assert mock_begin.call_args.kwargs["dry_run"] is True
+        mock_end.assert_called_once_with("op-dry", True, "", "", 0, dry_run=True)
+
 
 class TestHandleNewDisk:
     """F-019: a re-seated pool member must not be offered the free/WIPE menu."""
@@ -1527,6 +1663,100 @@ class TestMaint(unittest.TestCase):
         assert [x.serial for x in mock_run.call_args.args[0]] == ["SER1"]
         mock_maint.log_event.assert_called()   # health "started" recorded
 
+    # ---------------------------------------------------------------------- #
+    # F-150b: scrub/trim start a kernel op that outlives the process, but the
+    # `safety` audit trail (ops.jsonl / `b2ctl log`) must still record WHICH
+    # pool and WHAT COMMAND ran — closed on "the start command succeeded", not
+    # on completion, and never blocking to wait for one (that stays gated by
+    # the separate "watch live progress?" confirm). maint.jsonl keeps recording
+    # the started/ok/fail lifecycle unchanged — two different logs on purpose.
+    # ---------------------------------------------------------------------- #
+    @patch("b2ctl.config.tool", return_value="zpool")
+    @patch("b2ctl.safety.end_op")
+    @patch("b2ctl.safety.begin_op", return_value="op-scrub")
+    @patch("b2ctl.watch.maint")
+    @patch("b2ctl.watch.zfs")
+    @patch("b2ctl.watch._confirm", side_effect=[True, False])   # start yes, watch no
+    def test_scrub_records_op_naming_pool_and_command(self, _cf, mock_zfs, mock_maint,
+                                                       mock_begin, mock_end, _tool):
+        from b2ctl.watch import _cmd_maint
+        mock_zfs.last_scrub_date.return_value = None
+        mock_zfs.start_scrub.return_value = (True, "")
+        ok = _cmd_maint({}, action="scrub", pool="tank")
+        assert ok is True   # returns promptly — no waiting for scrub to finish
+        mock_begin.assert_called_once()
+        op, serial, bay, dev_path, pool, vdev, cmds = mock_begin.call_args.args
+        assert op == "scrub"
+        assert pool == "tank"
+        assert cmds == [["zpool", "scrub", "tank"]]
+        assert mock_begin.call_args.kwargs["dry_run"] is False
+        mock_end.assert_called_once_with("op-scrub", True, "", "", 0, dry_run=False)
+
+    @patch("b2ctl.config.tool", return_value="zpool")
+    @patch("b2ctl.safety.end_op")
+    @patch("b2ctl.safety.begin_op", return_value="op-trim")
+    @patch("b2ctl.watch.maint")
+    @patch("b2ctl.watch.zfs")
+    @patch("b2ctl.watch._confirm", side_effect=[True, False])
+    def test_trim_records_op_naming_pool_and_command(self, _cf, mock_zfs, mock_maint,
+                                                      mock_begin, mock_end, _tool):
+        from b2ctl.watch import _cmd_maint
+        mock_zfs.start_trim.return_value = (True, "")
+        ok = _cmd_maint({}, action="trim", pool="tank")
+        assert ok is True
+        op, serial, bay, dev_path, pool, vdev, cmds = mock_begin.call_args.args
+        assert op == "trim"
+        assert pool == "tank"
+        assert cmds == [["zpool", "trim", "tank"]]
+        mock_end.assert_called_once_with("op-trim", True, "", "", 0, dry_run=False)
+
+    @patch("b2ctl.config.tool", return_value="zpool")
+    @patch("b2ctl.safety.end_op")
+    @patch("b2ctl.safety.begin_op", return_value="op-fail")
+    @patch("b2ctl.watch.maint")
+    @patch("b2ctl.watch.zfs")
+    @patch("b2ctl.watch._confirm", return_value=True)
+    def test_scrub_start_failure_ends_op_as_failed(self, _cf, mock_zfs, mock_maint,
+                                                   mock_begin, mock_end, _tool):
+        from b2ctl.watch import _cmd_maint
+        mock_zfs.last_scrub_date.return_value = None
+        mock_zfs.start_scrub.return_value = (False, "no such pool")
+        ok = _cmd_maint({}, action="scrub", pool="tank")
+        assert ok is False
+        mock_end.assert_called_once_with("op-fail", False, "", "no such pool", 1,
+                                         dry_run=False)
+
+    @patch("b2ctl.safety.end_op")
+    @patch("b2ctl.safety.begin_op")
+    @patch("b2ctl.watch.zfs")
+    @patch("b2ctl.watch._confirm", return_value=False)
+    def test_decline_records_no_op(self, _cf, mock_zfs, mock_begin, mock_end):
+        # A declined start-confirm must leave the audit trail untouched — nothing
+        # happened, so nothing gets logged (F-150b anti-overcorrection guard).
+        from b2ctl.watch import _cmd_maint
+        ok = _cmd_maint({}, action="trim", pool="tank")
+        assert ok is False
+        mock_zfs.start_trim.assert_not_called()
+        mock_begin.assert_not_called()
+        mock_end.assert_not_called()
+
+    @patch("b2ctl.config.tool", return_value="zpool")
+    @patch("b2ctl.safety.end_op")
+    @patch("b2ctl.safety.begin_op", return_value="op-dry")
+    @patch("b2ctl.watch.maint")
+    @patch("b2ctl.watch.zfs")
+    @patch("b2ctl.watch._confirm", return_value=True)
+    def test_scrub_dry_run_passes_dry_run_flag(self, _cf, mock_zfs, mock_maint,
+                                               mock_begin, mock_end, _tool):
+        import b2ctl.watch as watch_mod
+        mock_zfs.last_scrub_date.return_value = None
+        mock_zfs.start_scrub.return_value = (True, "")
+        with patch.object(watch_mod, "_DRY_RUN", True):
+            ok = watch_mod._cmd_maint({}, action="scrub", pool="tank")
+        assert ok is True
+        assert mock_begin.call_args.kwargs["dry_run"] is True
+        mock_end.assert_called_once_with("op-dry", True, "", "", 0, dry_run=True)
+
 
 class TestMaybePartition(unittest.TestCase):
     """v0.18.0: over-provision WIPES each disk before sgdisk (stale-GPT fix)."""
@@ -1660,7 +1890,7 @@ class TestOffloadTellsTheTruth:
     now DEGRADED and one disk from total loss.
 
     `zfs_actions.offload` is `_rc(watch._cmd_offload(...))` and `cli`'s JSON face
-    emits `ok:true` on rc 0, so the lie travels all the way to an MCP client.
+    emits `ok:true` on rc 0, so the lie travels all the way to a web-service client.
     """
 
     def _member(self):

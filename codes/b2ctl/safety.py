@@ -83,11 +83,20 @@ def begin_op(
     *,
     details: dict | None = None,
     dry_run: bool = False,
+    snapshot: bool = True,
 ) -> str:
     """Write pending audit entry + snapshot. Return op_id.
 
     `details` may carry named fields (currently old_dev/new_dev for replace) so
     rollback hints are built from names, not fragile positional cmd indices.
+
+    `snapshot=False` records the op WITHOUT the pre-op capture. The snapshot is
+    four subprocesses (`zpool status`, `zpool list -v`, `zfs list`,
+    `smartctl -a`) plus a file — worth it before something you might need to roll
+    back to, pure overhead for an op that changes no pool state. F-150 started
+    recording `locate` (a transient LED blink, and `status --locate` fires one
+    per at-risk disk in a thread pool) and the config writers; those want the
+    audit line, not the snapshot.
     """
     _ensure_dir(LOG_DIR)
     _ensure_dir(SNAP_DIR)
@@ -118,7 +127,8 @@ def begin_op(
             if details.get(k):
                 entry[k] = details[k]
     # dry-run is a pure preview — don't write a pre-op snapshot to disk.
-    snap_path = None if dry_run else _capture_snapshot(op_id, pool, dev_path)
+    snap_path = (None if dry_run or not snapshot
+                 else _capture_snapshot(op_id, pool, dev_path))
     if snap_path:
         entry["snapshot_path"] = snap_path
     _PENDING[op_id] = entry

@@ -121,7 +121,7 @@ def _pick_pool() -> str | None:
 def _resolve_target(candidates, target: str):
     """Resolve a `target` token (bay / serial / dev / by_id) against `candidates`
     — the SAME list the interactive menu would have printed — for a non-
-    interactive caller (MCP/web UI, ADR-007 phase 2) that names its disk instead
+    interactive caller (web-service UI, ADR-007 phase 2) that names its disk instead
     of picking a number. Match order mirrors the existing precedent
     (`raid_actions._pick_member`, `cli._resolve_devs`): bay, serial, dev, dev
     without the '/dev/' prefix, by_id.
@@ -925,6 +925,29 @@ def _cmd_replace(tbw, target=None) -> bool:
     return _replace_onto_spare(d, spares[0])
 
 
+def _create_pool_cmd(name: str, raid_type: str, devs: list[str],
+                     pool_opts: dict, fs_opts: dict) -> list[str]:
+    """Rebuild the exact `zpool create` argv for the audit trail (F-150b).
+
+    Mirrors zfs.create_pool's own argv construction (tool resolution + -o/-O
+    flag ordering + vdev layout) rather than calling it, since create_pool only
+    returns (ok, out) — this is display/audit only, never executed."""
+    cmd = [_cfg.tool("zpool"), "create", "-f"]
+    for k, v in pool_opts.items():
+        cmd += ["-o", f"{k}={v}"]
+    for k, v in fs_opts.items():
+        cmd += ["-O", f"{k}={v}"]
+    if raid_type == "raid10":
+        vdev_args = zfs._mirror_pairs(devs)
+    elif raid_type == "stripe":
+        vdev_args = list(devs)
+    else:                       # mirror / raidz1 / raidz2 / raidz3
+        vdev_args = [raid_type, *devs]
+    cmd.append(name)
+    cmd.extend(vdev_args)
+    return cmd
+
+
 def _cmd_create(tbw, raid_type=None, disks=None, name=None) -> bool:
     """Return True only on a created pool (F-070 — feeds the CLI exit code).
 
@@ -1046,6 +1069,13 @@ def _cmd_create(tbw, raid_type=None, disks=None, name=None) -> bool:
     cap = size or "full disk"
     if not _confirm(f"create pool '{name}' ({raid_type}) with {len(devs)} disks ({cap})?"):
         return False
+    # `zpool create -f` destroys whatever was on these disks — `safety._ROLLBACK`
+    # already has a `create` entry (`zpool destroy <pool>`), so recording the op
+    # here gains that rollback hint for free (F-150b). `cmds` mirrors
+    # zfs.create_pool's own argv construction so the audit trail names the exact
+    # command that ran, not an approximation.
+    cmds = [_create_pool_cmd(name, raid_type, devs, pool_opts, fs_opts)]
+    op_id = safety.begin_op("create", "", "", "", name, raid_type, cmds, dry_run=_DRY_RUN)
     ok, out = zfs.create_pool(name, raid_type, devs, pool_opts=pool_opts,
                               fs_opts=fs_opts, dry_run=_DRY_RUN)
     print((G + "  ✔ pool created" if ok else R + f"  ✗ failed: {out}") + N)
@@ -1070,6 +1100,7 @@ def _cmd_create(tbw, raid_type=None, disks=None, name=None) -> bool:
             _cfg.set_pool_settings(name, autotrim=pool_opts["autotrim"],
                                    autoscrub=autoscrub_on)
             _cfg.set_pool_defaults(autotrim=pool_opts["autotrim"], autoscrub=autoscrub_on)
+    safety.end_op(op_id, ok, "", "" if ok else out, 0 if ok else 1, dry_run=_DRY_RUN)
     return ok
 
 
@@ -1385,7 +1416,15 @@ def _cmd_maint(tbw, *, action=None, pool=None) -> bool:
     # finished scrub from the OLD persisted `scrub repaired` line.
     baseline = zfs.last_scrub_date(pool) if action == "scrub" else None
     start = zfs.start_scrub if action == "scrub" else zfs.start_trim
+    # zpool scrub/trim is fire-and-forget — the kernel keeps running after the
+    # command returns, so this op is CLOSED right here on "the start command
+    # succeeded", not on scrub/trim completion (F-150b). maint.jsonl (below)
+    # separately tracks the started/ok/fail lifecycle for `maint --log`; these
+    # are two different logs on purpose (see maint.py's docstring) — do not merge.
+    cmds = [[_cfg.tool("zpool"), action, pool]]
+    op_id = safety.begin_op(action, "", "", "", pool, "", cmds, dry_run=_DRY_RUN)
     ok, out = start(pool, dry_run=_DRY_RUN)
+    safety.end_op(op_id, ok, "", "" if ok else out, 0 if ok else 1, dry_run=_DRY_RUN)
     if not ok:
         print(R + f"  ✗ failed: {out}" + N)
         maint.log_event(action, pool, "fail", out)

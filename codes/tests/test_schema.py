@@ -1,6 +1,6 @@
 """Unit tests for b2ctl.schema — the wire-format projections (ADR-007).
 
-b2ctl is driven by an MCP server and a web UI now, so these lock down the
+b2ctl is driven by a service on the box that shells out to it and forwards results to a web UI now, so these lock down the
 field lists schema.py exposes on the wire (DISK_FIELDS/POOL_FIELDS/
 VOLUME_FIELDS) and the always-safe backend_json() probe, independent of the
 envelope shape covered by test_jsonout.py.
@@ -103,6 +103,47 @@ class TestPoolJson(unittest.TestCase):
         p = {f: f"v-{f}" for f in schema.POOL_FIELDS}
         p["not_a_wire_field"] = "should be dropped"
         self.assertNotIn("not_a_wire_field", schema.pool_json(p))
+
+
+class TestPoolJsonRedundancyAndTimestamps(unittest.TestCase):
+    """F-150c: `level` (redundancy type, e.g. mirror/raidz1) is a DIFFERENT
+    concept from DISK_FIELDS' `level` (health verdict) but shares the wire
+    key for renderer compat; `redundancy` carries the same value under an
+    unambiguous name for new clients. `last_scrub_ts`/`last_trim_ts` are the
+    raw ISO-8601 timestamps behind the human `last_scrub`/`last_trim`
+    strings, so a machine client can sort/age without parsing prose."""
+
+    def test_redundancy_mirrors_level_when_not_separately_supplied(self):
+        p = {"name": "tank", "level": "raidz1"}
+        wire = schema.pool_json(p)
+        self.assertEqual(wire["level"], "raidz1")
+        self.assertEqual(wire["redundancy"], "raidz1")
+
+    def test_redundancy_is_none_when_level_is_missing(self):
+        wire = schema.pool_json({"name": "tank"})
+        self.assertIsNone(wire["level"])
+        self.assertIsNone(wire["redundancy"])
+
+    def test_schema_version_stays_1_for_the_additive_field(self):
+        self.assertEqual(jsonout.SCHEMA_VERSION, 1)
+
+    def test_ts_fields_round_trip_through_fromisoformat(self):
+        import datetime
+        ts = "2026-07-08T03:00:00"
+        p = {"name": "tank", "last_scrub_ts": ts, "last_trim_ts": ts}
+        wire = schema.pool_json(p)
+        self.assertEqual(datetime.datetime.fromisoformat(wire["last_scrub_ts"]),
+                          datetime.datetime.fromisoformat(ts))
+        self.assertEqual(datetime.datetime.fromisoformat(wire["last_trim_ts"]),
+                          datetime.datetime.fromisoformat(ts))
+
+    def test_ts_fields_are_none_not_empty_string_when_absent(self):
+        wire = schema.pool_json({"name": "tank"})
+        self.assertIsNone(wire["last_scrub_ts"])
+        self.assertIsNone(wire["last_trim_ts"])
+        # And the human strings are untouched by this change.
+        self.assertIsNone(wire["last_scrub"])
+        self.assertIsNone(wire["last_trim"])
 
 
 class TestVolumeJson(unittest.TestCase):

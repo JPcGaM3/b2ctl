@@ -1,6 +1,6 @@
 """Unit tests for b2ctl.jsonout — the machine contract's envelope (ADR-007).
 
-b2ctl is driven by an MCP server and a web UI, so these assert the shape a client
+b2ctl is driven by a service on the box that shells out to it and forwards results to a web UI, so these assert the shape a client
 binds to: identical keys whether the command succeeded or failed, a version to
 negotiate on, and errors as data rather than prose on stderr.
 """

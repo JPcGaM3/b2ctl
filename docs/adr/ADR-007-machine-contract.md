@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-07-31
-- **Version:** v0.22.0-itmode (phase 1) · v0.23.0 (phase 2) · v0.25.0 (phase 3)
+- **Version:** v0.22.0 (phase 1) · v0.23.0 (phase 2) · v0.25.0 (phase 3) · v0.26.0 (phase 4)
 - **Relates to:** ADR-006 (controller-scoped confirms — the confirm model this
   ADR will have to express for machine callers, phase 2), ADR-001 (module
   layering), CLAUDE.md §9 (safety rules — unchanged by this ADR, which adds no
@@ -10,7 +10,7 @@
 
 ## Context
 
-b2ctl is being driven by an **MCP server and a web UI** in addition to an
+b2ctl is being driven by **a service running on the box** in addition to an
 operator at a terminal. That makes two demands the tool was never built for:
 every command must be callable by a program, and every value must come back as
 data.
@@ -29,7 +29,7 @@ Where it started:
 - **Every lifecycle verb blocks on a prompt.** `zfs_actions.py` is a thin wrapper
   over `watch._cmd_*`, which has 67 `input()`/`ask()`/`_confirm()` call sites;
   `raid_actions.py` has 25. Only `scrub`/`trim` accept an argument that skips one
-  question. Called from MCP, they hang forever.
+  question. Called by a service, they hang forever.
 
 The third point is a much larger change than the first two, so this release is
 deliberately **read-only** — the machine contract lands first and carries zero
@@ -106,7 +106,7 @@ here; they move behind `common.warn()` in phase 2.
 
 `status` returns everything (`backend`, `disks`, `pools`, `volumes`, `summary`)
 for a single-call client. Alongside it, `disks`, `pools`, `volumes` and `bays`
-each return one slice, so an MCP tool polling pool health does not pay for a full
+each return one slice, so a poller watching pool health does not pay for a full
 SMART scan. All of them reuse the existing `core.scan` / `core.scan_light` /
 `zfs.list_pools` / `backend.raid_volumes` / `core.assemble_storage` /
 `maint.load_events` paths — no new probing was added for the machine contract.
@@ -144,7 +144,7 @@ SMART scan. All of them reuse the existing `core.scan` / `core.scan_light` /
   defect.
 - **Known limits, accepted:**
   - The contract covers **read verbs only**. Mutating verbs still prompt, so an
-    MCP server must not call them until phase 2. They are not hidden or disabled
+    service must not call them until phase 2. They are not hidden or disabled
     — an operator uses them exactly as before.
   - `backend_json()` probes optionally and must never raise or block: a client
     asking what backend is active on a box with no controller gets `null` fields,
@@ -220,7 +220,7 @@ signal existed.
 
 Phases 1 and 2 made the contract hold whenever a command ran to completion. Phase
 3 is about the paths where it does not. **A contract that only holds on the happy
-path is not a contract** — an MCP client cannot branch on an answer it never got.
+path is not a contract** — a client cannot branch on an answer it never got.
 
 ### The envelope is emitted from `main()`, not from each verb
 
@@ -299,6 +299,84 @@ An exit code is only worth reading if the verb is honest about what it did.
 `_cmd_offload` used to return `True` unconditionally after a spare-less offload,
 so `ok:true` was reported on a pool that had just gone DEGRADED and stayed there.
 Machine-callable and truthful are the same requirement, reached from two sides.
+
+## Phase 4 (v0.26.0) — one shape for every command, and the consumer changes
+
+### The consumer changed; the contract did not
+
+The MCP server is **cancelled**. The delivery design is now: **a service runs on
+the b2ctl host, shells out to `b2ctl <verb> --json`, and forwards the envelope to
+a web UI.**
+
+That removes a *consumer*, not the contract — and it raises the bar, because a
+service parsing stdout has no other channel. Every phase-1..3 decision stands;
+the MCP framing is dropped from the prose because it now describes something that
+does not exist.
+
+### `data.log` is presence, not format
+
+Phase 2 gave mutating verbs an envelope by capturing their narration into
+`data.log`. That was the right move at the time — it avoided rewriting several
+hundred `print()` calls — but a service **cannot branch on prose**. Twelve read
+verbs had a real shape; the other twenty-two returned a text blob.
+
+### Harvest the record that already existed
+
+`safety.begin_op`/`end_op` build
+`{op, disk_serial, disk_bay, dev_path, pool, vdev, cmds, status, exit_code,
+rollback_hint, …}` at every mutation site and write it to `ops.jsonl` — where the
+caller never saw it. So `cli._json_mutation` snapshots `safety._PENDING` before
+the verb runs and diffs after, publishing what this command did as `data.ops`
+(projected through `schema.op_json`, an explicit field list — never `vars()`).
+
+**No `print()` was rewritten.** The instrumentation was already there, pointed at
+the wrong audience. Verbs that recorded nothing (`scrub`, `trim`, `create`, the
+aux-vdev family, `locate`, the config writers) gained a `begin_op` pair, which
+also gives them an audit trail and a rollback hint they did not have.
+
+### The uniform shape
+
+```json
+{ "op": "offload", "state": "completed", "changed": true,
+  "target": {"disk": "1:4"},
+  "ops": [ {"op": "offline", "status": "ok", "exit_code": 0,
+            "cmds": [["zpool","offline","tank","/dev/disk/by-id/…"]],
+            "rollback_hint": "zpool online tank …"} ],
+  "log": "…" }
+```
+
+`state` ∈ `completed | started | dry_run | declined`, derived from the **verb**
+(`cli._mutation_state`), never by sniffing the narration for the word "started" —
+prose is not a signal, and this is the field a service branches on. `started`
+means the kernel or firmware is still working: scrub, trim, a self-test, or a
+resilver under `--confirm` (phase 3's `None` state). It carries
+`next: "b2ctl progress --json"`.
+
+`target` echoes what the CALLER named, so a service can correlate a result with
+its own request without re-parsing argv. The RESOLVED identity is in
+`ops[].disk_serial`/`disk_bay` — the two are different questions.
+
+### `snapshot=False`
+
+`begin_op` captures four subprocesses and a file before each op. That is worth it
+before something you might roll back to and pure overhead for one that changes no
+pool state — `locate` is the case that forced the flag, since `status --locate`
+blinks every at-risk disk in a thread pool. The audit line is still written; only
+the capture is skipped.
+
+### Read verbs: add, never rename
+
+Pool `level` is a **redundancy type** while disk `level` is a **health verdict** —
+one key, two meanings, same envelope. `redundancy` now carries the pool value
+under an unambiguous name and is what new clients should read. `level` stays
+because renaming it would bump `schema_version` for a naming preference and break
+the CLI's own renderer.
+
+Likewise `last_scrub`/`last_trim` are human strings ("6h ago") that a service
+cannot sort or age, so `last_scrub_ts`/`last_trim_ts` carry the raw ISO-8601
+alongside — `None` when there is no history, never `""` or `"never"`.
+
+`schema_version` stays **1**: every phase-4 change is additive.
 
 ## Earlier notes (superseded by the sections above)
 

@@ -1,9 +1,12 @@
 """Unit tests for b2ctl.safety — begin_op/end_op JSONL log + snapshot dir."""
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
+
+import b2ctl.safety as safety
 
 
 class TestBeginOp(unittest.TestCase):
@@ -463,3 +466,45 @@ class TestDirModesAndFilePerms(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSnapshotIsOptional(unittest.TestCase):
+    """F-150: begin_op grew a `snapshot=` flag. The pre-op capture is four
+    subprocesses (zpool status / zpool list -v / zfs list / smartctl -a) plus a
+    file — worth it before something you might roll back to, pure overhead for an
+    op that changes no pool state. `locate` is the case that forced it:
+    `status --locate` blinks every at-risk disk in a thread pool."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._old = (safety.LOG_DIR, safety.SNAP_DIR, safety.LOG_FILE)
+        safety.LOG_DIR = self.tmp
+        safety.SNAP_DIR = os.path.join(self.tmp, "snapshots")
+        safety.LOG_FILE = os.path.join(self.tmp, "ops.jsonl")
+
+    def tearDown(self):
+        safety.LOG_DIR, safety.SNAP_DIR, safety.LOG_FILE = self._old
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_snapshot_false_runs_no_subprocess_and_writes_no_file(self):
+        with patch("b2ctl.safety.run_check") as rc:
+            op_id = safety.begin_op("locate", "S1", "1:0", "/dev/sda", "", "",
+                                    [["dd", "if=/dev/sda"]], snapshot=False)
+        rc.assert_not_called()
+        self.assertIsNone(safety._PENDING[op_id]["snapshot_path"])
+
+    def test_the_op_is_still_recorded(self):
+        # Skipping the snapshot must not skip the AUDIT — "why did bay 1:0
+        # blink?" is a real question.
+        op_id = safety.begin_op("locate", "S1", "1:0", "/dev/sda", "", "",
+                                [["dd", "if=/dev/sda"]], snapshot=False)
+        self.assertIn(op_id, safety._PENDING)
+        self.assertEqual(safety._PENDING[op_id]["op"], "locate")
+        self.assertEqual(safety._PENDING[op_id]["cmds"], [["dd", "if=/dev/sda"]])
+
+    def test_default_still_captures(self):
+        # Anti-overcorrection: every existing destructive site relies on this.
+        with patch("b2ctl.safety.run_check", return_value=(True, "out")) as rc:
+            safety.begin_op("replace", "S1", "1:0", "/dev/sda", "tank",
+                            "raidz1-0", [["zpool", "replace"]])
+        rc.assert_called()

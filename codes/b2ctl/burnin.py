@@ -401,7 +401,7 @@ def save_state(records: list) -> None:
     """Best-effort atomic write; a burn-in still runs if state can't be saved.
 
     Uses a per-call unique temp name (`tempfile.mkstemp`) rather than a fixed
-    `.tmp` path — two b2ctl processes (e.g. an MCP server alongside an operator)
+    `.tmp` path — two b2ctl processes (e.g. the web service alongside an operator)
     writing at once used to race on the SAME tmp file, so one process's
     `os.replace` could publish the OTHER's half-written/interleaved content
     (F-145). Still just one atomic `os.replace`; callers serialise the
@@ -428,7 +428,7 @@ def _state_lock():
     """Advisory lock serialising burnin.json's read-modify-write across
     processes (F-145): run_multi / _finish / _cancel_records all do
     `load_state() -> mutate -> save_state()`, and with two b2ctl processes
-    (an MCP server + an operator's own CLI, say) racing that window, the
+    (an on-box service + an operator's own CLI, say) racing that window, the
     second writer's save clobbers the first's — orphaning a detached
     badblocks scan the state file no longer names.
 

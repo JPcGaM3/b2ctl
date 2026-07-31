@@ -1064,7 +1064,7 @@ state was reached. If something looks wrong:
 ## 7.7 Scripting b2ctl — `--json` (v0.22.0)
 
 Every **read** command can return JSON instead of a table, so scripts, a web UI
-or an MCP server can use b2ctl directly. `--json` works before or after the verb:
+or the on-box service can use b2ctl directly. `--json` works before or after the verb:
 
 ```
 b2ctl --json status        # same as

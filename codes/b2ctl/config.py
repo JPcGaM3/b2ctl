@@ -331,7 +331,7 @@ def atomic_write_json(path: str, data, *, mode: int = 0o644) -> None:
     `burnin.save_state` write their own JSON files non-atomically with a
     FIXED tmp name today — this is the shared helper they should switch to.
 
-    Two b2ctl processes writing at once (an MCP server + an operator) used to
+    Two b2ctl processes writing at once (an on-box service + an operator) used to
     race on the SAME fixed '<path>.tmp' name, so one could truncate the
     other's half-written file right before os.replace published the
     interleaved result. `tempfile.mkstemp` gives every writer its own tmp

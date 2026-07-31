@@ -894,7 +894,7 @@ class TestPager(unittest.TestCase):
 class TestJsonEnvelopeEveryReadVerb(unittest.TestCase):
     """v0.22.0 machine contract (ADR-007): every read verb must put ONE JSON
     envelope on stdout and nothing else — a stray print() from anywhere on the
-    read path corrupts the stream for an MCP/web client (F-139). Table-driven
+    read path corrupts the stream for the web service (F-139). Table-driven
     over the whole read surface; `_mock_hardware` stands in for the disks/
     controller so this runs with no real hardware."""
 
@@ -1590,3 +1590,462 @@ class TestConfigInitWritesLikeEveryOtherWriter(unittest.TestCase):
         self.assertEqual(rc, 1)                       # early return intact
         with open(_cfg.CONFIG_PATH) as f:
             self.assertEqual(json.load(f), {"keep": "me"})   # not clobbered
+
+
+# --------------------------------------------------------------------------- #
+# F-150a: aux-vdev / config / locate verbs now record a `safety` op, so a
+# --json caller sees data.ops instead of only human prose in data.log.
+# --------------------------------------------------------------------------- #
+class _AuditedMutationTestCase(unittest.TestCase):
+    """Shared harness for the F-150a sites: redirect safety's audit trail to a
+    tmpdir (never touch /var/log/b2ctl) and skip the real pre-op snapshot
+    (`_capture_snapshot` shells out to zpool/smartctl), so these tests run
+    without hardware or root. Mirrors tests/test_safety.py's own idiom."""
+
+    def setUp(self):
+        import b2ctl.safety as safety
+        self.tmp = tempfile.mkdtemp()
+        self._old_log_dir = safety.LOG_DIR
+        self._old_snap_dir = safety.SNAP_DIR
+        self._old_log_file = safety.LOG_FILE
+        safety.LOG_DIR = self.tmp
+        safety.SNAP_DIR = os.path.join(self.tmp, "snapshots")
+        safety.LOG_FILE = os.path.join(self.tmp, "ops.jsonl")
+        self._snap_patch = patch.object(safety, "_capture_snapshot", return_value=None)
+        self._snap_patch.start()
+
+    def tearDown(self):
+        import b2ctl.safety as safety
+        import b2ctl.watch as watch
+        self._snap_patch.stop()
+        safety.LOG_DIR = self._old_log_dir
+        safety.SNAP_DIR = self._old_snap_dir
+        safety.LOG_FILE = self._old_log_file
+        watch._DRY_RUN = False
+        common.set_dry_run(False)
+        common.set_json_mode(False)
+        common.set_auto_confirm(None)
+        common.take_warnings()
+
+    def _run_json(self, argv):
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            rc = cli_mod.main(argv)
+        return rc, json.loads(buf.getvalue())
+
+
+def _zpool_tool() -> str:
+    from b2ctl import config as _cfg
+    return _cfg.tool("zpool")
+
+
+class TestCacheAddOpAudit(_AuditedMutationTestCase):
+    def _disk(self):
+        return common.Disk(dev="/dev/sde", by_id="/dev/disk/by-id/wwn-0xAAA", serial="S1")
+
+    def test_success_records_op_with_matching_cmds_and_clean_log(self):
+        with patch("os.geteuid", return_value=0), \
+             patch("b2ctl.core.scan_light", return_value=[self._disk()]), \
+             patch("b2ctl.zfs.add_cache", return_value=(True, "added")) as add_mock:
+            rc, out = self._run_json(
+                ["cache-add", "tank", "S1", "--json", "--confirm", "yes"])
+        self.assertEqual(rc, 0)
+        self.assertIs(out["ok"], True)
+        data = out["data"]
+        self.assertEqual(data["state"], "completed")
+        self.assertIs(data["changed"], True)
+        self.assertEqual(len(data["ops"]), 1)
+        op = data["ops"][0]
+        self.assertEqual(op["op"], "cache_add")
+        self.assertEqual(op["status"], "ok")
+        self.assertEqual(op["cmds"], [[_zpool_tool(), "add", "-f", "tank", "cache",
+                                       "/dev/disk/by-id/wwn-0xAAA"]])
+        add_mock.assert_called_once_with(
+            "tank", ["/dev/disk/by-id/wwn-0xAAA"], dry_run=False)
+        self.assertIn("L2ARC cache added", data["log"])
+        self.assertNotIn("\x1b[", data["log"])
+
+    def test_declined_confirm_is_declined_state(self):
+        with patch("os.geteuid", return_value=0), \
+             patch("b2ctl.core.scan_light", return_value=[self._disk()]), \
+             patch("b2ctl.cli._confirm_pool_op", return_value=False), \
+             patch("b2ctl.zfs.add_cache") as add_mock:
+            rc, out = self._run_json(["cache-add", "tank", "S1", "--json"])
+        self.assertEqual(rc, 1)
+        self.assertIs(out["ok"], False)
+        data = out["data"]
+        self.assertEqual(data["state"], "declined")
+        self.assertIs(data["changed"], False)
+        self.assertEqual(data["ops"], [])
+        add_mock.assert_not_called()
+
+    def test_dry_run_json_previews_and_executes_nothing(self):
+        with patch("os.geteuid", return_value=0), \
+             patch("b2ctl.core.scan_light", return_value=[self._disk()]), \
+             patch("subprocess.run") as run_mock:
+            rc, out = self._run_json(
+                ["--dry-run", "cache-add", "tank", "S1", "--json"])
+        self.assertEqual(rc, 0)
+        self.assertIs(out["ok"], True)
+        data = out["data"]
+        self.assertEqual(data["state"], "dry_run")
+        self.assertIs(data["changed"], False)
+        run_mock.assert_not_called()          # WRITE_CMDS gate: no real zpool ran
+        self.assertEqual(len(data["ops"]), 1)
+        self.assertEqual(data["ops"][0]["status"], "dry_run")
+
+
+class TestCacheRmOpAudit(_AuditedMutationTestCase):
+    def _disk(self):
+        return common.Disk(dev="/dev/sde", by_id="/dev/disk/by-id/wwn-0xAAA", serial="S1")
+
+    def test_success_records_op_with_matching_cmds(self):
+        with patch("os.geteuid", return_value=0), \
+             patch("b2ctl.core.scan_light", return_value=[self._disk()]), \
+             patch("b2ctl.zfs.remove_vdev", return_value=(True, "removed")) as rm_mock:
+            rc, out = self._run_json(
+                ["cache-rm", "tank", "S1", "--json", "--confirm", "yes"])
+        self.assertEqual(rc, 0)
+        data = out["data"]
+        self.assertIs(data["changed"], True)
+        op = data["ops"][0]
+        self.assertEqual(op["op"], "cache_rm")
+        self.assertEqual(op["cmds"], [[_zpool_tool(), "remove", "tank",
+                                       "/dev/disk/by-id/wwn-0xAAA"]])
+        rm_mock.assert_called_once_with(
+            "tank", "/dev/disk/by-id/wwn-0xAAA", dry_run=False)
+        self.assertNotIn("\x1b[", data["log"])
+
+    def test_declined_confirm_is_declined_state(self):
+        with patch("os.geteuid", return_value=0), \
+             patch("b2ctl.core.scan_light", return_value=[self._disk()]), \
+             patch("b2ctl.cli._confirm_pool_op", return_value=False), \
+             patch("b2ctl.zfs.remove_vdev") as rm_mock:
+            rc, out = self._run_json(["cache-rm", "tank", "S1", "--json"])
+        self.assertEqual(rc, 1)
+        data = out["data"]
+        self.assertEqual(data["state"], "declined")
+        self.assertIs(data["changed"], False)
+        self.assertEqual(data["ops"], [])
+        rm_mock.assert_not_called()
+
+    def test_dry_run_json_executes_nothing(self):
+        with patch("os.geteuid", return_value=0), \
+             patch("b2ctl.core.scan_light", return_value=[self._disk()]), \
+             patch("subprocess.run") as run_mock:
+            rc, out = self._run_json(
+                ["--dry-run", "cache-rm", "tank", "S1", "--json"])
+        data = out["data"]
+        self.assertEqual(data["state"], "dry_run")
+        self.assertIs(data["changed"], False)
+        run_mock.assert_not_called()
+
+
+class TestLogAddOpAudit(_AuditedMutationTestCase):
+    def _disk(self, suffix="AAA", dev="/dev/sde", serial="S1"):
+        return common.Disk(dev=dev, by_id=f"/dev/disk/by-id/wwn-0x{suffix}", serial=serial)
+
+    def test_single_dev_success_records_op(self):
+        with patch("os.geteuid", return_value=0), \
+             patch("b2ctl.core.scan_light", return_value=[self._disk()]), \
+             patch("b2ctl.zfs.add_log", return_value=(True, "added")) as add_mock:
+            rc, out = self._run_json(
+                ["log-add", "tank", "S1", "--json", "--confirm", "yes"])
+        self.assertEqual(rc, 0)
+        data = out["data"]
+        self.assertIs(data["changed"], True)
+        op = data["ops"][0]
+        self.assertEqual(op["op"], "log_add")
+        self.assertEqual(op["cmds"], [[_zpool_tool(), "add", "-f", "tank", "log",
+                                       "/dev/disk/by-id/wwn-0xAAA"]])
+        add_mock.assert_called_once_with(
+            "tank", ["/dev/disk/by-id/wwn-0xAAA"], raid_type=None, dry_run=False)
+
+    def test_two_devs_auto_mirror_cmds_match(self):
+        disks = [self._disk("AAA", "/dev/sde", "S1"), self._disk("BBB", "/dev/sdf", "S2")]
+        with patch("os.geteuid", return_value=0), \
+             patch("b2ctl.core.scan_light", return_value=disks), \
+             patch("b2ctl.zfs.add_log", return_value=(True, "added")):
+            rc, out = self._run_json(
+                ["log-add", "tank", "S1", "S2", "--json", "--confirm", "yes"])
+        self.assertEqual(rc, 0)
+        op = out["data"]["ops"][0]
+        self.assertEqual(op["cmds"], [[_zpool_tool(), "add", "-f", "tank", "log", "mirror",
+                                       "/dev/disk/by-id/wwn-0xAAA",
+                                       "/dev/disk/by-id/wwn-0xBBB"]])
+
+    def test_declined_confirm_is_declined_state(self):
+        with patch("os.geteuid", return_value=0), \
+             patch("b2ctl.core.scan_light", return_value=[self._disk()]), \
+             patch("b2ctl.cli._confirm_pool_op", return_value=False), \
+             patch("b2ctl.zfs.add_log") as add_mock:
+            rc, out = self._run_json(["log-add", "tank", "S1", "--json"])
+        self.assertEqual(rc, 1)
+        data = out["data"]
+        self.assertEqual(data["state"], "declined")
+        self.assertIs(data["changed"], False)
+        add_mock.assert_not_called()
+
+    def test_dry_run_json_executes_nothing(self):
+        with patch("os.geteuid", return_value=0), \
+             patch("b2ctl.core.scan_light", return_value=[self._disk()]), \
+             patch("subprocess.run") as run_mock:
+            rc, out = self._run_json(
+                ["--dry-run", "log-add", "tank", "S1", "--json"])
+        data = out["data"]
+        self.assertEqual(data["state"], "dry_run")
+        self.assertIs(data["changed"], False)
+        run_mock.assert_not_called()
+
+
+class TestLogRmOpAudit(_AuditedMutationTestCase):
+    def _disk(self):
+        return common.Disk(dev="/dev/sde", by_id="/dev/disk/by-id/wwn-0xAAA", serial="S1")
+
+    def test_success_records_op_with_matching_cmds(self):
+        with patch("os.geteuid", return_value=0), \
+             patch("b2ctl.core.scan_light", return_value=[self._disk()]), \
+             patch("b2ctl.zfs.remove_vdev", return_value=(True, "removed")) as rm_mock:
+            rc, out = self._run_json(
+                ["log-rm", "tank", "S1", "--json", "--confirm", "yes"])
+        self.assertEqual(rc, 0)
+        data = out["data"]
+        self.assertIs(data["changed"], True)
+        op = data["ops"][0]
+        self.assertEqual(op["op"], "log_rm")
+        self.assertEqual(op["cmds"], [[_zpool_tool(), "remove", "tank",
+                                       "/dev/disk/by-id/wwn-0xAAA"]])
+        rm_mock.assert_called_once_with(
+            "tank", "/dev/disk/by-id/wwn-0xAAA", dry_run=False)
+
+    def test_declined_confirm_is_declined_state(self):
+        with patch("os.geteuid", return_value=0), \
+             patch("b2ctl.core.scan_light", return_value=[self._disk()]), \
+             patch("b2ctl.cli._confirm_pool_op", return_value=False), \
+             patch("b2ctl.zfs.remove_vdev") as rm_mock:
+            rc, out = self._run_json(["log-rm", "tank", "S1", "--json"])
+        self.assertEqual(rc, 1)
+        self.assertEqual(out["data"]["state"], "declined")
+        self.assertIs(out["data"]["changed"], False)
+        rm_mock.assert_not_called()
+
+    def test_dry_run_json_executes_nothing(self):
+        with patch("os.geteuid", return_value=0), \
+             patch("b2ctl.core.scan_light", return_value=[self._disk()]), \
+             patch("subprocess.run") as run_mock:
+            rc, out = self._run_json(
+                ["--dry-run", "log-rm", "tank", "S1", "--json"])
+        self.assertEqual(out["data"]["state"], "dry_run")
+        run_mock.assert_not_called()
+
+
+class TestCacheLogReplaceAlreadyAudited(_AuditedMutationTestCase):
+    """cache-replace/log-replace were already wired through watch._repair_aux's
+    'aux-repair' begin_op/end_op before this task — this just closes the loop
+    and proves --json surfaces that existing op (no cli.py change needed here)."""
+
+    def _leaf(self, klass):
+        return {"token": "/dev/disk/by-id/old", "klass": klass, "degraded": True,
+                "state": "FAULTED", "vdev": klass, "mirror_leg": False}
+
+    def test_cache_replace_surfaces_aux_repair_op(self):
+        with patch("os.geteuid", return_value=0), \
+             patch("b2ctl.cli._resolve_devs",
+                   side_effect=lambda toks, strict=False:
+                       ["/dev/disk/by-id/new"] if strict else ["old"]), \
+             patch("b2ctl.zfs.aux_leaves", return_value=[self._leaf("cache")]), \
+             patch("b2ctl.watch._confirm", return_value=True), \
+             patch("b2ctl.watch.run_check", return_value=(True, "ok")):
+            rc, out = self._run_json(
+                ["cache-replace", "tank", "old", "new", "--json", "--confirm", "yes"])
+        self.assertEqual(rc, 0)
+        data = out["data"]
+        self.assertIs(data["changed"], True)
+        self.assertEqual(len(data["ops"]), 1)
+        self.assertEqual(data["ops"][0]["op"], "aux-repair")
+
+    def test_log_replace_surfaces_aux_repair_op(self):
+        with patch("os.geteuid", return_value=0), \
+             patch("b2ctl.cli._resolve_devs",
+                   side_effect=lambda toks, strict=False:
+                       ["/dev/disk/by-id/new"] if strict else ["old"]), \
+             patch("b2ctl.zfs.aux_leaves", return_value=[self._leaf("log")]), \
+             patch("b2ctl.watch._confirm", return_value=True), \
+             patch("b2ctl.watch.run_check", return_value=(True, "ok")):
+            rc, out = self._run_json(
+                ["log-replace", "tank", "old", "new", "--json", "--confirm", "yes"])
+        self.assertEqual(rc, 0)
+        data = out["data"]
+        self.assertIs(data["changed"], True)
+        self.assertEqual(data["ops"][0]["op"], "aux-repair")
+
+
+class TestConfigInitOpAudit(_AuditedMutationTestCase):
+    def setUp(self):
+        super().setUp()
+        import b2ctl.config as _cfg
+        self._old_config_path = _cfg.CONFIG_PATH
+        _cfg.CONFIG_PATH = os.path.join(self.tmp, "etc", "config.json")
+        _cfg._cache = None
+
+    def tearDown(self):
+        import b2ctl.config as _cfg
+        _cfg.CONFIG_PATH = self._old_config_path
+        _cfg._cache = None
+        super().tearDown()
+
+    def test_success_records_op_and_clean_log(self):
+        import b2ctl.config as _cfg
+        rc, out = self._run_json(["config", "init", "--json"])
+        self.assertEqual(rc, 0)
+        data = out["data"]
+        self.assertEqual(data["state"], "completed")
+        self.assertIs(data["changed"], True)
+        self.assertEqual(len(data["ops"]), 1)
+        op = data["ops"][0]
+        self.assertEqual(op["op"], "config_init")
+        self.assertEqual(op["cmds"], [["b2ctl", "config", "init"]])
+        self.assertEqual(op["status"], "ok")
+        self.assertTrue(os.path.exists(_cfg.CONFIG_PATH))
+        self.assertNotIn("\x1b[", data["log"])
+
+    def test_already_exists_is_declined_with_no_op(self):
+        import b2ctl.config as _cfg
+        os.makedirs(os.path.dirname(_cfg.CONFIG_PATH), exist_ok=True)
+        with open(_cfg.CONFIG_PATH, "w") as f:
+            f.write("{}")
+        rc, out = self._run_json(["config", "init", "--json"])
+        self.assertEqual(rc, 1)
+        data = out["data"]
+        self.assertEqual(data["state"], "declined")
+        self.assertIs(data["changed"], False)
+        self.assertEqual(data["ops"], [])
+
+    def test_dry_run_writes_nothing(self):
+        import b2ctl.config as _cfg
+        rc, out = self._run_json(["--dry-run", "config", "init", "--json"])
+        self.assertEqual(rc, 0)
+        data = out["data"]
+        self.assertEqual(data["state"], "dry_run")
+        self.assertIs(data["changed"], False)
+        self.assertFalse(os.path.exists(_cfg.CONFIG_PATH))
+        self.assertEqual(data["ops"][0]["status"], "dry_run")
+
+    def test_write_failure_is_recorded_as_failed_op_not_skipped(self):
+        import b2ctl.config as _cfg
+        with patch.object(_cfg, "atomic_write_json",
+                          side_effect=OSError("permission denied")):
+            rc, out = self._run_json(["config", "init", "--json"])
+        self.assertEqual(rc, 1)
+        data = out["data"]
+        self.assertEqual(data["state"], "declined")
+        self.assertEqual(len(data["ops"]), 1)
+        self.assertEqual(data["ops"][0]["status"], "fail")
+
+
+class TestUpdateOpAudit(_AuditedMutationTestCase):
+    def _managed(self):
+        dest_bay = os.path.join(self.tmp, "bay_map.json")
+        dest_spec = os.path.join(self.tmp, "ssd_spec.json")
+        return [("bay_map.json", dest_bay, "bay_map_path"),
+                ("ssd_spec.json", dest_spec, "ssd_spec_path")]
+
+    def test_success_records_config_update_op(self):
+        import b2ctl.cli as cli
+        import b2ctl.config as cfg_mod
+        cfg_path = os.path.join(self.tmp, "config.json")
+        with patch.object(cli, "_MANAGED", self._managed()), \
+             patch.object(cfg_mod, "CONFIG_PATH", cfg_path), \
+             patch.object(cfg_mod, "STD_DIR", self.tmp), \
+             patch("b2ctl.config.validate", return_value=[]), \
+             patch("os.geteuid", return_value=0):
+            rc, out = self._run_json(["update", "--json"])
+        self.assertEqual(rc, 0)
+        data = out["data"]
+        self.assertEqual(data["state"], "completed")
+        self.assertIs(data["changed"], True)
+        self.assertEqual(len(data["ops"]), 1)
+        op = data["ops"][0]
+        self.assertEqual(op["op"], "config_update")
+        self.assertEqual(op["cmds"][-1], ["b2ctl", "update"])
+        self.assertTrue(os.path.exists(cfg_path))
+        self.assertNotIn("\x1b[", data["log"])
+
+    def test_dry_run_writes_nothing(self):
+        import b2ctl.cli as cli
+        import b2ctl.config as cfg_mod
+        cfg_path = os.path.join(self.tmp, "config.json")
+        with patch.object(cli, "_MANAGED", self._managed()), \
+             patch.object(cfg_mod, "CONFIG_PATH", cfg_path), \
+             patch.object(cfg_mod, "STD_DIR", self.tmp), \
+             patch("b2ctl.config.validate", return_value=[]), \
+             patch("os.geteuid", return_value=0):
+            rc, out = self._run_json(["--dry-run", "update", "--json"])
+        self.assertEqual(rc, 0)
+        data = out["data"]
+        self.assertEqual(data["state"], "dry_run")
+        self.assertIs(data["changed"], False)
+        self.assertFalse(os.path.exists(cfg_path))
+        for _, dest, _ in self._managed():
+            self.assertFalse(os.path.exists(dest))
+
+    def test_write_failure_is_recorded_as_failed_op(self):
+        import b2ctl.cli as cli
+        import b2ctl.config as cfg_mod
+        cfg_path = os.path.join(self.tmp, "config.json")
+        with patch.object(cli, "_MANAGED", self._managed()), \
+             patch.object(cfg_mod, "CONFIG_PATH", cfg_path), \
+             patch.object(cfg_mod, "STD_DIR", self.tmp), \
+             patch("b2ctl.config.validate", return_value=[]), \
+             patch("os.geteuid", return_value=0), \
+             patch.object(cfg_mod, "atomic_write_json",
+                          side_effect=OSError("read-only filesystem")):
+            rc, out = self._run_json(["update", "--json"])
+        self.assertEqual(rc, 1)
+        data = out["data"]
+        self.assertEqual(data["state"], "declined")
+        self.assertEqual(len(data["ops"]), 1)
+        self.assertEqual(data["ops"][0]["status"], "fail")
+
+
+class TestLocateOpAudit(_AuditedMutationTestCase):
+    def _disk(self):
+        return common.Disk(dev="/dev/sde", serial="S1")
+
+    def test_success_records_op_matching_the_observed_method(self):
+        with patch("os.geteuid", return_value=0), \
+             patch("b2ctl.core.scan_light", return_value=[self._disk()]), \
+             patch("b2ctl.locate.blink_disk", return_value=(True, "dd")):
+            rc, out = self._run_json(["locate", "S1", "3", "--json"])
+        self.assertEqual(rc, 0)
+        data = out["data"]
+        self.assertIs(data["changed"], True)
+        self.assertEqual(len(data["ops"]), 1)
+        op = data["ops"][0]
+        self.assertEqual(op["op"], "locate")
+        from b2ctl import config as _cfg
+        self.assertEqual(op["cmds"], [[_cfg.tool("dd"), "if=/dev/sde",
+                                       "of=/dev/null", "bs=1M", "iflag=direct"]])
+        self.assertNotIn("\x1b[", data["log"])
+
+    def test_resilvering_refusal_is_declined_with_no_op(self):
+        with patch("os.geteuid", return_value=0), \
+             patch("b2ctl.core.scan_light", return_value=[self._disk()]), \
+             patch("b2ctl.locate.blink_disk", return_value=(False, "resilvering")):
+            rc, out = self._run_json(["locate", "S1", "3", "--json"])
+        self.assertEqual(rc, 1)
+        data = out["data"]
+        self.assertEqual(data["state"], "declined")
+        self.assertEqual(data["ops"], [])
+
+    def test_dry_run_json_never_calls_blink_disk(self):
+        with patch("os.geteuid", return_value=0), \
+             patch("b2ctl.core.scan_light", return_value=[self._disk()]), \
+             patch("b2ctl.locate.blink_disk") as blink_mock:
+            rc, out = self._run_json(["--dry-run", "locate", "S1", "3", "--json"])
+        self.assertEqual(rc, 0)
+        data = out["data"]
+        self.assertEqual(data["state"], "dry_run")
+        self.assertIs(data["changed"], False)
+        blink_mock.assert_not_called()
+        self.assertEqual(data["ops"][0]["status"], "dry_run")

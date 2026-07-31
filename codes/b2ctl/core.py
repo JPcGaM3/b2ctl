@@ -20,7 +20,7 @@ def _attach_membership(disks: list[Disk]) -> None:
     the codebase already routes through Disk.is_poolable, so clearing pool_known
     here makes watch's [a]ssign / [c]reate / aux-vdev menus refuse without any of
     them growing a check of their own (F-143). warn() is the JSON-mode collector,
-    so an MCP/web client gets the same sentence in warnings[] rather than a
+    so the web service gets the same sentence in warnings[] rather than a
     confidently empty disk list.
     """
     try:
@@ -197,13 +197,19 @@ def assemble_storage(disks: list[Disk], pools: list[dict],
 
 
 def pool_maint(name: str) -> dict:
-    """Per-pool scrub/trim display strings for the maintenance columns.
+    """Per-pool scrub/trim display strings + raw timestamps for the
+    maintenance columns.
 
     PURE READ (CLAUDE.md §9): last scrub is read LIVE from `zpool status`
     (`zfs.last_scrub_date`), falling back to the maint.jsonl history; last trim
     comes only from maint.jsonl (ZFS exposes no live last-trim date). Never
     writes — reconciling background scrubs into history happens only in watch's
-    refresh and the `maint --log` view, never on the read path."""
+    refresh and the `maint --log` view, never on the read path.
+
+    `last_scrub_ts`/`last_trim_ts` (F-150c) carry the raw ISO-8601 string
+    `rel_time()` was given (or None when there is no history) so a machine
+    client can sort/compare/age without parsing the human `"6h ago"` prose;
+    the human strings stay as-is for the table renderer."""
     from . import maint
     scrub_iso = zfs.last_scrub_date(name)
     if not scrub_iso:
@@ -212,7 +218,9 @@ def pool_maint(name: str) -> dict:
     tev = maint.last_event("trim", name)
     trim_iso = tev.get("ts") if tev else None
     return {"last_scrub": maint.rel_time(scrub_iso) if scrub_iso else "",
-            "last_trim": maint.rel_time(trim_iso) if trim_iso else ""}
+            "last_trim": maint.rel_time(trim_iso) if trim_iso else "",
+            "last_scrub_ts": scrub_iso or None,
+            "last_trim_ts": trim_iso or None}
 
 
 def scan_one(dev: str, tbw_table=None, *, serial: str = "") -> Disk:

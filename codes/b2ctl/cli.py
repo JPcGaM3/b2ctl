@@ -222,7 +222,7 @@ def _bays_payload() -> dict:
 def _bays(args) -> int:
     """`b2ctl bays` — inspect and fix front-panel bay labelling.
 
-    Read is side-effect-free (§9). The write forms exist so a web UI / MCP server
+    Read is side-effect-free (§9). The write forms exist so a web UI / on-box service
     can fix numbering without hand-editing bay_map.json, which is what an
     operator had to do before (F-140).
     """
@@ -358,7 +358,7 @@ def _bays_calibrate(as_json: bool) -> int:
 def _progress(args) -> int:
     """`b2ctl progress` — what is running right now, without blocking on it.
 
-    A scrub takes hours and a resilver longer; an MCP/web caller cannot hold a
+    A scrub takes hours and a resilver longer; an web-service caller cannot hold a
     request open for that. Everything here is a PURE READ of state the kernel and
     the controller already publish, so polling is cheap and side-effect-free (§9).
     """
@@ -476,40 +476,157 @@ def _mutation_precheck(args):
     return None
 
 
+def _mutation_target(args) -> dict | None:
+    """The thing this command was pointed at, as the caller named it.
+
+    Echoed back so a service can correlate a result with the request it made
+    without re-parsing its own argv (F-150). Only what the caller supplied — the
+    resolved identity lives in `ops[].disk_serial`/`disk_bay`.
+    """
+    out = {}
+    for key in ("pool", "disk", "target", "devs", "dev", "vd", "op_id",
+                "disks", "name", "type"):
+        val = getattr(args, key, None)
+        if val not in (None, "", [], False):
+            out[key] = val
+    return out or None
+
+
+# Verbs whose work OUTLIVES the process: the kernel/firmware keeps going after
+# b2ctl returns, so the honest answer is "started", not "completed" (ADR-007's
+# long-running-operations rule). Derived from the VERB, never by sniffing the
+# narration for the word "started" — prose is not a signal, and this is the field
+# a service branches on.
+_ASYNC_VERBS = {"scrub", "trim", "health"}
+# ...and these start a resilver. Interactively b2ctl watches it to completion, so
+# the result really is "completed"; non-interactively `watch._wait_resilver`
+# returns its third state and the resilver is still running (F-146).
+_RESILVER_VERBS = {"offload", "replace", "swap", "demote",
+                   "cache-replace", "log-replace"}
+
+
+def _mutation_state(args, cmd: str, rc: int) -> str:
+    """completed | started | dry_run | declined — what actually happened."""
+    if common.is_dry_run():
+        return "dry_run"
+    if rc != 0:
+        return "declined"
+    verb = getattr(args, "maint_cmd", None) if cmd == "maint" else cmd
+    if verb in _ASYNC_VERBS:
+        return "started"
+    if verb in _RESILVER_VERBS and common.is_non_interactive():
+        return "started"
+    return "completed"
+
+
 def _json_mutation(args) -> int:
-    """Run a MUTATING verb under --json and wrap whatever it printed.
+    """Run a MUTATING verb under --json and return a STRUCTURED result.
 
     Read verbs build their own envelope. Mutating ones narrate as they work —
     confirm boxes, resilver bars, per-step results — all to stdout, which would
-    shred the envelope. Capturing it here and returning it as `data.log` keeps
-    that narration available to a web UI without rewriting several hundred
-    print() calls across watch/raid_actions/safety (ADR-007 phase 2).
+    shred the envelope, so that narration is captured into `data.log`
+    (ADR-007 phase 2).
+
+    A log is presence, not format: a service driving b2ctl cannot branch on
+    prose. But the structured record already exists — `safety.begin_op`/`end_op`
+    build `{op, disk_serial, disk_bay, pool, vdev, cmds, status, exit_code,
+    rollback_hint, …}` at 15 call sites and write it to ops.jsonl, where the
+    caller never sees it. So HARVEST it rather than re-instrumenting: snapshot
+    the pending-op keys before the call, diff after, and publish what this
+    command did as `data.ops` (F-150, ADR-007 phase 4).
+
+    `state` names what the exit code could only imply:
+      completed — it ran and finished
+      started   — a long op (resilver/scrub/trim/self-test) is now running;
+                  poll `b2ctl progress`
+      dry_run   — --dry-run preview, nothing changed
+      declined  — a confirm said no, or a guard refused
     """
     import contextlib
     import io
-    from . import jsonout
+    from . import jsonout, safety, schema
     precheck_rc = _mutation_precheck(args)
     if precheck_rc is not None:
         return precheck_rc
+
+    before = set(safety._PENDING)
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         rc = args.func(args)
+
     cmd = getattr(args, "cmd", "?")
-    log = buf.getvalue()
+    log = common.strip_ansi(buf.getvalue())
+    ops = [schema.op_json(safety._PENDING[k]) for k in safety._PENDING
+           if k not in before]
+    # Insertion order is chronological (begin_op appends), so this is the order
+    # the operations actually ran in.
+    changed = any(o.get("status") == "ok" for o in ops)
+    state = _mutation_state(args, cmd, rc)
+
+    data = {"op": cmd, "state": state, "changed": changed,
+            "target": _mutation_target(args), "ops": ops, "log": log}
+    if state == "started":
+        data["next"] = "b2ctl progress --json"
     if rc == 0:
-        return jsonout.emit(cmd, {"log": log})
+        return jsonout.emit(cmd, data)
     # A non-zero rc here means the operation failed OR was declined at a confirm;
-    # both are "did not happen", and the log says which.
+    # both are "did not happen", and ops[]/log say which.
     return jsonout.fail(cmd, jsonout.ERR_OP_FAILED,
-                        "the command did not complete — see data.log",
-                        data={"log": log})
+                        "the command did not complete — see data.ops and data.log",
+                        data=data)
 
 
 def _watch(_args) -> int:
     return watch.run()
 
 
+def _predict_locate_cmds(d) -> list[list[str]]:
+    """Best-guess preview of what `locate.blink_disk` would run, for the
+    --dry-run audit record only (F-150a) — mirrors its backend selection
+    (perccli PD > ledctl > dd) without duplicating its internal on-failure
+    fallback (never executed, since dry-run stops here)."""
+    import shutil
+    if locatemod.is_perc_pd(d):
+        from . import hba_raid
+        cs = getattr(d, "ctrl_slot", "") or d.bay
+        ctrl = getattr(d, "ctrl", None)
+        ctrl = ctrl if ctrl is not None else hba_raid.CONTROLLER
+        pd = hba_raid._pd(cs, ctrl)
+        return [hba_raid.build_cmd(pd, "start", "locate"),
+                hba_raid.build_cmd(pd, "stop", "locate")]
+    if shutil.which(_cfg_mod.tool("ledctl")):
+        return [[_cfg_mod.tool("ledctl"), f"locate={d.dev}"],
+                [_cfg_mod.tool("ledctl"), f"locate_off={d.dev}"]]
+    return [[_cfg_mod.tool("dd"), f"if={d.dev}", "of=/dev/null", "bs=1M", "iflag=direct"]]
+
+
+def _locate_cmds_for_method(d, method: str, ok: bool) -> list[list[str]]:
+    """The argv `locate.blink_disk` actually ran, reconstructed from the
+    (ok, method) it returns (F-089/F-150a): perccli/ledctl always toggle ON
+    first, then OFF only if ON succeeded (`blink_disk`/`blink` never call the
+    OFF toggle otherwise). 'dd' covers BOTH 'no ledctl installed' and 'ledctl
+    present but failed to drive this device' — the latter's failed ledctl
+    attempt is not separately recorded here, since `locate.py` (not owned by
+    this change) swallows which branch it took beyond the returned method
+    string; flagged as a known gap rather than guessed at."""
+    if method == "perccli":
+        from . import hba_raid
+        cs = getattr(d, "ctrl_slot", "") or d.bay
+        ctrl = getattr(d, "ctrl", None)
+        ctrl = ctrl if ctrl is not None else hba_raid.CONTROLLER
+        pd = hba_raid._pd(cs, ctrl)
+        cmds = [hba_raid.build_cmd(pd, "start", "locate")]
+        if ok:
+            cmds.append(hba_raid.build_cmd(pd, "stop", "locate"))
+        return cmds
+    if method == "ledctl":
+        return [[_cfg_mod.tool("ledctl"), f"locate={d.dev}"],
+                [_cfg_mod.tool("ledctl"), f"locate_off={d.dev}"]]
+    return [[_cfg_mod.tool("dd"), f"if={d.dev}", "of=/dev/null", "bs=1M", "iflag=direct"]]
+
+
 def _locate(args) -> int:
+    from . import safety
     disks = core.scan_light()       # locate only needs identity + topology (F-102)
     d = next((x for x in disks if args.target in
               (x.bay, x.serial, x.dev, x.dev.replace("/dev/", ""))), None)
@@ -520,12 +637,38 @@ def _locate(args) -> int:
         print(f"{R}[-] cannot locate a GHOST disk (OS rejected it, no /dev node){N}")
         return 1
     where = f"bay {d.bay}" if locatemod.is_perc_pd(d) else d.dev
+    # locate has no confirm gate (a timed LED blink is non-destructive by design,
+    # §9) and no meaningful rollback (safety._ROLLBACK has no 'locate' entry, so
+    # _build_rollback_hint naturally returns None) — recorded anyway, because
+    # "why did bay X:Y just blink?" is a real question for whoever runs `b2ctl
+    # log` afterwards (F-150a).
+    if watch._DRY_RUN:
+        if locatemod.is_resilvering(d):
+            print(f"{R}[-] refuse: '{args.target}' is resilvering/rebuilding — never pull "
+                  f"a disk mid-resilver (CLAUDE.md §9){N}")
+            return 1
+        cmds = _predict_locate_cmds(d)
+        op_id = safety.begin_op("locate", d.serial or "", d.bay, d.dev, "", "",
+                                cmds, dry_run=True)
+        safety.end_op(op_id, True, "[DRY-RUN] preview", "", 0, dry_run=True)
+        print(f"{Y}[DRY-RUN] would blink {where} for {args.seconds}s{N}")
+        return 0
     print(f"{Y}[*] blinking {where} for {args.seconds}s ...{N}")
     ok, method = locatemod.blink_disk(d, args.seconds)
     if method == "resilvering":
         print(f"{R}[-] refuse: '{args.target}' is resilvering/rebuilding — never pull "
               f"a disk mid-resilver (CLAUDE.md §9){N}")
         return 1
+    cmds = _locate_cmds_for_method(d, method, ok)
+    # snapshot=False: an LED blink changes no pool state, so a pre-op capture
+    # (4 subprocesses + a file) is pure overhead — and `status --locate` blinks
+    # every at-risk disk in a thread pool, multiplying it (F-150).
+    op_id = safety.begin_op("locate", d.serial or "", d.bay, d.dev, "", "", cmds,
+                            dry_run=False, snapshot=False)
+    if ok:
+        safety.end_op(op_id, True, f"method={method}", "", 0, dry_run=False)
+    else:
+        safety.end_op(op_id, False, "", f"method={method} failed", 1, dry_run=False)
     print((G + f"[+] done (via {method})" if ok else R + "[-] failed") + N)
     return 0 if ok else 1
 
@@ -695,8 +838,18 @@ def _partition_devs(devs, size):
     return out
 
 
+def _end_op_from_result(safety, op_id: str, ok: bool, out: str, *, dry_run: bool) -> None:
+    """Shared `end_op` idiom used by every two-outcome aux-vdev site below:
+    success puts the tool's own output in stdout, failure puts it in stderr —
+    matching how watch.py's swap/replace/aux-repair sites already split it."""
+    if ok:
+        safety.end_op(op_id, True, out, "", 0, dry_run=dry_run)
+    else:
+        safety.end_op(op_id, False, "", out, 1, dry_run=dry_run)
+
+
 def _cache_add(args) -> int:
-    from . import zfs
+    from . import zfs, safety
     devs = _resolve_devs(args.devs, strict=True)
     if devs is None:
         return 1
@@ -706,23 +859,33 @@ def _cache_add(args) -> int:
             return 1
     if not _confirm_pool_op("add L2ARC cache", args.pool, devs):
         print(f"{Y}[-] cancelled{N}"); return 1
+    # cmds mirrors zfs.add_cache's own argv exactly (F-089/F-150a) — not called
+    # through it, since add_cache only returns (ok, out).
+    cmds = [[_cfg_mod.tool("zpool"), "add", "-f", args.pool, "cache", *devs]]
+    op_id = safety.begin_op("cache_add", "", "", "", args.pool, "cache", cmds,
+                            dry_run=watch._DRY_RUN)
     ok, out = zfs.add_cache(args.pool, devs, dry_run=watch._DRY_RUN)
+    _end_op_from_result(safety, op_id, ok, out, dry_run=watch._DRY_RUN)
     print((f"{G}[+] L2ARC cache added to {args.pool}" if ok else f"{R}[-] {out}") + N)
     return 0 if ok else 1
 
 
 def _cache_rm(args) -> int:
-    from . import zfs
+    from . import zfs, safety
     dev = _resolve_devs([args.dev])[0]
     if not _confirm_pool_op("remove cache device", args.pool, [dev]):
         print(f"{Y}[-] cancelled{N}"); return 1
+    cmds = [[_cfg_mod.tool("zpool"), "remove", args.pool, dev]]
+    op_id = safety.begin_op("cache_rm", "", "", dev, args.pool, "cache", cmds,
+                            dry_run=watch._DRY_RUN)
     ok, out = zfs.remove_vdev(args.pool, dev, dry_run=watch._DRY_RUN)
+    _end_op_from_result(safety, op_id, ok, out, dry_run=watch._DRY_RUN)
     print((f"{G}[+] removed from {args.pool}" if ok else f"{R}[-] {out}") + N)
     return 0 if ok else 1
 
 
 def _log_add(args) -> int:
-    from . import zfs
+    from . import zfs, safety
     devs = _resolve_devs(args.devs, strict=True)
     if devs is None:
         return 1
@@ -739,17 +902,34 @@ def _log_add(args) -> int:
     print(f"{Y}[!] ensure this SSD has Power-Loss Protection (PLP).{N}")
     if not _confirm_pool_op("add SLOG log", args.pool, devs):
         print(f"{Y}[-] cancelled{N}"); return 1
+    # Mirrors zfs.add_log's own vdev-spec construction (F-089/F-150a); raid_type
+    # here is never raidz — the CLI only offers --mirror/--raid10 — so that branch
+    # of add_log can't fire and isn't reproduced here.
+    if raid_type == "raid10":
+        spec = zfs._mirror_pairs(devs)
+    elif raid_type == "mirror":
+        spec = ["mirror", *devs]
+    else:                                         # None -> legacy auto
+        spec = (["mirror", *devs] if len(devs) > 1 else list(devs))
+    cmds = [[_cfg_mod.tool("zpool"), "add", "-f", args.pool, "log", *spec]]
+    op_id = safety.begin_op("log_add", "", "", "", args.pool, "log", cmds,
+                            dry_run=watch._DRY_RUN)
     ok, out = zfs.add_log(args.pool, devs, raid_type=raid_type, dry_run=watch._DRY_RUN)
+    _end_op_from_result(safety, op_id, ok, out, dry_run=watch._DRY_RUN)
     print((f"{G}[+] SLOG added to {args.pool}" if ok else f"{R}[-] {out}") + N)
     return 0 if ok else 1
 
 
 def _log_rm(args) -> int:
-    from . import zfs
+    from . import zfs, safety
     dev = _resolve_devs([args.dev])[0]
     if not _confirm_pool_op("remove log device", args.pool, [dev]):
         print(f"{Y}[-] cancelled{N}"); return 1
+    cmds = [[_cfg_mod.tool("zpool"), "remove", args.pool, dev]]
+    op_id = safety.begin_op("log_rm", "", "", dev, args.pool, "log", cmds,
+                            dry_run=watch._DRY_RUN)
     ok, out = zfs.remove_vdev(args.pool, dev, dry_run=watch._DRY_RUN)
+    _end_op_from_result(safety, op_id, ok, out, dry_run=watch._DRY_RUN)
     print((f"{G}[+] removed from {args.pool}" if ok else f"{R}[-] {out}") + N)
     return 0 if ok else 1
 
@@ -1014,6 +1194,7 @@ def _sync_resource(bundled_name: str, dest: str, force: bool) -> str:
 
 def _update(args) -> int:
     """Validate config, then (as root) sync bay_map/ssd_spec into /etc/b2ctl."""
+    from . import safety
     force = getattr(args, "force", False) or getattr(args, "export_bay_map", False)
 
     print(f"\n{C}[b2ctl update]{N}")
@@ -1058,8 +1239,25 @@ def _update(args) -> int:
     print(f"\n{C}[sync {_cfg_mod.STD_DIR}]{N}")
     _SYNC_ICON = {"created": f"{G}[✔]{N}", "current": f"{G}[✔]{N}",
                   "customized-kept": f"{Y}[i]{N}", "missing-bundled": f"{Y}[i]{N}"}
+    # cmds records the file writes this run actually performs (F-089/F-150a): one
+    # 'cp' per bundled resource that gets copied, plus the config.json write at
+    # the end. No subprocess is involved anywhere in `update` — cli.py IS the
+    # tool — so these are pseudo-argv describing the effect, not a literal shell
+    # command; `b2ctl update` never ran a real `cp`.
+    cmds = []
+    if watch._DRY_RUN:
+        print(f"{Y}  [DRY-RUN] preview — nothing will be written{N}")
     for bundled_name, dest, key in _MANAGED:
-        state = _sync_resource(bundled_name, dest, force)
+        if watch._DRY_RUN:
+            # Preview only: report what a real run would decide, without ever
+            # calling _sync_resource (which copies unconditionally) — dry-run
+            # must execute nothing (F-150a).
+            state = "current" if os.path.exists(dest) else "created"
+        else:
+            state = _sync_resource(bundled_name, dest, force)
+            if state in ("created", "updated (backup .bak)"):
+                src = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", bundled_name))
+                cmds.append(["cp", src, dest])
         # Bind the /etc path only if a file is actually there — a missing bundled
         # copy with no /etc file must not point config at a nonexistent path (F-072).
         if state != "missing-bundled" or os.path.exists(dest):
@@ -1070,13 +1268,32 @@ def _update(args) -> int:
             note = "  (no bundled copy — skipped)"
         print(f"  {icon} {os.path.basename(dest):<14} {state}{note}  →  {dest}")
 
+    cmds.append(["b2ctl", "update"] + (["--force"] if force else []))
+    op_id = safety.begin_op("config_update", "", "", cfg_path, "", "", cmds,
+                            dry_run=watch._DRY_RUN, snapshot=False)
+    if watch._DRY_RUN:
+        safety.end_op(op_id, True, "[DRY-RUN] preview", "", 0, dry_run=True)
+        print(f"\n  {Y}[DRY-RUN]{N} would bind: bay_map_path, ssd_spec_path → "
+              f"{_cfg_mod.STD_DIR}")
+        print()
+        return 0
+
     # F-147: a plain truncating open(...,"w") here regressed the crash-safety
     # every other config writer gets from atomic_write_json (ENOSPC/crash mid-
     # write could leave a truncated file that load() then reads as all-
     # defaults). Clear the in-process cache afterwards the way config.set_mode
     # does, so a later read in the same process sees what was just written.
-    _cfg_mod.atomic_write_json(cfg_path, cfg)
-    _cfg_mod._cache = None
+    try:
+        _cfg_mod.atomic_write_json(cfg_path, cfg)
+        _cfg_mod._cache = None
+    except OSError as exc:
+        # 'update' is root-exempt (_ROOT_EXEMPT), so a write can still fail here
+        # (read-only /etc, a container mount, ...) even past the geteuid() check
+        # above — record it as a FAILED op, not a silent crash (F-150a).
+        safety.end_op(op_id, False, "", str(exc), 1, dry_run=False)
+        print(f"\n  {R}[-] cannot write {cfg_path}: {exc}{N}")
+        return 1
+    safety.end_op(op_id, True, cfg_path, "", 0, dry_run=False)
     print(f"\n  {G}[✔]{N} config bound: bay_map_path, ssd_spec_path → {_cfg_mod.STD_DIR}")
     print(f"      Edit those files freely — install.sh won't overwrite them; "
           f"`b2ctl update` keeps your edits.")
@@ -1098,13 +1315,24 @@ def _config_show(args) -> int:
 
 
 def _config_init(_args) -> int:
+    from . import safety
     path = _cfg_mod.CONFIG_PATH
     if os.path.exists(path):
         print(f"{Y}[!] {path} already exists. Delete it first to regenerate.{N}")
         return 1
+    # No subprocess runs here — the mutation IS this b2ctl invocation writing
+    # the file directly, so `cmds` records the b2ctl verb that ran rather than
+    # an argv that doesn't exist (F-150a).
+    cmds = [["b2ctl", "config", "init"]]
+    # snapshot=False for both config writers: a zpool/smartctl capture says
+    # nothing about a JSON file, and neither op has a rollback (F-150).
+    op_id = safety.begin_op("config_init", "", "", path, "", "", cmds,
+                            dry_run=watch._DRY_RUN, snapshot=False)
     # 'config' is exempt from the root gate, so a non-root user reaches here and
     # the write fails with PermissionError — surface the house-style one-liner
-    # instead of a raw traceback (F-034).
+    # instead of a raw traceback (F-034). That failure must be recorded as a
+    # FAILED op, not silently skipped (F-150a) — a service polling `b2ctl log`
+    # needs to see the write was attempted and denied.
     try:
         cfg = _cfg_mod.load()
         # F-148: the writer that CREATES the file must obey the same rules as
@@ -1114,11 +1342,17 @@ def _config_init(_args) -> int:
         # last open(...,"w") + json.dump in the package. atomic_write_json does
         # its own makedirs and raises OSError on a permission failure, so the
         # non-root one-liner below (F-034) still fires unchanged.
-        _cfg_mod.atomic_write_json(path, cfg)
+        if not watch._DRY_RUN:
+            _cfg_mod.atomic_write_json(path, cfg)
     except OSError as exc:
+        safety.end_op(op_id, False, "", str(exc), 1, dry_run=watch._DRY_RUN)
         print(f"{R}[-] cannot write {path} — run as root ({exc}){N}")
         return 1
-    print(f"{G}[+] Written: {path}{N}")
+    safety.end_op(op_id, True, path, "", 0, dry_run=watch._DRY_RUN)
+    if watch._DRY_RUN:
+        print(f"{Y}[DRY-RUN] would write: {path}{N}")
+    else:
+        print(f"{G}[+] Written: {path}{N}")
     print(f"    Edit tool_paths to override binary locations.")
     print(f"    Set controller.mode to 'it' or 'raid' to skip auto-detection.")
     return 0

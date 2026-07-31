@@ -1556,6 +1556,111 @@ existed.
 
 ---
 
+## 9.9 The contract a service reads (ADR-007 phase 4, v0.26.0)
+
+The MCP server is cancelled. The delivery design is **a service on this host
+shelling out to `b2ctl <verb> --json` and forwarding the envelope to a web UI**.
+That removes a consumer, not the contract — and raises the bar, because stdout is
+the only channel.
+
+Envelope, unchanged since phase 1:
+
+```json
+{ "schema_version": 1, "ok": true, "command": "...", "data": {...},
+  "warnings": [], "error": null }
+```
+
+### Every verb, and what `data` holds
+
+| verb | `data` |
+|---|---|
+| `status` | `{backend, disks[], pools[], volumes[], summary[]}` |
+| `disks` | `{disks[]}` — `schema.DISK_FIELDS` |
+| `pools` | `{pools[]}` — `schema.POOL_FIELDS` |
+| `volumes` | `{volumes[]}` — `schema.VOLUME_FIELDS` |
+| `bays` | bay-map state |
+| `progress` | `{running[]}` — scrub / trim / rebuild / health-check |
+| `maint --log` | maintenance history |
+| `log` | audit history |
+| `version`, `check`, `config show`, `raid-foreign` | verb-specific read payloads |
+| **every mutating verb** | **`{op, state, changed, target, ops[], log}`** |
+| `watch` | — `error.code: "UNSUPPORTED"` (an interactive terminal loop) |
+
+### The mutation shape
+
+```json
+{ "op": "offload", "state": "completed", "changed": true,
+  "target": {"disk": "1:4"},
+  "ops": [ {"op_id": "20260801-...-offline", "op": "offline",
+            "status": "ok", "exit_code": 0,
+            "cmds": [["zpool","offline","tank","/dev/disk/by-id/…"]],
+            "disk_serial": "…", "disk_bay": "1:4", "pool": "tank",
+            "rollback_hint": "zpool online tank …",
+            "started_at": "…", "ended_at": "…"} ],
+  "log": "…" }
+```
+
+| field | meaning |
+|---|---|
+| `state` | `completed` · `started` · `dry_run` · `declined`. Derived from the VERB (`cli._mutation_state`), never by reading the narration |
+| `changed` | did any recorded op reach `status: "ok"` |
+| `target` | what the CALLER named — correlate a result with your own request. The RESOLVED identity is in `ops[].disk_serial`/`disk_bay`; different question |
+| `ops[]` | `schema.OP_FIELDS` — one entry per audited operation, in execution order, carrying the **exact argv** that ran |
+| `log` | human narration, ANSI-stripped. **A supplement. Never branch on it.** |
+| `next` | present when `state == "started"` — the verb to poll |
+
+`state: "started"` means the kernel or firmware is still working after b2ctl
+returned: a scrub, a trim, a self-test, or a resilver under `--confirm` (phase 3's
+third state). Poll `b2ctl progress --json`.
+
+### Where `ops[]` comes from
+
+Nothing was re-instrumented. `safety.begin_op`/`end_op` have always built exactly
+this record and written it to `ops.jsonl`, where the caller never saw it.
+`cli._json_mutation` snapshots `safety._PENDING` before the verb runs, diffs
+after, and projects the difference through `schema.op_json`. Phase 4 added
+`begin_op` pairs to the verbs that had none (`scrub`, `trim`, `create`, the
+aux-vdev family, `locate`, the config writers) — which also gave them an audit
+trail and a rollback hint they did not have.
+
+`begin_op(..., snapshot=False)` skips the four-subprocess pre-op capture for ops
+that change no pool state. `locate` forced it: `status --locate` blinks every
+at-risk disk in a thread pool.
+
+### Two fields that mean what they say
+
+- Pool `redundancy` (mirror/raidz1/…) — read this, not pool `level`. `level` is
+  the same value under a name that collides with disk `level`, which is a health
+  verdict. Kept for the CLI renderer; **never renamed**, because that would bump
+  `schema_version` for a naming preference.
+- `last_scrub_ts` / `last_trim_ts` — raw ISO-8601, `None` when there is no
+  history. `last_scrub`/`last_trim` remain human strings ("6h ago") for the table.
+
+### Sketch
+
+```python
+import json, subprocess
+
+def b2ctl(*argv):
+    """Returns (data, warnings). Raises on a failed envelope."""
+    p = subprocess.run(["b2ctl", *argv, "--json"], capture_output=True, text=True)
+    env = json.loads(p.stdout)          # ALWAYS parseable, including on failure
+    if not env["ok"]:
+        # Closed set — branch on the code, NEVER on error.message.
+        raise RuntimeError(env["error"]["code"], env["error"]["message"])
+    return env["data"], env["warnings"]
+
+disks, warnings = b2ctl("disks")
+unhealthy = [d for d in disks["disks"] if d["level"] != "NORMAL"]
+
+data, _ = b2ctl("scrub", "tank", "--confirm", "yes")
+assert data["state"] == "started"       # the kernel is still working
+while True:
+    running, _ = b2ctl("progress")
+    if not any(r["kind"] == "scrub" for r in running["running"]):
+        break
+```
+
 ## 9.9 ADR-007 phase 3 — the envelope survives the abnormal exits (v0.25.0 / F-146)
 
 Phase 1 gave every read verb an envelope, phase 2 made mutations callable. Phase 3

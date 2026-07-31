@@ -1,6 +1,6 @@
 """b2ctl.schema — explicit wire-format projections for the machine contract.
 
-b2ctl is being driven by an MCP server and a web UI, so every command must
+b2ctl is being driven by a service on the box that shells out to it and forwards results to a web UI, so every command must
 return JSON with a stable, deliberate wire format. Before this module the only
 JSON in the product was `status --json` (cli.py:63-64):
 `json.dumps([vars(d) for d in disks], default=str)` — a raw dataclass dump.
@@ -64,19 +64,41 @@ def disk_json(d) -> dict:
 # --------------------------------------------------------------------------- #
 # Pool — projects a zfs.list_pools() entry (+ core.pool_maint() merge)
 # --------------------------------------------------------------------------- #
-POOL_FIELDS = ("name", "level", "health", "size", "alloc", "free",
-               "last_scrub", "last_trim")
+# `level` here is a REDUNDANCY TYPE (mirror/raidz1/stripe/... from
+# `zfs.pool_level`) — NOT the same concept as `DISK_FIELDS["level"]`, which is
+# a HEALTH VERDICT (NORMAL/CONFIG/WARNING/CRITICAL from `common.assess`). Same
+# key name, disjoint meaning, kept only because the CLI table renderer already
+# reads `level` this way and renaming would break it for a naming preference
+# (schema_version stays 1). `redundancy` (F-150c) carries the identical value
+# under an unambiguous name — NEW clients should read `redundancy`, not
+# `level`, for this field.
+#
+# `last_scrub_ts`/`last_trim_ts` (F-150c) are the raw ISO-8601 timestamps
+# behind the human `last_scrub`/`last_trim` strings (see `core.pool_maint`) —
+# None when there is no history, never "" or "never", so a client can
+# `datetime.fromisoformat()` them directly instead of parsing "6h ago" prose.
+POOL_FIELDS = ("name", "level", "redundancy", "health", "size", "alloc", "free",
+               "last_scrub", "last_scrub_ts", "last_trim", "last_trim_ts")
 
 
 def pool_json(p: dict) -> dict:
     """Project a pool dict onto POOL_FIELDS.
 
     `p` is one entry from `zfs.list_pools()` (name/size/alloc/free/health/...)
-    optionally merged with `core.pool_maint()`'s last_scrub/last_trim. `.get()`
-    throughout so a caller that has not merged pool_maint() in yet still gets a
-    complete, valid dict — missing keys read back as None, not a KeyError.
+    optionally merged with `core.pool_maint()`'s last_scrub/last_trim(_ts).
+    `.get()` throughout so a caller that has not merged pool_maint() in yet
+    still gets a complete, valid dict — missing keys read back as None, not a
+    KeyError.
+
+    `redundancy` defaults to `p["level"]` when not separately supplied: every
+    existing caller only ever sets `level` (from `zfs.pool_level`), so this is
+    the one place that has to know the two keys are the same fact under two
+    names (see the POOL_FIELDS comment) rather than requiring every call site
+    to duplicate it.
     """
-    return {f: p.get(f) for f in POOL_FIELDS}
+    out = {f: p.get(f) for f in POOL_FIELDS}
+    out["redundancy"] = p.get("redundancy", p.get("level"))
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -93,6 +115,35 @@ def volume_json(v: dict) -> dict:
     never a KeyError.
     """
     return {f: v.get(f) for f in VOLUME_FIELDS}
+
+
+# --------------------------------------------------------------------------- #
+# Op — projects one safety audit entry onto the wire (F-150)
+# --------------------------------------------------------------------------- #
+# A mutating verb's result used to be `{"log": "<ANSI human narration>"}` — a
+# text blob, which is presence rather than format. The structured record already
+# existed: safety.begin_op/end_op build exactly this dict at 15 call sites and
+# write it to ops.jsonl, where the caller never sees it. This publishes it.
+#
+# Deliberately NOT on the wire: `stdout`/`stderr` (raw tool output, already
+# summarised by status/exit_code and available in data.log), and `snapshot_path`
+# (a path on the b2ctl host, meaningless to a remote reader).
+OP_FIELDS = (
+    "op_id", "op", "status", "exit_code",
+    "disk_serial", "disk_bay", "dev_path", "old_dev", "new_dev",
+    "pool", "vdev", "cmds", "rollback_hint",
+    "started_at", "ended_at",
+)
+
+
+def op_json(e: dict) -> dict:
+    """Project one safety audit entry onto OP_FIELDS.
+
+    `.get()` throughout: an entry captured mid-flight (begin_op written, end_op
+    not yet) legitimately has no `ended_at`/`exit_code`, and a client reading
+    `status == "pending"` should see nulls rather than a KeyError.
+    """
+    return {f: e.get(f) for f in OP_FIELDS}
 
 
 # --------------------------------------------------------------------------- #

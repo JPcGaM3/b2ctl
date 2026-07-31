@@ -185,6 +185,59 @@ class TestAssembleStorage:
         assert rows[0]["used"] == "-" and rows[0]["free"] == "-"
 
 
+class TestPoolMaint:
+    """core.pool_maint() — human strings + raw ISO-8601 timestamps (F-150c).
+
+    A machine client needs to sort/age maintenance history without parsing
+    'Nh ago' prose, so last_scrub_ts/last_trim_ts carry the same raw value
+    rel_time() renders from, or None (never '' / 'never') when there is no
+    history."""
+
+    def test_live_scrub_ts_matches_the_iso_last_scrub_date(self):
+        with patch.object(_zfs_mod, "last_scrub_date",
+                           return_value="2026-07-08T03:00:00"), \
+             patch("b2ctl.maint.last_event", return_value=None):
+            row = _core_mod.pool_maint("tank")
+        assert row["last_scrub_ts"] == "2026-07-08T03:00:00"
+        assert row["last_scrub"] != ""          # human string still populated
+
+    def test_scrub_ts_falls_back_to_maint_history_when_no_live_scrub(self):
+        ev = {"ts": "2026-06-01T00:00:00", "kind": "scrub", "target": "tank"}
+        with patch.object(_zfs_mod, "last_scrub_date", return_value=None), \
+             patch("b2ctl.maint.last_event",
+                   side_effect=lambda kind, target: ev if kind == "scrub" else None):
+            row = _core_mod.pool_maint("tank")
+        assert row["last_scrub_ts"] == "2026-06-01T00:00:00"
+
+    def test_trim_ts_comes_from_maint_history(self):
+        ev = {"ts": "2026-06-15T12:00:00", "kind": "trim", "target": "tank"}
+        with patch.object(_zfs_mod, "last_scrub_date", return_value=None), \
+             patch("b2ctl.maint.last_event",
+                   side_effect=lambda kind, target: ev if kind == "trim" else None):
+            row = _core_mod.pool_maint("tank")
+        assert row["last_trim_ts"] == "2026-06-15T12:00:00"
+        assert row["last_trim"] != ""
+
+    def test_no_history_yields_none_ts_not_empty_string(self):
+        with patch.object(_zfs_mod, "last_scrub_date", return_value=None), \
+             patch("b2ctl.maint.last_event", return_value=None):
+            row = _core_mod.pool_maint("tank")
+        assert row["last_scrub_ts"] is None
+        assert row["last_trim_ts"] is None
+        assert row["last_scrub"] == "" and row["last_trim"] == ""
+
+    def test_ts_fields_round_trip_through_fromisoformat(self):
+        import datetime
+        with patch.object(_zfs_mod, "last_scrub_date",
+                           return_value="2026-07-08T03:00:00"), \
+             patch("b2ctl.maint.last_event",
+                   side_effect=lambda kind, target:
+                       {"ts": "2026-06-15T12:00:00"} if kind == "trim" else None):
+            row = _core_mod.pool_maint("tank")
+        datetime.datetime.fromisoformat(row["last_scrub_ts"])
+        datetime.datetime.fromisoformat(row["last_trim_ts"])
+
+
 class TestScanConcurrency:
     """SMART pools: direct/IT-mode targets read one-thread-per-disk (F-077,
     min(16, N)); megaraid passthrough targets (d.smart_dtype set) read at a small
@@ -386,7 +439,7 @@ class TestPoolMembershipUnknown:
         # pool picture unknown it must answer False for all of them.
         assert not any(d.is_poolable for d in result)
         # exactly one warning, naming the cause; warn() is also the JSON-mode
-        # collector, so this is what reaches an MCP client in warnings[]
+        # collector, so this is what reaches a web-service client in warnings[]
         assert mock_warn.call_count == 1
         assert "zpool did not answer" in mock_warn.call_args.args[0]
 

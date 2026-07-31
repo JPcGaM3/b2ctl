@@ -1,6 +1,6 @@
 """b2ctl.jsonout — the machine-readable envelope every `--json` command emits.
 
-b2ctl is driven by an MCP server and a web UI as well as by an operator, so a
+b2ctl is driven by a service on the box that shells out to it and forwards results to a web UI as well as by an operator, so a
 program has to be able to read every answer AND every failure. Before this, the
 only JSON in the product was `status --json`, which dumped `vars(Disk)` straight
 out: no version, no pools/volumes, and any field rename silently broke clients.

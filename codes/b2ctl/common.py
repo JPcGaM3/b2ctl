@@ -47,7 +47,7 @@ def is_dry_run() -> bool:
 # ---- JSON-mode warning collector (single owner at the bottom layer) ------- #
 # b2ctl --json must put the JSON envelope alone on stdout: a stray print() from
 # a read-path warning (spec.py/baymap.py) would corrupt the stream for the
-# MCP/web client (F-139). Same shape/placement as the dry-run flag above.
+# web service (F-139). Same shape/placement as the dry-run flag above.
 JSON_MODE = False
 _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 _pending_warnings: list[str] = []
@@ -143,7 +143,7 @@ def run_check(args, timeout: int | None = 120, *, op_id=None, dry_run: bool = Fa
 #
 # `--confirm yes` / `--confirm <target>` switches the process non-interactive:
 # confirms auto-approve, and a prompt that still has no answer raises
-# NonInteractive rather than blocking an MCP/web client forever. §9 is preserved,
+# NonInteractive rather than blocking the web service forever. §9 is preserved,
 # not weakened: the operator still states intent explicitly, once per command,
 # instead of once per prompt (ADR-007 phase 2).
 AUTO_CONFIRM: str | None = None      # None = interactive

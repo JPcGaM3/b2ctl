@@ -5,7 +5,7 @@ import json
 import os
 from datetime import datetime
 
-from .common import run_check, R, Y, G, N
+from .common import run_check, warn, R, Y, G, N
 
 LOG_DIR  = "/var/log/b2ctl"
 SNAP_DIR = "/var/log/b2ctl/snapshots"
@@ -189,7 +189,7 @@ def _append_jsonl(entry: dict) -> None:
     except OSError as exc:
         if not _log_warned:
             _log_warned = True
-            print(f"{Y}⚠ audit log unwritable ({LOG_FILE}): {exc}{N}")
+            warn(f"{Y}⚠ audit log unwritable ({LOG_FILE}): {exc}{N}")
 
 
 def _load_entry(op_id: str) -> dict | None:
@@ -219,17 +219,17 @@ def _print_op_result(entry: dict, hint: str | None) -> None:
     vdev   = entry.get("vdev", "")
     # dry-run: nothing was executed — don't render a red ✗ or a rollback hint.
     if status == "dry_run":
-        print(f"{Y}• {entry.get('op')} dry-run preview — nothing changed ({pool}/{vdev}){N}")
+        warn(f"{Y}• {entry.get('op')} dry-run preview — nothing changed ({pool}/{vdev}){N}")
         return
     icon   = f"{G}✓{N}" if status == "ok" else f"{R}✗{N}"
-    print(f"{icon} {entry.get('op')} complete ({pool}/{vdev})")
+    warn(f"{icon} {entry.get('op')} complete ({pool}/{vdev})")
     snap = entry.get("snapshot_path")
     if hint:
-        print(f"  Rollback : {hint}")
+        warn(f"  Rollback : {hint}")
     if snap:
-        print(f"  Snapshot : {snap}")
+        warn(f"  Snapshot : {snap}")
     if status == "fail":
-        print(f"  {R}stderr   : {entry.get('stderr','')}{N}")
+        warn(f"  {R}stderr   : {entry.get('stderr','')}{N}")
 
 
 def _post_op_verify(entry: dict) -> None:
@@ -259,10 +259,10 @@ def _post_op_verify(entry: dict) -> None:
     if check and not check(out):
         snap = entry.get("snapshot_path", "")
         op_id = entry.get("op_id", "")
-        print(f"{Y}⚠ Post-op check FAILED for {op} (serial {serial}){N}")
+        warn(f"{Y}⚠ Post-op check FAILED for {op} (serial {serial}){N}")
         if snap:
-            print(f"  See snapshot: {snap}")
-        print(f"  Run: b2ctl rollback {op_id}")
+            warn(f"  See snapshot: {snap}")
+        warn(f"  Run: b2ctl rollback {op_id}")
 
 
 def load_log(last: int = 20) -> list[dict]:
@@ -283,7 +283,7 @@ def load_log(last: int = 20) -> list[dict]:
                 except json.JSONDecodeError:
                     pass
     except PermissionError:
-        print("  [!] cannot read log — run as root")
+        warn("  [!] cannot read log — run as root")
     except OSError:
         pass
     return list(merged.values())[-last:]

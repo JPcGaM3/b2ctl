@@ -37,6 +37,9 @@ ERR_NEEDS_ROOT = "NEEDS_ROOT"
 ERR_INVALID_ARG = "INVALID_ARG"
 ERR_PARSE_ERROR = "PARSE_ERROR"       # a vendor tool's output could not be read
 ERR_UNSUPPORTED = "UNSUPPORTED"       # right shape, wrong mode (e.g. raid-* on IT)
+ERR_OP_FAILED = "OP_FAILED"           # a mutating command ran and did not succeed
+                                      # (or the operator declined) — `data.log`
+                                      # carries what it printed while running
 
 
 def _envelope(command: str, *, ok: bool, data, error, warnings) -> dict:

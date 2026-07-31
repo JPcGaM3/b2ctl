@@ -45,7 +45,7 @@ class TestZfsActionsSpecLoad(unittest.TestCase):
     def test_loads_spec_when_no_tbw(self, mock_cmd, mock_load):
         zfs_actions.offload()
         mock_load.assert_called_once_with()
-        mock_cmd.assert_called_once_with({"tbw": 1.0})     # loaded table forwarded
+        mock_cmd.assert_called_once_with({"tbw": 1.0}, target=None)   # table forwarded
 
     @patch("b2ctl.zfs_actions.spec.load")
     @patch("b2ctl.zfs_actions.watch._cmd_offload", return_value=True)
@@ -53,7 +53,7 @@ class TestZfsActionsSpecLoad(unittest.TestCase):
         table = {"given": 2.0}
         zfs_actions.offload(table)
         mock_load.assert_not_called()
-        mock_cmd.assert_called_once_with(table)
+        mock_cmd.assert_called_once_with(table, target=None)
 
 
 class TestZfsActionsArgForwarding(unittest.TestCase):
@@ -63,13 +63,13 @@ class TestZfsActionsArgForwarding(unittest.TestCase):
     @patch("b2ctl.zfs_actions.watch._cmd_create", return_value=True)
     def test_create_raid10_passes_raid_type(self, mock_cmd, mock_load):
         self.assertEqual(zfs_actions.create(raid10=True), 0)
-        mock_cmd.assert_called_once_with({}, raid_type="raid10")
+        mock_cmd.assert_called_once_with({}, raid_type="raid10", disks=None, name=None)
 
     @patch("b2ctl.zfs_actions.spec.load", return_value={})
     @patch("b2ctl.zfs_actions.watch._cmd_create", return_value=True)
     def test_create_default_raid_type_none(self, mock_cmd, mock_load):
         zfs_actions.create()
-        mock_cmd.assert_called_once_with({}, raid_type=None)
+        mock_cmd.assert_called_once_with({}, raid_type=None, disks=None, name=None)
 
     @patch("b2ctl.zfs_actions.spec.load", return_value={})
     @patch("b2ctl.zfs_actions.watch._cmd_destroy", return_value=True)

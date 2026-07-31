@@ -1382,6 +1382,76 @@ report `level: null`.
 server must not call them until phase 2 (v0.23.0). `raid-foreign --import/--clear`
 with `--json` returns `UNSUPPORTED` rather than hanging on a confirm.
 
+## 9.8 Machine-callable mutations — `--confirm` (v0.23.0 / ADR-007 phase 2)
+
+### One gate, not ninety-two edits
+
+`watch.py` contains **exactly one `input()`**, inside `_ask()`; its 38 `_ask`, 28
+`_confirm` and 5 `_confirm_op` sites all funnel through it. `raid_actions.py` had
+10 direct calls. So the whole prompt surface is served by three functions in
+`common.py`:
+
+| function | interactive | `--confirm` |
+|---|---|---|
+| `confirm(msg)` | `[y/N]` as today | returns True |
+| `ask(prompt, default=, hint=)` | prompts | returns `default`, else raises `NonInteractive` |
+| `confirm_target(prompt, target)` | must type `target` | `yes` passes; `<value>` passes only if `== target` |
+
+`--confirm` is global, beside `--json` and `--dry-run`. `common.AUTO_CONFIRM`
+holds its value; `is_non_interactive()` is the switch.
+
+**An unanswered prompt is an error, never a guess.** `NonInteractive` carries the
+prompt text and a `hint`; `cli.main` converts it to an `INVALID_ARG` envelope
+naming the argument to supply. Defaulting "which disk?" on a destructive path is
+how you destroy the wrong one, so only prompts that already document a default
+(`[raid1]`, "blank = global spare") get one.
+
+Two call sites deserve their own note:
+
+- `raid_actions`'s *"press Enter once the new drive is inserted"* is a **wait, not
+  a question**. It keeps its raw `input()` and its own
+  `except (EOFError, KeyboardInterrupt)` — routing it through `common.ask` would
+  swallow the Ctrl-C that F-090 relies on to abort cleanly. It is simply skipped
+  when non-interactive.
+- `_confirm_op` still prints its box, then returns True without prompting.
+
+### Target selection
+
+`watch._cmd_destroy(tbw, target=None)` was already the pattern: `None` prompts,
+a value skips the prompt, an unmatched value errors. `_cmd_offload`/`_cmd_replace`/
+`_cmd_swap`/`_cmd_demote` gained the same `target=`, and `_cmd_create` gained
+`disks=`/`name=`. Resolution matches on bay / serial / dev / by-id and **refuses
+an ambiguous match** rather than picking one. `zfs_actions` exposes them as
+keyword arguments; the CLI surfaces `--disk` and `--disks/--type/--name`.
+
+### Mutating verbs under `--json`
+
+Mutating commands narrate as they work — confirm boxes, resilver bars, per-step
+results — all to stdout, which would shred the envelope. Read verbs build their
+own and are tagged `emits_json=True` in `set_defaults`; everything else runs
+inside `cli._json_mutation`, which captures stdout and returns it as `data.log`,
+with `OP_FAILED` when the command did not complete. That avoided rewriting several
+hundred `print()` calls. `safety.py`'s ten writes moved behind `common.warn()`.
+
+Watch out: `maint`'s subcommands inherit the parent parser's defaults, so
+`m_scr`/`m_trm`/`m_hl` set `emits_json=False` explicitly — otherwise `maint scrub`
+would inherit `maint --log`'s read-verb tag and never get wrapped.
+
+`watch` itself returns `UNSUPPORTED` under `--json`.
+
+### Long operations — `b2ctl progress`
+
+Mutating verbs return when the operation is *started*; `progress` polls. Pure
+read (§9) of state the kernel and controller already publish:
+`zfs.poll_scrub_status`, `zfs.poll_trim_status`, `hba_raid.rebuild_progress`, and
+burn-in's `burnin.json` via `load_state()` + `selftest_status()`.
+
+`poll_scrub_status` gained an explicit **`in_progress`** key. It is NOT the
+inverse of `completed`: the `scrub repaired …` line persists until the next scrub,
+so a pool that has *never* been scrubbed also reports `completed=False`.
+`progress` announced a phantom scrub on every such pool until the positive signal
+existed.
+
 ---
 
 ## 10. Config file (`config.py`)

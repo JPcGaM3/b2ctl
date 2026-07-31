@@ -491,19 +491,26 @@ def poll_scrub_status(pool: str) -> dict:
     """Parse `zpool status <pool>` into scrub progress. Sibling of
     poll_resilver_status, keyed on the `scan: scrub` line.
 
-    Returns {done, eta, completed, has_errors, ok}. NOTE: the
+    Returns {done, eta, completed, in_progress, has_errors, ok}. NOTE: the
     'scrub repaired ... with N errors' line PERSISTS after the scrub finishes
     (until the next scrub), so completed=True means 'not currently scrubbing' —
     exactly what _wait_scrub needs (we just issued the scrub). `ok` is False on
     empty output so a failed poll is never read as done. A resilver line
-    ('resilvered ...') never matches, so it is not mistaken for a scrub."""
+    ('resilvered ...') never matches, so it is not mistaken for a scrub.
+
+    `in_progress` is the POSITIVE signal, and it is not the inverse of
+    `completed`: a pool that has never been scrubbed has neither line, so
+    `completed` is False there too. `b2ctl progress` reported a phantom scrub on
+    every never-scrubbed pool until this existed (ADR-007 phase 2)."""
     out = run([_tool("zpool"), "status", pool])
-    res = {"done": 0.0, "eta": "", "completed": False, "has_errors": False, "ok": True}
+    res = {"done": 0.0, "eta": "", "completed": False, "in_progress": False,
+           "has_errors": False, "ok": True}
     if not out.strip():
         res["ok"] = False
         return res
     low = out.lower()
     if "scrub in progress" in low:
+        res["in_progress"] = True
         m_done = re.search(r'(\d+(?:\.\d+)?)%\s*done', out)
         if m_done:
             res["done"] = float(m_done.group(1))

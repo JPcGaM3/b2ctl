@@ -25,28 +25,33 @@ def _tbw(tbw):
     return tbw if tbw is not None else spec.load()
 
 
-def offload(tbw=None) -> int:
-    return _rc(watch._cmd_offload(_tbw(tbw)))
+def offload(tbw=None, *, target=None) -> int:
+    return _rc(watch._cmd_offload(_tbw(tbw), target=target))
 
 
-def replace(tbw=None) -> int:
-    return _rc(watch._cmd_replace(_tbw(tbw)))
+def replace(tbw=None, *, target=None) -> int:
+    return _rc(watch._cmd_replace(_tbw(tbw), target=target))
 
 
-def create(tbw=None, *, raid10: bool = False) -> int:
-    return _rc(watch._cmd_create(_tbw(tbw), raid_type="raid10" if raid10 else None))
+def create(tbw=None, *, raid10: bool = False, disks=None, name=None, raid_type=None) -> int:
+    # `raid10` is the pre-existing shim (maps to raid_type="raid10"); an explicit
+    # `raid_type` wins if both are given, so a caller migrating to the named
+    # kwarg never has to also drop the old flag (ADR-007 phase 2).
+    if raid_type is None and raid10:
+        raid_type = "raid10"
+    return _rc(watch._cmd_create(_tbw(tbw), raid_type=raid_type, disks=disks, name=name))
 
 
 def destroy(pool: str | None = None, tbw=None) -> int:
     return _rc(watch._cmd_destroy(_tbw(tbw), target=pool))
 
 
-def swap(tbw=None) -> int:
-    return _rc(watch._cmd_swap(_tbw(tbw)))
+def swap(tbw=None, *, target=None) -> int:
+    return _rc(watch._cmd_swap(_tbw(tbw), target=target))
 
 
-def demote(tbw=None) -> int:
-    return _rc(watch._cmd_demote(_tbw(tbw)))
+def demote(tbw=None, *, target=None) -> int:
+    return _rc(watch._cmd_demote(_tbw(tbw), target=target))
 
 
 def scrub(pool: str | None = None, tbw=None) -> int:

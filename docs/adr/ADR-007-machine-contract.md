@@ -155,7 +155,68 @@ SMART scan. All of them reuse the existing `core.scan` / `core.scan_light` /
     inherited.
 - Version bumped to **0.22.0-itmode**.
 
-## Phase 2 (v0.23.0) — recorded here so the decisions survive
+## Phase 2 (v0.23.0) — mutation, and what `--confirm` means for §9
+
+### The confirm model
+
+§9 requires "an explicit `[y/N]` naming device + pool + operation" for every
+mutating action. With no human at the terminal that sentence needs an
+interpretation, and this is it:
+
+| invocation | behaviour |
+|---|---|
+| no `--confirm` | **unchanged** — b2ctl prompts exactly as it does today, including the type-the-pool-name second gate |
+| `--confirm yes` | confirms auto-approve; the operator stated intent once, for this command |
+| `--confirm <target>` | same, **and** the type-the-name gate is satisfied only when `<target>` matches what is about to change |
+
+§9 is preserved rather than weakened: intent is still explicit, still required,
+and still refused by default. What moves is *when* it is given — once per
+command instead of once per prompt. `--confirm <target>` is strictly stronger
+than `yes`, because a caller that names what it is destroying cannot have that
+intent silently applied to a different pool by a mis-parsed command.
+
+### One gate, not ninety-two edits
+
+`watch.py` contains **exactly one `input()`**, inside `_ask()`; its 38 `_ask`,
+28 `_confirm` and 5 `_confirm_op` sites all funnel through it. `raid_actions.py`
+had 10 direct calls. So the whole surface is served by
+`common.ask`/`confirm`/`confirm_target`, which the modules now delegate to.
+
+**An unanswered prompt is an error, never a guess.** `common.ask(prompt,
+default=, hint=)` returns `default` when the prompt documents one (`[raid1]`,
+"blank = global spare"), and otherwise raises `common.NonInteractive`, which
+`cli.main` turns into an `INVALID_ARG` envelope naming the prompt and the
+argument to supply. Defaulting an unanswered "which disk?" on a destructive path
+is how you destroy the wrong one.
+
+### Mutating verbs under `--json`
+
+Mutating commands narrate as they work — confirm boxes, resilver bars, per-step
+results — all to stdout, which would shred the envelope. Read verbs build their
+own envelope and are marked `emits_json=True`; everything else runs inside
+`cli._json_mutation`, which captures stdout and returns it as `data.log`, with
+`ok` from the exit code and `OP_FAILED` when the command did not complete. That
+keeps the narration available to a web UI without rewriting several hundred
+`print()` calls. `safety.py`'s writes moved behind `common.warn()` for the same
+reason.
+
+`watch` itself has no machine form and returns `UNSUPPORTED` under `--json`.
+
+### Long-running operations
+
+Scrubs take hours; a request cannot be held open. Mutating verbs return as soon
+as the operation is started, and `b2ctl progress --json` polls: a pure read of
+state the kernel and controller already publish (`zfs.poll_scrub_status`,
+`poll_trim_status`, `hba_raid.rebuild_progress`, burn-in's state file), so it is
+side-effect-free per §9.
+
+`poll_scrub_status` gained an explicit `in_progress` key. It is **not** the
+inverse of `completed`: the "scrub repaired …" line persists until the next
+scrub, so a pool that has never been scrubbed reports `completed=False` as well —
+and `progress` announced a phantom scrub on every such pool until the positive
+signal existed.
+
+## Earlier notes (superseded by the sections above)
 
 - A non-interactive form for every prompt in `watch._cmd_*` (67) and
   `raid_actions` (25); the interactive flow stays the default when the flags are

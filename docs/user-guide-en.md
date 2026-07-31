@@ -1035,10 +1035,58 @@ b2ctl disks --json | jq '.data.disks[] | select(.level != "NORMAL")'
 b2ctl status --json | jq -r '.warnings[]'
 ```
 
-> ⚠️ **Commands that CHANGE something are not scriptable yet.** `create`,
-> `destroy`, `replace`, `offload`, `raid-foreign --clear` and friends still stop
-> and ask you to confirm, by design — so they will hang if a program calls them.
-> That is the next release. For now, point automation at the read commands only.
+### Commands that change something — `--confirm` (v0.23.0)
+
+Mutating commands normally stop and ask. A program can't answer, so `--confirm`
+answers for it:
+
+```bash
+b2ctl destroy tank --json --confirm tank      # strictest: name what you're changing
+b2ctl scrub tank   --json --confirm yes
+b2ctl offload --disk 32:4 --json --confirm yes
+```
+
+- **no `--confirm`** — nothing changes. b2ctl prompts exactly as it always has,
+  including "type the pool name to confirm".
+- **`--confirm yes`** — approves the confirmations for this one command.
+- **`--confirm <target>`** — approves them **and** requires `<target>` to match
+  what is actually being changed. Safer: a mistyped or mis-parsed command can't
+  have your approval applied to a different pool.
+
+Pick the target with an argument instead of the menu:
+
+| verb | argument |
+|---|---|
+| `offload` `replace` `swap` `demote` | `--disk <bay\|serial\|dev\|by-id>` |
+| `create` | `--disks a,b,c --type mirror --name tank` |
+| `destroy` `scrub` `trim` | the pool name, as today |
+| `raid-create` `raid-del` `raid-foreign` | as today |
+
+If a command still needs an answer you didn't give, it says so instead of
+hanging:
+
+```json
+{ "ok": false, "error": { "code": "INVALID_ARG",
+  "message": "'offload which disk? #>' — this command still needs that answer; supply --disk <bay|serial|dev>" } }
+```
+
+Long jobs return as soon as they start — poll them:
+
+```bash
+b2ctl scrub tank --json --confirm yes
+b2ctl progress --json | jq '.data.running'
+# [{"kind":"scrub","target":"tank","pct":37.2,"eta":"01:04:11","state":"running"}]
+```
+
+`progress` reports scrub, TRIM, hardware rebuild and health-check. It only reads,
+so it's safe to poll as often as you like.
+
+Under `--json`, a mutating command's normal narration (confirm boxes, resilver
+bars) is captured into `data.log` instead of being printed, so the output is
+still one clean JSON document.
+
+> `b2ctl watch` has no `--json` form — it's an interactive terminal loop and
+> returns `UNSUPPORTED`.
 
 ---
 

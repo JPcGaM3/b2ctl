@@ -1039,9 +1039,53 @@ b2ctl disks --json | jq '.data.disks[] | select(.level != "NORMAL")'
 b2ctl status --json | jq -r '.warnings[]'
 ```
 
-> ⚠️ **คำสั่งที่เปลี่ยนแปลงระบบยังเรียกจากสคริปต์ไม่ได้** — `create`, `destroy`, `replace`,
-> `offload`, `raid-foreign --clear` ฯลฯ ยังหยุดถามยืนยันอยู่ (ตั้งใจให้เป็นแบบนั้น) ถ้าโปรแกรม
-> เรียกมันจะค้าง เอาไว้ release หน้า ตอนนี้ให้ automation ยิงเฉพาะคำสั่งอ่านก่อน
+### คำสั่งที่เปลี่ยนแปลงระบบ — `--confirm` (v0.23.0)
+
+ปกติคำสั่งพวกนี้จะหยุดถาม โปรแกรมตอบไม่ได้ `--confirm` เลยตอบแทนให้:
+
+```bash
+b2ctl destroy tank --json --confirm tank      # เข้มสุด: ระบุชื่อสิ่งที่จะเปลี่ยน
+b2ctl scrub tank   --json --confirm yes
+b2ctl offload --disk 32:4 --json --confirm yes
+```
+
+- **ไม่ใส่ `--confirm`** — ไม่มีอะไรเปลี่ยน b2ctl ถามเหมือนเดิมทุกอย่าง รวมถึง
+  "type the pool name to confirm"
+- **`--confirm yes`** — อนุมัติคำถามยืนยันของคำสั่งนี้
+- **`--confirm <target>`** — อนุมัติ **และ** บังคับว่า `<target>` ต้องตรงกับสิ่งที่กำลังจะเปลี่ยนจริง
+  ปลอดภัยกว่า เพราะคำสั่งที่พิมพ์ผิดจะเอาการอนุมัติของคุณไปใช้กับ pool อื่นไม่ได้
+
+เลือกเป้าหมายด้วย argument แทนเมนู:
+
+| verb | argument |
+|---|---|
+| `offload` `replace` `swap` `demote` | `--disk <bay\|serial\|dev\|by-id>` |
+| `create` | `--disks a,b,c --type mirror --name tank` |
+| `destroy` `scrub` `trim` | ใส่ชื่อ pool เหมือนเดิม |
+| `raid-create` `raid-del` `raid-foreign` | เหมือนเดิม |
+
+ถ้ายังขาดคำตอบไหน มันจะบอก ไม่ค้าง:
+
+```json
+{ "ok": false, "error": { "code": "INVALID_ARG",
+  "message": "'offload which disk? #>' — this command still needs that answer; supply --disk <bay|serial|dev>" } }
+```
+
+งานยาวคืนค่าทันทีที่เริ่ม แล้วให้ poll เอา:
+
+```bash
+b2ctl scrub tank --json --confirm yes
+b2ctl progress --json | jq '.data.running'
+# [{"kind":"scrub","target":"tank","pct":37.2,"eta":"01:04:11","state":"running"}]
+```
+
+`progress` รายงาน scrub / TRIM / hardware rebuild / health-check — อ่านอย่างเดียว
+เรียกถี่แค่ไหนก็ได้
+
+ตอนใส่ `--json` ข้อความที่คำสั่งพิมพ์ระหว่างทำงาน (กล่องยืนยัน, แถบ resilver) จะถูกเก็บไว้ใน
+`data.log` แทนที่จะพิมพ์ออกมา output เลยยังเป็น JSON ก้อนเดียวสะอาดๆ
+
+> `b2ctl watch` ไม่มีโหมด `--json` — มันเป็น loop โต้ตอบบน terminal จะตอบ `UNSUPPORTED`
 
 ---
 

@@ -12,11 +12,19 @@ import sys
 import time
 
 from . import core, hba_raid, safety, spec
-from .common import R, Y, G, C, N, ask
+from .common import R, Y, G, C, N, ask, confirm, confirm_target, is_non_interactive
 from .ui import disk_label
 
 
 def _confirm(msg: str) -> bool:
+    """Yes/No confirm with raid_actions' colour scheme.
+
+    Keeps the exact interactive prompt (colour + "[y/N]" wording); --confirm
+    mode delegates the actual decision to common.confirm instead of
+    re-checking AUTO_CONFIRM here (ADR-007 phase 2).
+    """
+    if is_non_interactive():
+        return confirm(msg)
     try:
         return input(f"{Y}{msg} [y/N] {N}").strip().lower() == "y"
     except (EOFError, KeyboardInterrupt):
@@ -132,7 +140,8 @@ def _run_foreign(kind: str, controller: int, rows: list,
                         f"({what})? the array becomes unimportable"):
             print("cancelled")
             return 1
-        if ask(f"  type the controller number '{controller}' to confirm> ") != str(controller):
+        if not confirm_target(f"  type the controller number '{controller}' to confirm> ",
+                              str(controller)):
             print("cancelled")
             return 1
         op, verb, fn = "raid_foreign_clear", "del", hba_raid.clear_foreign
@@ -281,7 +290,7 @@ def replace(target: str | None = None) -> int:
         for i, m in enumerate(members):
             print(f"  {i}) {disk_label(m)}  [{m.array_name}, PD {m.pd_state}]")
         try:
-            d = members[int(input("pick # to replace: ").strip())]
+            d = members[int(ask("pick # to replace: ", hint="--target <bay|serial>"))]
         except (ValueError, IndexError, EOFError, KeyboardInterrupt):
             print(f"{R}[-] cancelled{N}")
             return 1
@@ -312,7 +321,15 @@ def replace(target: str | None = None) -> int:
         hba_raid.locate(cs, True, ctrl, dry_run=dr)
         print(f"{Y}[!] LED ON at bay {d.bay} — pull that drive, insert the replacement.{N}")
         try:
-            input("press Enter once the new drive is inserted... ")
+            # A non-interactive (--confirm) caller has nobody to wait on, so
+            # skip the wait outright rather than block forever (equivalent to
+            # a default=""). Interactive path keeps the raw input() so a real
+            # Ctrl-C/EOF still raises here and hits the F-090 abort below —
+            # common.ask() would swallow that exception internally and let a
+            # Ctrl-C at this exact prompt fall through into the rebuild logic,
+            # which is precisely the bug F-090 fixed.
+            if not is_non_interactive():
+                input("press Enter once the new drive is inserted... ")
         except (EOFError, KeyboardInterrupt):
             # F-090: aborting here must NOT fall through to the rebuild logic (which
             # would poll an empty bay and, via the old 'Not in progress'==done
@@ -430,7 +447,7 @@ def assign_perc(d, candidates: list) -> int:
         print(f"    {Y}[5] Foreign config on this controller — import or clear it "
               f"(REQUIRED before 2/3/4){N}")
     print("    [s] skip / decide later")
-    choice = input("  action> ").strip().lower()
+    choice = ask("  action> ", hint="--action <1-5|s>").lower()
 
     if choice == "1":
         from . import locate as _loc
@@ -465,7 +482,8 @@ def assign_perc(d, candidates: list) -> int:
             print("  drives for the volume:")
             for i, c in enumerate(candidates, 1):
                 print(f"    [{i}] {disk_label(c)}")
-            sel = input("  pick (space-separated #, blank = just this drive)> ").strip()
+            sel = ask("  pick (space-separated #, blank = just this drive)> ",
+                     hint="--drives <#,#,...>")
             if sel:
                 try:
                     picks = [candidates[int(x) - 1] for x in sel.split()]
@@ -474,13 +492,13 @@ def assign_perc(d, candidates: list) -> int:
                     return 1
         if _refuse_foreign(picks, "build a volume from"):
             return 1
-        level = input("  raid level (raid0/raid1/raid5/raid10) [raid1]> ").strip() or "raid1"
+        level = ask("  raid level (raid0/raid1/raid5/raid10) [raid1]> ", default="raid1") or "raid1"
         return create_vd(level, [p.ctrl_slot or p.bay for p in picks], controller=_ctrl(d))
 
     if choice == "4":
         if _refuse_foreign([d], "add a hot spare"):
             return 1
-        dg = input("  drive-group # to protect (blank = global spare)> ").strip()
+        dg = ask("  drive-group # to protect (blank = global spare)> ", default="")
         tgt = f"DG{dg}" if dg else "global"
         if not _confirm(f"add {disk_label(d)} as a hot spare ({tgt})?"):
             print("cancelled")
@@ -522,7 +540,7 @@ def assign_perc_batch(picks: list, candidates: list) -> int:
         print(f"    {Y}[5] Foreign config on this controller — {len(frn)} of these "
               f"drive(s) are locked by one (REQUIRED before 2/3/4){N}")
     print("    [s] skip / decide later")
-    choice = input("  action> ").strip().lower()
+    choice = ask("  action> ", hint="--action <1-5|s>").lower()
     dr = _dry()
 
     if choice == "1":
@@ -572,13 +590,13 @@ def assign_perc_batch(picks: list, candidates: list) -> int:
             print(f"{R}  ✗ selected drives span multiple controllers — one VD can't "
                   f"be built across controllers. Select drives on one controller.{N}")
             return 1
-        level = input("  raid level (raid0/raid1/raid5/raid10) [raid5]> ").strip() or "raid5"
+        level = ask("  raid level (raid0/raid1/raid5/raid10) [raid5]> ", default="raid5") or "raid5"
         return create_vd(level, [p.ctrl_slot or p.bay for p in picks], controller=_ctrl(picks[0]))
 
     if choice == "4":
         if _refuse_foreign(picks, "add hot spares from"):
             return 1
-        dg = input("  drive-group # to protect (blank = global spare)> ").strip()
+        dg = ask("  drive-group # to protect (blank = global spare)> ", default="")
         tgt = f"DG{dg}" if dg else "global"
         for p in picks:
             print(f"    {disk_label(p)}")

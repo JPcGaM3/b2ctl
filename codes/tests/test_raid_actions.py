@@ -557,10 +557,14 @@ class TestForeignCliEntry(unittest.TestCase):
         self.assertEqual(rc, 0)
 
     def test_clear_goes_through_the_same_guards(self):
+        # The "type the controller number" gate now runs through
+        # common.confirm_target (ADR-007 phase 2), which calls common.ask ->
+        # input() directly rather than the raid_actions module-level `ask`
+        # name, so the fake typed answer is supplied via builtins.input here.
         with patch("b2ctl.raid_actions.safety"), \
              patch("b2ctl.raid_actions._require_raid", return_value=True), \
              patch("b2ctl.raid_actions._confirm", return_value=True), \
-             patch("b2ctl.raid_actions.ask", return_value="0"), \
+             patch("builtins.input", return_value="0"), \
              patch("b2ctl.raid_actions.hba_raid") as mock_hba:
             mock_hba.foreign_config.return_value = _FALL_ROWS
             mock_hba.foreign_bays.return_value = _FALL_BAYS

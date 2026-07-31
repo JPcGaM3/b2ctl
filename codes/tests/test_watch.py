@@ -465,24 +465,28 @@ class TestWatchDemote:
         mock_zfs.demote_to_spare.assert_called_once()
 
     @patch("b2ctl.watch.ui")
+    @patch("b2ctl.common.confirm_target")   # "type the pool name" second gate
     @patch("b2ctl.watch.zfs")
     @patch("b2ctl.watch.core")
-    @patch("b2ctl.watch._ask")
+    @patch("b2ctl.watch._ask", return_value="1")
     def test_demote_last_redundancy_requires_pool_name(self, mock_ask, mock_core,
-                                                        mock_zfs, mock_ui):
+                                                        mock_zfs, mock_confirm_target,
+                                                        mock_ui):
         # F-023: detaching the last mirror leg must require typing the pool name.
+        # The typed name is now checked via common.confirm_target (ADR-007 phase
+        # 2), not watch._ask — mock_ask only drives the earlier "which #" pick.
         from b2ctl.watch import _cmd_demote
         d = _disk(vdev="mirror-0", pool="rpool")
         mock_core.scan.return_value = [d]
         mock_zfs.detach_safety.return_value = "last_redundancy"
         mock_ui.disk_label.return_value = "(1:0) Test"
-        # menu pick "1", then a WRONG pool name -> cancelled
-        mock_ask.side_effect = ["1", "wrongname"]
+        # menu pick "1", then a WRONG pool name -> confirm_target False -> cancelled
+        mock_confirm_target.return_value = False
         _cmd_demote({})
         mock_zfs.demote_to_spare.assert_not_called()
-        # menu pick "1", then the correct pool name -> proceeds
+        # menu pick "1", then the correct pool name -> confirm_target True -> proceeds
         mock_zfs.demote_to_spare.return_value = (True, "")
-        mock_ask.side_effect = ["1", "rpool"]
+        mock_confirm_target.return_value = True
         _cmd_demote({})
         mock_zfs.demote_to_spare.assert_called_once()
 
@@ -795,14 +799,17 @@ class TestOfflineReplace(unittest.TestCase):
 class TestWatchDestroy(unittest.TestCase):
     """destroy: zpool destroy + remove cron, gated by name-confirm."""
 
+    # "type the pool name" second gate is now common.confirm_target
+    # (ADR-007 phase 2), not watch._ask — patch it directly.
     @patch("b2ctl.watch.ui")
+    @patch("b2ctl.common.confirm_target", return_value=True)   # type the pool name
     @patch("b2ctl.watch.safety")
     @patch("b2ctl.watch.zfs")
     @patch("b2ctl.watch.core")
     @patch("b2ctl.watch._confirm", return_value=True)
-    @patch("b2ctl.watch._ask", return_value="tank")   # type the pool name
-    def test_destroy_confirmed_destroys_and_disables_timers(self, _ask, _mc, mock_core,
-                                                            mock_zfs, _safety, mock_ui):
+    def test_destroy_confirmed_destroys_and_disables_timers(self, _mc, mock_core,
+                                                            mock_zfs, _safety,
+                                                            _confirm_target, mock_ui):
         from b2ctl.watch import _cmd_destroy
         mock_zfs.list_pools.return_value = [{"name": "tank", "size": "1T", "health": "ONLINE"}]
         mock_core.scan.return_value = []
@@ -813,11 +820,12 @@ class TestWatchDestroy(unittest.TestCase):
         mock_zfs.remove_pool_timers.assert_called_once_with("tank", dry_run=False)
 
     @patch("b2ctl.watch.ui")
+    @patch("b2ctl.common.confirm_target", return_value=False)   # typed name mismatched
     @patch("b2ctl.watch.zfs")
     @patch("b2ctl.watch.core")
     @patch("b2ctl.watch._confirm", return_value=True)
-    @patch("b2ctl.watch._ask", return_value="wrongname")
-    def test_destroy_name_mismatch_aborts(self, _ask, _mc, mock_core, mock_zfs, mock_ui):
+    def test_destroy_name_mismatch_aborts(self, _mc, mock_core, mock_zfs,
+                                          _confirm_target, mock_ui):
         from b2ctl.watch import _cmd_destroy
         mock_zfs.list_pools.return_value = [{"name": "tank", "size": "1T", "health": "ONLINE"}]
         mock_core.scan.return_value = []

@@ -93,14 +93,13 @@ def _pick_indices(sel, n: int) -> list:
     return out
 
 
-def _ask(prompt: str) -> str:
+def _ask(prompt: str, *, default: str | None = None, hint: str = "") -> str:
     # EOF (Ctrl-D) and Ctrl-C at any prompt return '' (a safe decline) instead
-    # of crashing watch with a traceback (F-022).
-    try:
-        return input(prompt).strip()
-    except (EOFError, KeyboardInterrupt):
-        print()
-        return ""
+    # of crashing watch with a traceback (F-022) — common.ask() owns that
+    # behaviour now (this is watch's single input()); default/hint forward
+    # through so a --confirm caller gets an answer or a NonInteractive naming
+    # the gap (ADR-007 phase 2).
+    return common.ask(prompt, default=default, hint=hint)
 
 
 def _pick_pool() -> str | None:
@@ -112,14 +111,43 @@ def _pick_pool() -> str | None:
         return pools[0]["name"]
     for i, p in enumerate(pools, 1):
         print(f"    [{i}] {p['name']} ({p['health']})")
-    sel = _ask("  pool #> ")
+    sel = _ask("  pool #> ", hint="the pool name as an argument")
     try:
         return pools[_one_based(sel)]["name"]
     except (ValueError, IndexError):
         return None
 
 
+def _resolve_target(candidates, target: str):
+    """Resolve a `target` token (bay / serial / dev / by_id) against `candidates`
+    — the SAME list the interactive menu would have printed — for a non-
+    interactive caller (MCP/web UI, ADR-007 phase 2) that names its disk instead
+    of picking a number. Match order mirrors the existing precedent
+    (`raid_actions._pick_member`, `cli._resolve_devs`): bay, serial, dev, dev
+    without the '/dev/' prefix, by_id.
+
+    Returns the matched Disk on exactly one hit. On zero or >1 hits it prints an
+    error (mirroring `_cmd_destroy`'s 'no such pool' line / `zfs_actions._aux_replace`'s
+    'ambiguous' line) and returns None — callers must treat None as "stop", never
+    fall back to guessing a candidate (§9 / this ADR's explicit non-goal)."""
+    matches = [d for d in candidates
+               if target in (d.bay, d.serial, d.dev, d.dev.replace("/dev/", ""), d.by_id)]
+    if not matches:
+        print(f"{R}  no such disk '{target}'{N}")
+        return None
+    if len(matches) > 1:
+        labels = ", ".join(ui.disk_label(m) for m in matches)
+        print(f"{R}  ambiguous target '{target}' — matches {len(matches)} disks: {labels}{N}")
+        return None
+    return matches[0]
+
+
 def _confirm(msg: str) -> bool:
+    # Interactive formatting/wording is watch's own and stays byte-identical;
+    # the yes/no decision — including the --confirm auto-approve — is sourced
+    # from common.confirm, not re-implemented here (ADR-007 phase 2).
+    if common.is_non_interactive():
+        return common.confirm(msg)
     return _ask(f"{Y}  {msg} [y/N]> {N}").lower() in ("y", "yes")
 
 
@@ -151,6 +179,12 @@ def _confirm_op(op, disk_from, disk_to, pool, vdev, cmds, snap_path=None):
         snap_short = snap_path[-44:] if len(snap_path) > 44 else snap_path
         _row("Snap:", snap_short)
     print(f"└{'─'*width}┘")
+    # --confirm mode auto-approves once the box above is printed — the caller
+    # already stated intent for the whole command (no per-prompt answer to
+    # give). cli.py captures this box's stdout for --json separately, not here
+    # (ADR-007 phase 2).
+    if common.is_non_interactive():
+        return True
     return _ask("Proceed? [y/N]: ").lower() in ("y", "yes")
 
 
@@ -238,7 +272,7 @@ def _assign_free_disk(d, tbw, all_disks=None) -> None:
     print("    [5] ADD single disk to a pool (expand capacity - WARNING: no redundancy)")
     print("    [6] WIPE it blank (for a new pool)")
     print("    [s] skip / decide later")
-    choice = _ask("  action> ")
+    choice = _ask("  action> ", hint="which action to take on this disk (not yet a separate flag)")
 
     if choice == "1":
         print(G + f"  ✔ Blinking {d.bay if locate.is_perc_pd(d) else d.dev}..." + N)
@@ -255,7 +289,7 @@ def _assign_free_disk(d, tbw, all_disks=None) -> None:
             return
         for i, e in enumerate(bad, 1):
             print(f"    [{i}] {e['pool']}: {e['token']} ({e['state']})")
-        sel = _ask("  replace #> ")
+        sel = _ask("  replace #> ", hint="the degraded disk to replace, e.g. --disk <bay|serial|dev>")
         try:
             tgt = bad[_one_based(sel)]
         except (ValueError, IndexError):
@@ -300,7 +334,7 @@ def _assign_free_disk(d, tbw, all_disks=None) -> None:
                 return
             for i, x in enumerate(in_pool, 1):
                 print(f"    [{i}] {ui.disk_label(x)} (vdev {x.vdev})")
-            sel = _ask("  attach to which #> ")
+            sel = _ask("  attach to which #> ", hint="the existing disk to attach to, e.g. --disk <bay|serial|dev>")
             try:
                 tgt = in_pool[_one_based(sel)]
             except (ValueError, IndexError):
@@ -336,7 +370,7 @@ def _assign_free_disks_batch(disks, tbw) -> None:
     print("    [2] Add all to a pool as hot SPARE")
     print("    [3] WIPE all blank")
     print("    [s] skip / decide later")
-    choice = _ask("  action> ")
+    choice = _ask("  action> ", hint="which batch action to take (not yet a separate flag)")
 
     if choice == "1":
         for d in disks:
@@ -478,7 +512,8 @@ def _cmd_assign(tbw) -> None:
                   f"{C}(PERC Unconfigured-Good){N}")
         else:
             print(f"    [{i}] bay {d.bay or '?'} {d.dev} ({d.model}, SN {d.serial or '?'})")
-    sel = _ask("  assign which #> (space-separated for batch) ")
+    sel = _ask("  assign which #> (space-separated for batch) ",
+               hint="the disk(s) to assign, e.g. --disks <bay|serial|dev>,...")
     # Parse one or more 1-based indices (shared _pick_indices: reject <1, dedupe).
     try:
         picks = [tagged[i] for i in _pick_indices(sel, len(tagged))]
@@ -546,21 +581,30 @@ def _cmd_refresh(tbw) -> None:
 
 
 
-def _cmd_offload(tbw) -> bool:
+def _cmd_offload(tbw, target=None) -> bool:
     """Return True only when the offload actually mutated the pool (F-070 — feeds
-    the CLI exit code). Cancels / guard-refusals / failures return False."""
+    the CLI exit code). Cancels / guard-refusals / failures return False.
+
+    `target` (bay/serial/dev/by_id) skips the menu (ADR-007 phase 2) — resolved
+    against the SAME `in_pool` candidate list the menu would have printed via
+    `_resolve_target`; None keeps today's interactive prompt byte-identical."""
     disks = core.scan(tbw)
     in_pool = [d for d in disks if d.in_pool and d.pool]
     if not in_pool:
         print(f"{Y}  no in-pool disks to offload{N}")
         return False
-    for i, d in enumerate(in_pool, 1):
-        print(f"    [{i}] bay {d.bay or '?'} {d.dev} in {d.pool} (vdev {d.vdev})")
-    sel = _ask("  offload which #> ")
-    try:
-        d = in_pool[_one_based(sel)]
-    except (ValueError, IndexError):
-        print(f"{Y}  cancelled{N}"); return False
+    if target is not None:
+        d = _resolve_target(in_pool, target)
+        if d is None:
+            return False
+    else:
+        for i, d in enumerate(in_pool, 1):
+            print(f"    [{i}] bay {d.bay or '?'} {d.dev} in {d.pool} (vdev {d.vdev})")
+        sel = _ask("  offload which #> ", hint="the disk to offload, e.g. --disk <bay|serial|dev>")
+        try:
+            d = in_pool[_one_based(sel)]
+        except (ValueError, IndexError):
+            print(f"{Y}  cancelled{N}"); return False
 
     if d.vdev == "spares":
         if _confirm(f"This disk is a hot spare. Remove {ui.disk_label(d)} from '{d.pool}'?"):
@@ -584,7 +628,7 @@ def _cmd_offload(tbw) -> bool:
         if d.pool == "rpool":
             print(f"{Y}    rpool is the boot pool; a later disk failure makes the node "
                   f"unbootable. Prefer [r]eplace over offload here.{N}")
-        if _ask(f"  type the pool name '{d.pool}' to detach anyway> ") == d.pool:
+        if common.confirm_target(f"  type the pool name '{d.pool}' to detach anyway> ", d.pool):
             ok, out = zfs.detach(d.pool, _pool_dev(d), dry_run=_DRY_RUN)
             print((G + "  ✔ detached" if ok else R + f"  ✗ failed: {out}") + N)
             if ok:
@@ -621,7 +665,8 @@ def _cmd_offload(tbw) -> bool:
 
 def _cmd_locate(tbw) -> None:
     disks = core.scan_light(tbw)     # locate needs identity + topology only (F-102)
-    target = _ask("  locate which (bay/serial/sdX)> ")
+    target = _ask("  locate which (bay/serial/sdX)> ",
+                  hint="the bay/serial/dev — or use `b2ctl locate <target>` directly")
     if not target:
         return
     chosen = None
@@ -766,7 +811,11 @@ def _offline_and_replace(d, tbw) -> None:
     if not _DRY_RUN:
         print(f"{Y}  pull bay {d.bay or '?'} and insert the replacement into the SAME bay.{N}")
         locate.blink_disk(d, locate.DEFAULT_SECONDS)
-    _ask("  press Enter once the new disk is inserted> ")
+    # Blank IS the only documented answer here (the prompt just gates on a
+    # keypress; the return value is never read) — default="" lets --confirm
+    # proceed straight to auto-detection instead of blocking forever waiting
+    # for a physical action that can't be automated (ADR-007 phase 2).
+    _ask("  press Enter once the new disk is inserted> ", default="")
     after = _free(core.scan(tbw))
     new = None
     if d.bay is not None:
@@ -781,21 +830,30 @@ def _offline_and_replace(d, tbw) -> None:
     _replace_member(d, new)
 
 
-def _cmd_replace(tbw) -> bool:
-    """Return True only on a completed replace (F-070 — feeds the CLI exit code)."""
+def _cmd_replace(tbw, target=None) -> bool:
+    """Return True only on a completed replace (F-070 — feeds the CLI exit code).
+
+    `target` (bay/serial/dev/by_id) skips the menu (ADR-007 phase 2), resolved
+    against the same `in_pool` candidate list via `_resolve_target`; None keeps
+    the interactive prompt byte-identical."""
     disks = core.scan(tbw)
     # you replace an active member onto a spare — a spare is not itself a
     # replace target, so exclude spares from the candidate list.
     in_pool = [d for d in disks if d.in_pool and d.pool and not d.is_spare]
     if not in_pool:
         print(f"{Y}  no in-pool disks to replace{N}"); return False
-    for i, d in enumerate(in_pool, 1):
-        print(f"    [{i}] {ui.disk_label(d)} in {d.pool}")
-    sel = _ask("  replace which #> ")
-    try:
-        d = in_pool[_one_based(sel)]
-    except (ValueError, IndexError):
-        print(f"{Y}  cancelled{N}"); return False
+    if target is not None:
+        d = _resolve_target(in_pool, target)
+        if d is None:
+            return False
+    else:
+        for i, d in enumerate(in_pool, 1):
+            print(f"    [{i}] {ui.disk_label(d)} in {d.pool}")
+        sel = _ask("  replace which #> ", hint="the disk to replace, e.g. --disk <bay|serial|dev>")
+        try:
+            d = in_pool[_one_based(sel)]
+        except (ValueError, IndexError):
+            print(f"{Y}  cancelled{N}"); return False
 
     spares = [x for x in disks if x.vdev == "spares" and x.vdev_state == "AVAIL" and x.pool == d.pool]
     if not spares:
@@ -805,34 +863,58 @@ def _cmd_replace(tbw) -> bool:
     return _replace_onto_spare(d, spares[0])
 
 
-def _cmd_create(tbw, raid_type=None) -> bool:
-    """Return True only on a created pool (F-070 — feeds the CLI exit code)."""
+def _cmd_create(tbw, raid_type=None, disks=None, name=None) -> bool:
+    """Return True only on a created pool (F-070 — feeds the CLI exit code).
+
+    `disks` (a list of bay/serial/dev/by_id tokens) and `name` skip their
+    respective prompts (ADR-007 phase 2). `disks` is resolved against the same
+    `available` (is_poolable) candidate list the menu would have printed, one
+    token at a time via `_resolve_target` — so a token that isn't poolable (in a
+    pool already, a ghost, or a hidden PERC member) errors out exactly like an
+    out-of-range menu number does today. Both None keep the interactive prompts
+    byte-identical. `raid_type` semantics are unchanged."""
     # Disk.is_poolable excludes HIDDEN PERC drives (megaraid passthrough → shared
     # /dev/sda) and ghosts; a JBOD'd drive owns its own /dev/sdX and is poolable (F-103).
     available = [d for d in core.scan(tbw) if d.is_poolable]
     if not available:
         print(f"{Y}  no available disks to create pool{N}")
         return False
-    for i, d in enumerate(available, 1):
-        print(f"    [{i}] {d.dev} (bay {d.bay or '?'})")
-    sel = _ask("  pick disks (space-separated #)> ")
-    try:
-        indices = _pick_indices(sel, len(available))
+    if disks is not None:
+        indices = []
+        for tok in disks:
+            d = _resolve_target(available, tok)
+            if d is None:
+                return False
+            idx = next(i for i, x in enumerate(available) if x is d)
+            if idx not in indices:
+                indices.append(idx)
         devs = [available[i].by_id or available[i].dev for i in indices]
-    except (ValueError, IndexError):
-        print(f"{Y}  cancelled or invalid selection{N}")
-        return False
+    else:
+        for i, d in enumerate(available, 1):
+            print(f"    [{i}] {d.dev} (bay {d.bay or '?'})")
+        sel = _ask("  pick disks (space-separated #)> ",
+                   hint="the disks to use, e.g. --disks <bay|serial|dev>,...")
+        try:
+            indices = _pick_indices(sel, len(available))
+            devs = [available[i].by_id or available[i].dev for i in indices]
+        except (ValueError, IndexError):
+            print(f"{Y}  cancelled or invalid selection{N}")
+            return False
     if not devs:
         return False
     # Over-provision: blank = whole disk (idiomatic); a size (e.g. 32G) partitions
     # each disk and hands ZFS the -part1 (applied below, after any wipe).
-    size = _ask("  size to use per disk (over-provision) [full disk]> ")
-    name = _ask("  pool name> ")
+    # default="" reproduces the documented "[full disk]" blank-Enter behaviour.
+    size = _ask("  size to use per disk (over-provision) [full disk]> ", default="")
+    if name is None:
+        name = _ask("  pool name> ", hint="the new pool name, e.g. --name <pool>")
     if not name:
         return False
     if raid_type is None:
+        # default="" -> the existing `or "mirror"` fallback reproduces the
+        # documented "[mirror]" blank-Enter default.
         raid_type = _ask("  raid type (stripe, mirror, raid10, raidz1, raidz2) "
-                         "[mirror]> ") or "mirror"
+                         "[mirror]> ", default="") or "mirror"
     if raid_type not in ("stripe", "mirror", "raid10", "raidz1", "raidz2"):
         print(f"{R}  invalid raid type{N}")
         return False
@@ -857,24 +939,26 @@ def _cmd_create(tbw, raid_type=None) -> bool:
     # ashift (generic), then autotrim + autoscrub as explicit choices, each seeded
     # from the sticky pool_defaults so a repeat create pre-fills the last answer.
     _pd = _cfg.pool_defaults()
-    pool_opts["ashift"] = _ask(f"    ashift [{pool_opts['ashift']}]> ") or pool_opts["ashift"]
+    # Every _ask below uses default="" so the pre-existing `or <default>`
+    # reproduces the documented "[bracket]" blank-Enter default exactly.
+    pool_opts["ashift"] = _ask(f"    ashift [{pool_opts['ashift']}]> ", default="") or pool_opts["ashift"]
     # autotrim + autoscrub: both default OFF (manual is the primary maintenance
     # path) and both ordered [1] off / [2] on for consistency. OFF installs NO
     # timer — you TRIM/scrub manually via [m]aint or `b2ctl maint trim|scrub`.
     _at_def = "2" if _pd.get("autotrim") == "on" else "1"
     print("    autotrim: [1] off — manual TRIM via [m]aint / `b2ctl maint trim` (recommended)")
     print("              [2] on  — zpool autotrim=on (ZFS trims inline)")
-    autotrim_on = (_ask(f"    choose [{_at_def}]> ") or _at_def) == "2"
+    autotrim_on = (_ask(f"    choose [{_at_def}]> ", default="") or _at_def) == "2"
     pool_opts["autotrim"] = "on" if autotrim_on else "off"
     # autoscrub is an explicit opt-in (default OFF — reverses v0.16.0, see ADR-003).
     _as_def = "2" if _pd.get("autoscrub") else "1"
     print("    autoscrub: [1] off — manual scrub via [m]aint / `b2ctl maint scrub` (recommended)")
     print("               [2] on  — monthly zfs-scrub timer (self-heals silent bitrot)")
-    autoscrub_on = (_ask(f"    choose [{_as_def}]> ") or _as_def) == "2"
+    autoscrub_on = (_ask(f"    choose [{_as_def}]> ", default="") or _as_def) == "2"
     for k in fs_opts:
         if k in _HINTS:
             print(f"      ({_HINTS[k]})")
-        fs_opts[k] = _ask(f"    {k} [{fs_opts[k]}]> ") or fs_opts[k]
+        fs_opts[k] = _ask(f"    {k} [{fs_opts[k]}]> ", default="") or fs_opts[k]
 
     # Over-provision path wipes every selected disk itself (a clean GPT is needed
     # before `sgdisk -n`), so it replaces — not adds to — the whole-disk dirty
@@ -937,7 +1021,8 @@ def _cmd_destroy(tbw, target=None) -> bool:
     if pool is None:
         for i, p in enumerate(pools, 1):
             print(f"    [{i}] {p['name']} ({p['size']}, {p['health']})")
-        sel = _ask("  destroy which #> ")
+        sel = _ask("  destroy which #> ",
+                   hint="the pool name as an argument (e.g. `b2ctl destroy <pool>`)")
         try:
             pool = pools[_one_based(sel)]["name"]
         except (ValueError, IndexError):
@@ -953,7 +1038,7 @@ def _cmd_destroy(tbw, target=None) -> bool:
     print(f"{R}  [!] destroying '{pool}' ERASES ALL DATA on it. This cannot be undone.{N}")
     if not _confirm(f"destroy pool '{pool}'?"):
         print("  cancelled"); return False
-    if _ask(f"  type the pool name '{pool}' to confirm> ") != pool:
+    if not common.confirm_target(f"  type the pool name '{pool}' to confirm> ", pool):
         print(f"{Y}  name did not match — cancelled{N}"); return False
 
     op_id = safety.begin_op("destroy", "", "", "", pool, pool,
@@ -971,8 +1056,12 @@ def _cmd_destroy(tbw, target=None) -> bool:
     return ok
 
 
-def _cmd_swap(tbw) -> bool:
-    """Return True only on a completed swap (F-070 — feeds the CLI exit code)."""
+def _cmd_swap(tbw, target=None) -> bool:
+    """Return True only on a completed swap (F-070 — feeds the CLI exit code).
+
+    `target` (bay/serial/dev/by_id) skips the menu (ADR-007 phase 2), resolved
+    against the same `candidates` list via `_resolve_target`; None keeps the
+    interactive prompt byte-identical."""
     disks = core.scan(tbw)
     # swap moves an ACTIVE pool member onto a spare — a spare itself is not a
     # valid swap source, so exclude spares from the candidate list.
@@ -980,13 +1069,18 @@ def _cmd_swap(tbw) -> bool:
     if not candidates:
         print(f"{Y}  no in-pool disks to swap{N}")
         return False
-    for i, d in enumerate(candidates, 1):
-        print(f"    [{i}] {ui.disk_label(d)} in {d.pool}")
-    sel = _ask("  swap which #> ")
-    try:
-        d = candidates[_one_based(sel)]
-    except (ValueError, IndexError):
-        print(f"{Y}  cancelled{N}"); return False
+    if target is not None:
+        d = _resolve_target(candidates, target)
+        if d is None:
+            return False
+    else:
+        for i, d in enumerate(candidates, 1):
+            print(f"    [{i}] {ui.disk_label(d)} in {d.pool}")
+        sel = _ask("  swap which #> ", hint="the disk to swap, e.g. --disk <bay|serial|dev>")
+        try:
+            d = candidates[_one_based(sel)]
+        except (ValueError, IndexError):
+            print(f"{Y}  cancelled{N}"); return False
 
     spares = [x for x in disks if x.vdev == "spares" and x.vdev_state == "AVAIL" and x.pool == d.pool]
     if not spares:
@@ -1040,20 +1134,29 @@ def _cmd_swap(tbw) -> bool:
     return True
 
 
-def _cmd_demote(tbw) -> bool:
-    """Return True only on a completed demote (F-070 — feeds the CLI exit code)."""
+def _cmd_demote(tbw, target=None) -> bool:
+    """Return True only on a completed demote (F-070 — feeds the CLI exit code).
+
+    `target` (bay/serial/dev/by_id) skips the menu (ADR-007 phase 2), resolved
+    against the same `mirror_members` list via `_resolve_target`; None keeps
+    the interactive prompt byte-identical."""
     disks = core.scan(tbw)
     mirror_members = [d for d in disks if d.in_pool and d.vdev and "mirror" in d.vdev]
     if not mirror_members:
         print(f"{Y}  no mirror members available to demote{N}")
         return False
-    for i, d in enumerate(mirror_members, 1):
-        print(f"    [{i}] {ui.disk_label(d)} in {d.pool}")
-    sel = _ask("  demote which #> ")
-    try:
-        d = mirror_members[_one_based(sel)]
-    except (ValueError, IndexError):
-        print(f"{Y}  cancelled{N}"); return False
+    if target is not None:
+        d = _resolve_target(mirror_members, target)
+        if d is None:
+            return False
+    else:
+        for i, d in enumerate(mirror_members, 1):
+            print(f"    [{i}] {ui.disk_label(d)} in {d.pool}")
+        sel = _ask("  demote which #> ", hint="the mirror member to demote, e.g. --disk <bay|serial|dev>")
+        try:
+            d = mirror_members[_one_based(sel)]
+        except (ValueError, IndexError):
+            print(f"{Y}  cancelled{N}"); return False
 
     state = zfs.detach_safety(d.pool, _pool_dev(d))
     if state == "refuse":
@@ -1065,7 +1168,7 @@ def _cmd_demote(tbw) -> bool:
         if d.pool == "rpool":
             print(f"{Y}    rpool is the boot pool; a later boot-disk failure would make "
                   f"the node unbootable and unrecoverable.{N}")
-        if _ask(f"  type the pool name '{d.pool}' to demote anyway> ") != d.pool:
+        if not common.confirm_target(f"  type the pool name '{d.pool}' to demote anyway> ", d.pool):
             print(f"{Y}  cancelled{N}"); return False
     elif not _confirm(f"demote {ui.disk_label(d)} in '{d.pool}' to a hot spare?"):
         return False
@@ -1093,7 +1196,8 @@ def _cmd_extend(tbw) -> None:
     print("  [2] add SLOG log   (sync-write accel; mirror + PLP recommended)")
     print("  [3] remove a cache/log device")
     print("  [4] replace/repair a degraded cache/log device")
-    choice = _ask("  action> ")
+    choice = _ask("  action> ", hint="use cache-add/log-add/cache-rm/log-rm/cache-replace/"
+                                     "log-replace directly instead of the extend menu")
 
     if choice in ("1", "2"):
         avail = _avail_for_aux(tbw)
@@ -1101,7 +1205,8 @@ def _cmd_extend(tbw) -> None:
             print(f"{Y}  no free disks available{N}"); return
         for i, d in enumerate(avail, 1):
             print(f"    [{i}] {d.dev} (bay {d.bay or '?'})")
-        sel = _ask("  pick disk(s) (space-separated #)> ")
+        sel = _ask("  pick disk(s) (space-separated #)> ",
+                   hint="the device(s) — cache-add/log-add take them as positional args")
         try:
             idxs = _pick_indices(sel, len(avail))
         except (ValueError, IndexError):
@@ -1110,7 +1215,8 @@ def _cmd_extend(tbw) -> None:
         if not devs:
             return
         # Over-provision (blank = whole device). SLOG endurance is the real use.
-        size = _ask("  size to use per device (over-provision) [full disk]> ")
+        # default="" reproduces the documented "[full disk]" blank-Enter default.
+        size = _ask("  size to use per device (over-provision) [full disk]> ", default="")
         if size:
             parts = _maybe_partition(avail, idxs, size)
             if parts is None:
@@ -1129,8 +1235,10 @@ def _cmd_extend(tbw) -> None:
                 print("    [1] mirror  — redundant log (recommended)")
                 print("    [2] raid10  — stripe of mirrors (even # of disks >= 4)")
                 print("    [3] single/striped — NO redundancy (log loss can lose sync writes)")
+                # default="" -> the existing `or "1"` reproduces the documented
+                # "[1]" blank-Enter default.
                 topo = {"1": "mirror", "2": "raid10", "3": "single"}.get(
-                    _ask("    choose [1]> ") or "1")
+                    _ask("    choose [1]> ", default="") or "1")
                 if topo is None:
                     print(f"{Y}  cancelled{N}"); return
             if len(devs) == 1:
@@ -1164,7 +1272,9 @@ def _cmd_extend(tbw) -> None:
         for i, t in enumerate(aux, 1):
             print(f"    [{i}] {t}")
         try:
-            tok = aux[_one_based(_ask("  remove which #> "))]
+            tok = aux[_one_based(_ask(
+                "  remove which #> ",
+                hint="the cache/log leaf token — cache-rm/log-rm take it as a positional arg"))]
         except (ValueError, IndexError):
             print(f"{Y}  cancelled{N}"); return
         if _confirm(f"remove '{tok}' from '{pool}'?"):
@@ -1190,7 +1300,8 @@ def _cmd_maint(tbw, *, action=None, pool=None) -> bool:
         print("  [1] scrub  (verify checksums + self-heal)")
         print("  [2] trim   (release unused SSD blocks)")
         print("  [3] health-check (smartctl -t long + optional badblocks + verdict)")
-        action = {"1": "scrub", "2": "trim", "3": "health"}.get(_ask("  action> "))
+        action = {"1": "scrub", "2": "trim", "3": "health"}.get(_ask(
+            "  action> ", hint="the maint subcommand directly: `b2ctl maint scrub|trim|health`"))
     if action not in ("scrub", "trim", "health"):
         print(f"{Y}  cancelled{N}"); return False
 
@@ -1316,7 +1427,9 @@ def _repair_aux_interactive(tbw, pool: str) -> None:
         kind = "SLOG mirror-leg" if l["mirror_leg"] else l["klass"]
         print(f"    [{i}] {kind:14} {l['token']}  {R}{l['state']}{N}")
     try:
-        leaf = bad[_one_based(_ask("  repair which #> "))]
+        leaf = bad[_one_based(_ask(
+            "  repair which #> ",
+            hint="the degraded leaf — cache-replace/log-replace take it as a positional arg"))]
     except (ValueError, IndexError):
         print(f"{Y}  cancelled{N}"); return
     avail = _avail_for_aux(tbw)
@@ -1325,7 +1438,9 @@ def _repair_aux_interactive(tbw, pool: str) -> None:
     for i, d in enumerate(avail, 1):
         print(f"    [{i}] {d.dev} (bay {d.bay or '?'})")
     try:
-        new = avail[_one_based(_ask("  replacement disk #> "))]
+        new = avail[_one_based(_ask(
+            "  replacement disk #> ",
+            hint="the replacement disk — cache-replace/log-replace take it as a positional arg"))]
     except (ValueError, IndexError):
         print(f"{Y}  cancelled{N}"); return
     _repair_aux(pool, leaf, new)
@@ -1407,7 +1522,8 @@ def _maint_health(tbw) -> bool:
     if state:
         print(f"  {len(state)} health-check(s) in progress.")
         print("    [v] view live status   [c] cancel one   [a] cancel all   [n] start new")
-        ch = _ask("  action> ").lower()
+        ch = _ask("  action> ", hint="use `b2ctl maint health --status`, `--cancel <target>`, "
+                                     "or `--cancel-all` directly").lower()
         if ch == "v":
             burnin.status_view(); return False
         if ch == "a":
@@ -1418,7 +1534,9 @@ def _maint_health(tbw) -> bool:
             for i, r in enumerate(state, 1):
                 print(f"    [{i}] bay {r.get('bay') or '?'} {r['dev']} ({r.get('serial') or '?'})")
             try:
-                r = state[_one_based(_ask("  cancel which #> "))]
+                r = state[_one_based(_ask(
+                    "  cancel which #> ",
+                    hint="the disk, via `b2ctl maint health --cancel <bay|serial|dev>`"))]
             except (ValueError, IndexError):
                 print(f"{Y}  cancelled{N}"); return False
             if _confirm(f"cancel health-check on bay {r.get('bay') or '?'} {r['dev']}?"):
@@ -1432,7 +1550,8 @@ def _maint_health(tbw) -> bool:
         print(f"{Y}  no free disks to health-check{N}"); return False
     for i, d in enumerate(avail, 1):
         print(f"    [{i}] {d.dev} (bay {d.bay or '?'}) {d.model}")
-    sel = _ask("  health-check which #> (space-separated) ")
+    sel = _ask("  health-check which #> (space-separated) ",
+               hint="the disk(s), via `b2ctl maint health <bay|serial|dev> ...`")
     try:
         picks = [avail[i] for i in _pick_indices(sel, len(avail))]
     except (ValueError, IndexError):

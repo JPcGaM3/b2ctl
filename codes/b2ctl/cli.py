@@ -346,6 +346,102 @@ def _bays_calibrate(as_json: bool) -> int:
     return 0
 
 
+def _progress(args) -> int:
+    """`b2ctl progress` — what is running right now, without blocking on it.
+
+    A scrub takes hours and a resilver longer; an MCP/web caller cannot hold a
+    request open for that. Everything here is a PURE READ of state the kernel and
+    the controller already publish, so polling is cheap and side-effect-free (§9).
+    """
+    from . import jsonout
+    from . import burnin as _burnin_mod
+    items = []
+
+    for p in zfs.list_pools():
+        name = p["name"]
+        try:
+            sc = zfs.poll_scrub_status(name)
+        except Exception:
+            sc = {}
+        if sc.get("in_progress"):
+            items.append({"kind": "scrub", "target": name,
+                          "pct": sc.get("done"), "eta": sc.get("eta"),
+                          "state": "running"})
+        try:
+            tr = zfs.poll_trim_status(name)
+        except Exception:
+            tr = {}
+        if tr.get("trimming"):
+            items.append({"kind": "trim", "target": name,
+                          "pct": tr.get("done"), "eta": None, "state": "running"})
+
+    # Hardware rebuilds, one per PERC member that reports one in flight.
+    try:
+        from . import hba_raid
+        if hba_raid.have_tool():
+            for d in core.scan_light():
+                if d.array_type == "HW" and d.ctrl_slot:
+                    rb = hba_raid.rebuild_progress(d.ctrl_slot,
+                                                   d.ctrl if d.ctrl is not None
+                                                   else hba_raid.CONTROLLER)
+                    if rb.get("in_progress"):
+                        items.append({"kind": "rebuild", "target": d.ctrl_slot,
+                                      "pct": rb.get("pct"), "eta": None,
+                                      "state": "running"})
+    except Exception:
+        pass
+
+    # Health-check (burn-in) runs detached and keeps its own state file — a flat
+    # list of per-disk records, so `--status` can re-attach after a Ctrl-C.
+    try:
+        for rec in _burnin_mod.load_state():
+            st = _burnin_mod.selftest_status(rec["dev"], rec.get("dtype", ""))
+            items.append({"kind": "health-check",
+                          "target": rec.get("bay") or rec.get("dev"),
+                          "dev": rec.get("dev"), "serial": rec.get("serial") or None,
+                          "pct": st.get("pct"),
+                          "eta": ui.fmt_eta(st.get("eta_min")) or None,
+                          "state": "running" if st.get("running") else "done"})
+    except Exception:
+        pass
+
+    if getattr(args, "json", False):
+        return jsonout.emit("progress", {"running": items})
+    if not items:
+        print("nothing running")
+        return 0
+    for it in items:
+        pct = "-" if it["pct"] is None else f"{it['pct']}%"
+        print(f"  {it['kind']:<14}{str(it['target']):<20}{pct:<8}{it.get('eta') or ''}")
+    return 0
+
+
+def _json_mutation(args) -> int:
+    """Run a MUTATING verb under --json and wrap whatever it printed.
+
+    Read verbs build their own envelope. Mutating ones narrate as they work —
+    confirm boxes, resilver bars, per-step results — all to stdout, which would
+    shred the envelope. Capturing it here and returning it as `data.log` keeps
+    that narration available to a web UI without rewriting several hundred
+    print() calls across watch/raid_actions/safety (ADR-007 phase 2).
+    """
+    import contextlib
+    import io
+    from . import jsonout
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = args.func(args)
+    cmd = getattr(args, "cmd", "?")
+    log = buf.getvalue()
+    if rc == 0:
+        return jsonout.emit(cmd, {"log": log})
+    # A non-zero rc here means the operation failed OR was declined at a confirm;
+    # both are "did not happen", and the log says which.
+    return jsonout.fail(cmd, jsonout.ERR_OP_FAILED,
+                        "the command did not complete — see data.log",
+                        data={"log": log})
+
+
 def _watch(_args) -> int:
     return watch.run()
 
@@ -373,28 +469,37 @@ def _locate(args) -> int:
 
 # ZFS lifecycle subcommands go through the public zfs_actions contract (not
 # watch's underscore-privates) and propagate a real exit code (F-070).
-def _offload(_args) -> int:
-    return zfs_actions.offload()
+def _disk_arg(args):
+    """The --disk token, or None to keep today's interactive picker (ADR-007)."""
+    return getattr(args, "disk", None)
 
 
-def _replace(_args) -> int:
-    return zfs_actions.replace()
+def _offload(args) -> int:
+    return zfs_actions.offload(target=_disk_arg(args))
+
+
+def _replace(args) -> int:
+    return zfs_actions.replace(target=_disk_arg(args))
 
 
 def _create(args) -> int:
-    return zfs_actions.create(raid10=getattr(args, "raid10", False))
+    disks = [t for t in (getattr(args, "disks", None) or "").split(",") if t.strip()]
+    return zfs_actions.create(raid10=getattr(args, "raid10", False),
+                              raid_type=getattr(args, "type", None),
+                              disks=[t.strip() for t in disks] or None,
+                              name=getattr(args, "name", None))
 
 
 def _destroy(args) -> int:
     return zfs_actions.destroy(pool=getattr(args, "pool", None))
 
 
-def _swap(_args) -> int:
-    return zfs_actions.swap()
+def _swap(args) -> int:
+    return zfs_actions.swap(target=_disk_arg(args))
 
 
-def _demote(_args) -> int:
-    return zfs_actions.demote()
+def _demote(args) -> int:
+    return zfs_actions.demote(target=_disk_arg(args))
 
 
 def _scrub(args) -> int:
@@ -989,25 +1094,39 @@ def _pos_int(s: str) -> int:
 _JSON_HELP = ("machine-readable output: a single JSON envelope on stdout "
               "(schema_version/ok/data/warnings/error) and nothing else")
 
+_CONFIRM_HELP = ("answer the confirmation prompts without asking, so a program "
+                 "can drive a mutating command. `yes` approves; naming the "
+                 "TARGET (pool/bay/controller) additionally requires it to match "
+                 "what is about to be changed. Omit it and b2ctl prompts exactly "
+                 "as it does today.")
 
-def _add_json_flag(parser) -> None:
-    """Accept --json on every subcommand, at any position (F-139 / ADR-007).
+
+def _add_global_flags(parser) -> None:
+    """Accept the process-wide flags on every subcommand too (F-139 / ADR-007).
+
+    Declared only on the top-level parser they work as `b2ctl --json status` but
+    NOT as `b2ctl status --json`, because argparse hands everything after the verb
+    to the subparser — and `b2ctl offload --confirm yes` is exactly how an
+    operator types it.
 
     default=SUPPRESS is load-bearing. A subparser's own default would OVERWRITE
     the value the top-level flag already set, so `b2ctl --json status` would
     silently parse as json=False. With SUPPRESS the subcommand copy only sets the
-    attribute when the flag is actually present, and both `b2ctl --json <verb>`
-    and `b2ctl <verb> --json` work.
+    attribute when the flag is actually present, so both positions work.
     """
-    try:
-        parser.add_argument("--json", action="store_true",
-                            default=argparse.SUPPRESS, help=_JSON_HELP)
-    except argparse.ArgumentError:
-        pass                    # this subcommand already declares --json itself
+    for args_, kwargs_ in (
+            (("--json",), {"action": "store_true", "help": _JSON_HELP}),
+            (("--dry-run",), {"action": "store_true", "dest": "dry_run",
+                              "help": "preview write commands without executing them"}),
+            (("--confirm",), {"metavar": "yes|TARGET", "help": _CONFIRM_HELP})):
+        try:
+            parser.add_argument(*args_, default=argparse.SUPPRESS, **kwargs_)
+        except argparse.ArgumentError:
+            pass                # this subcommand already declares it itself
     for act in parser._actions:                     # recurse into `maint`, `config`
         if isinstance(act, argparse._SubParsersAction):
             for sp in act.choices.values():
-                _add_json_flag(sp)
+                _add_global_flags(sp)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1017,6 +1136,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", default=False,
                    help="preview write commands without executing them")
     p.add_argument("--json", action="store_true", default=False, help=_JSON_HELP)
+    p.add_argument("--confirm", metavar="yes|TARGET", default=None,
+                   help=_CONFIRM_HELP)
     sub = p.add_subparsers(dest="cmd")
 
     st = sub.add_parser("status", help="health table + details")
@@ -1035,13 +1156,13 @@ def build_parser() -> argparse.ArgumentParser:
                     help="every column at full width, no pager (for copy/paste)")
     st.add_argument("--no-pager", action="store_true",
                     help="never page, even when the output is taller than the screen")
-    st.set_defaults(func=_status)
+    st.set_defaults(func=_status, emits_json=True)
 
     # Granular read verbs for the machine contract (ADR-007): a client polling
     # pool health should not pay for a full SMART scan the way `status` does.
-    sub.add_parser("disks", help="per-disk health (SMART scan)").set_defaults(func=_disks)
-    sub.add_parser("pools", help="ZFS pool health (no SMART scan)").set_defaults(func=_pools)
-    sub.add_parser("volumes", help="hardware RAID volumes ([] in IT mode)").set_defaults(func=_volumes)
+    sub.add_parser("disks", help="per-disk health (SMART scan)").set_defaults(func=_disks, emits_json=True)
+    sub.add_parser("pools", help="ZFS pool health (no SMART scan)").set_defaults(func=_pools, emits_json=True)
+    sub.add_parser("volumes", help="hardware RAID volumes ([] in IT mode)").set_defaults(func=_volumes, emits_json=True)
 
     by = sub.add_parser("bays", help="inspect / fix front-panel bay labelling")
     by_act = by.add_mutually_exclusive_group()
@@ -1056,7 +1177,13 @@ def build_parser() -> argparse.ArgumentParser:
     by.add_argument("--slots", type=_pos_int,
                     help="bay count for --set-reverse (omit to auto-detect from "
                          "the drives present)")
-    by.set_defaults(func=_bays)
+    by.set_defaults(func=_bays, emits_json=True)
+
+    # Long operations (scrub/trim/rebuild/health-check) run for hours. A machine
+    # caller starts them and polls this instead of holding a request open.
+    sub.add_parser("progress",
+                   help="what is running now (scrub / trim / rebuild / health-check)"
+                   ).set_defaults(func=_progress, emits_json=True)
 
     w = sub.add_parser("watch", help="interactive hotplug-aware loop")
     w.set_defaults(func=_watch)
@@ -1070,14 +1197,22 @@ def build_parser() -> argparse.ArgumentParser:
     lo.set_defaults(func=_locate)
 
     off = sub.add_parser("offload", help="safely detach or resilver a disk to offload it")
+    off.add_argument("--disk", metavar="TARGET", help="disk to act on: bay / serial / dev / by-id. Omit it and b2ctl shows the picker as it does today.")
     off.set_defaults(func=_offload)
 
     re_cmd = sub.add_parser("replace", help="simulate-fail and replace onto spare")
+    re_cmd.add_argument("--disk", metavar="TARGET", help="disk to act on: bay / serial / dev / by-id. Omit it and b2ctl shows the picker as it does today.")
     re_cmd.set_defaults(func=_replace)
 
     cr = sub.add_parser("create", help="create a new zfs pool")
     cr.add_argument("--raid10", action="store_true",
                     help="stripe of mirrors (RAID10) from an even number of disks")
+    cr.add_argument("--disks", metavar="A,B,C",
+                    help="comma-separated members: bay / serial / dev / by-id "
+                         "(omit for the interactive picker)")
+    cr.add_argument("--type", metavar="LEVEL",
+                    help="mirror / raidz1 / raidz2 / raid10 / single")
+    cr.add_argument("--name", metavar="POOL", help="pool name")
     cr.set_defaults(func=_create)
 
     ds = sub.add_parser("destroy", help="destroy a zfs pool (DESTRUCTIVE) + disable its maintenance timers")
@@ -1085,9 +1220,11 @@ def build_parser() -> argparse.ArgumentParser:
     ds.set_defaults(func=_destroy)
 
     sw = sub.add_parser("swap", help="swap wearing disk onto spare")
+    sw.add_argument("--disk", metavar="TARGET", help="disk to act on: bay / serial / dev / by-id. Omit it and b2ctl shows the picker as it does today.")
     sw.set_defaults(func=_swap)
 
     de = sub.add_parser("demote", help="demote mirror leg to spare")
+    de.add_argument("--disk", metavar="TARGET", help="disk to act on: bay / serial / dev / by-id. Omit it and b2ctl shows the picker as it does today.")
     de.set_defaults(func=_demote)
 
     # manual maintenance: scrub / trim (per-pool) + history view
@@ -1108,16 +1245,16 @@ def build_parser() -> argparse.ArgumentParser:
                      help="show the maintenance history log (maint.jsonl)")
     mnt.add_argument("--last", type=int, default=30, metavar="N",
                      help="show last N events (default 30)")
-    mnt.set_defaults(func=_maint, maint_cmd=None)
+    mnt.set_defaults(func=_maint, maint_cmd=None, emits_json=True)
     msub = mnt.add_subparsers(dest="maint_cmd")
 
     m_scr = msub.add_parser("scrub", help="start a manual scrub on a pool")
     m_scr.add_argument("pool", nargs="?", help="pool name (prompts if omitted)")
-    m_scr.set_defaults(func=_scrub)
+    m_scr.set_defaults(func=_scrub, emits_json=False)
 
     m_trm = msub.add_parser("trim", help="start a manual TRIM on a pool")
     m_trm.add_argument("pool", nargs="?", help="pool name (prompts if omitted)")
-    m_trm.set_defaults(func=_trim)
+    m_trm.set_defaults(func=_trim, emits_json=False)
 
     m_hl = msub.add_parser("health",
                            help="health-check disk(s): SMART long self-test (+ scan) + verdict")
@@ -1133,7 +1270,7 @@ def build_parser() -> argparse.ArgumentParser:
                       help="cancel in-flight health-check on the given bay/serial/dev")
     m_hl.add_argument("--cancel-all", action="store_true",
                       help="cancel ALL in-flight health-checks")
-    m_hl.set_defaults(func=_burnin)
+    m_hl.set_defaults(func=_burnin, emits_json=False)
 
     # aux vdevs: L2ARC cache + SLOG log
     ca = sub.add_parser("cache-add", help="add L2ARC read-cache device(s) to a pool")
@@ -1183,17 +1320,17 @@ def build_parser() -> argparse.ArgumentParser:
     # NOTE: `burnin` merged into `maint health` (v0.18.0) — see the `maint` parser.
 
     v = sub.add_parser("version", help="print version")
-    v.set_defaults(func=_version)
+    v.set_defaults(func=_version, emits_json=True)
 
     # check
     chk = sub.add_parser("check", help="verify tools and environment on this server")
-    chk.set_defaults(func=_check)
+    chk.set_defaults(func=_check, emits_json=True)
 
     # config
     cfg_p = sub.add_parser("config", help="manage /etc/b2ctl/config.json")
     cfg_sub = cfg_p.add_subparsers(dest="config_cmd")
     cfg_show = cfg_sub.add_parser("show", help="print current config")
-    cfg_show.set_defaults(func=_config_show)
+    cfg_show.set_defaults(func=_config_show, emits_json=True)
     cfg_init = cfg_sub.add_parser("init", help="write default config to /etc/b2ctl/config.json")
     cfg_init.set_defaults(func=_config_init)
     cfg_p.set_defaults(func=lambda a: (print(f"{Y}  usage: b2ctl config show|init{N}") or 0))
@@ -1201,7 +1338,7 @@ def build_parser() -> argparse.ArgumentParser:
     log_p = sub.add_parser("log", help="show operation history")
     log_p.add_argument("--last", type=int, default=20,
                        metavar="N", help="show last N entries (default 20)")
-    log_p.set_defaults(func=lambda a: _log_cmd(a))
+    log_p.set_defaults(func=lambda a: _log_cmd(a), emits_json=True)
 
     rb_p = sub.add_parser("rollback", help="reverse a logged operation")
     rb_p.add_argument("op_id", help="op_id from b2ctl log output")
@@ -1263,9 +1400,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="discard the foreign config — CONTROLLER-WIDE, DESTRUCTIVE")
     rf_p.add_argument("-c", "--controller", type=int, default=None,
                       help="controller index (default 0)")
-    rf_p.set_defaults(func=_raid_foreign)
+    rf_p.set_defaults(func=_raid_foreign, emits_json=True)
 
-    _add_json_flag(p)           # after every subparser exists (ADR-007)
+    _add_global_flags(p)        # after every subparser exists (ADR-007)
     return p
 
 
@@ -1315,6 +1452,7 @@ def main(argv=None) -> int:
     # common.warn(), which must already know to collect instead of print, or the
     # first warning lands on stdout and corrupts the envelope (ADR-007).
     common.set_json_mode(want_json)
+    common.set_auto_confirm(getattr(args, "confirm", None))
     if _needs_root(args):
         if want_json and os.geteuid() != 0:
             # need_root() dies to stderr with a bare exit code — useless to a
@@ -1325,7 +1463,29 @@ def main(argv=None) -> int:
                                 "run as root (smartctl / sas2ircu / zpool need it)")
         need_root()
     try:
+        # A read verb builds its own envelope (emits_json). Everything else is a
+        # mutation whose narration has to be captured instead of printed.
+        if want_json and not getattr(args, "emits_json", False):
+            if getattr(args, "cmd", None) == "watch":
+                from . import jsonout
+                return jsonout.fail("watch", jsonout.ERR_UNSUPPORTED,
+                                    "watch is an interactive terminal loop and "
+                                    "has no machine-readable form")
+            return _json_mutation(args)
         return args.func(args)
+    except common.NonInteractive as exc:
+        # --confirm was given but a prompt still had no answer. Name it, so the
+        # caller learns WHICH argument to supply instead of the command hanging
+        # or b2ctl guessing on a destructive path (ADR-007 phase 2).
+        msg = (f"{exc.prompt} — this command still needs that answer; "
+               f"supply {exc.hint}" if exc.hint else
+               f"{exc.prompt} — this command cannot run non-interactively yet")
+        if want_json:
+            from . import jsonout
+            return jsonout.fail(getattr(args, "cmd", "?"),
+                                jsonout.ERR_INVALID_ARG, msg)
+        print(f"{R}[-] {msg}{N}", file=sys.stderr)
+        return 1
     except KeyboardInterrupt:
         # F-022: Ctrl-C at any prompt exits cleanly, not with a traceback.
         print(f"\n{Y}[-] interrupted{N}")

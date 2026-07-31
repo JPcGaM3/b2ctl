@@ -130,8 +130,53 @@ def run_check(args, timeout: int | None = 120, *, op_id=None, dry_run: bool = Fa
 
 
 # ---- interactive prompts (shared; never raise on EOF / Ctrl-C) ------------ #
-def ask(prompt: str) -> str:
-    """Prompt for a line of input; return '' on EOF (Ctrl-D) or Ctrl-C."""
+# Every prompt in b2ctl funnels through ask()/confirm() (watch._ask is the single
+# input() in that module; raid_actions delegates here too), which makes this the
+# ONE place a machine caller can be served without touching 90-odd call sites.
+#
+# `--confirm yes` / `--confirm <target>` switches the process non-interactive:
+# confirms auto-approve, and a prompt that still has no answer raises
+# NonInteractive rather than blocking an MCP/web client forever. §9 is preserved,
+# not weakened: the operator still states intent explicitly, once per command,
+# instead of once per prompt (ADR-007 phase 2).
+AUTO_CONFIRM: str | None = None      # None = interactive
+
+
+class NonInteractive(Exception):
+    """A prompt was reached in --confirm mode with no answer available.
+
+    Carries what was being asked so the CLI can tell the caller exactly which
+    argument to supply. Guessing a default for an unanswered question on a
+    destructive path is how you destroy the wrong pool, so this is deliberately
+    an error, not a fallback.
+    """
+
+    def __init__(self, prompt: str, hint: str = ""):
+        self.prompt = prompt.strip()
+        self.hint = hint
+        super().__init__(f"non-interactive: unanswered prompt {self.prompt!r}"
+                         + (f" — supply {hint}" if hint else ""))
+
+
+def set_auto_confirm(value: str | None) -> None:
+    global AUTO_CONFIRM
+    AUTO_CONFIRM = value
+
+
+def is_non_interactive() -> bool:
+    return AUTO_CONFIRM is not None
+
+
+def ask(prompt: str, *, default: str | None = None, hint: str = "") -> str:
+    """Prompt for a line of input; return '' on EOF (Ctrl-D) or Ctrl-C.
+
+    In --confirm mode there is nobody to type: `default` is used when the caller
+    supplied one, otherwise NonInteractive is raised naming the prompt.
+    """
+    if is_non_interactive():
+        if default is not None:
+            return default
+        raise NonInteractive(prompt, hint)
     try:
         return input(prompt).strip()
     except (EOFError, KeyboardInterrupt):
@@ -143,9 +188,25 @@ def confirm(msg: str) -> bool:
     """Yes/No confirm; accepts 'y'/'yes' (case-insensitive). Default No.
 
     Returns False on EOF/Ctrl-C so an interrupted destructive prompt is a
-    safe decline, never a traceback.
+    safe decline, never a traceback. Auto-approves in --confirm mode.
     """
+    if is_non_interactive():
+        return True
     return ask(f"{msg} [y/N] ").lower() in ("y", "yes")
+
+
+def confirm_target(prompt: str, target: str) -> bool:
+    """The 'type the pool name to confirm' second gate, machine-callable.
+
+    Interactive: unchanged — the operator must type `target` exactly.
+    `--confirm yes`: satisfied.
+    `--confirm <value>`: satisfied ONLY when <value> == target, so a caller that
+    names what it is destroying cannot have that intent applied to a different
+    pool by a mis-parsed command.
+    """
+    if is_non_interactive():
+        return AUTO_CONFIRM in ("yes", target)
+    return ask(prompt) == target
 
 
 # --------------------------------------------------------------------------- #

@@ -1532,6 +1532,69 @@ Config file: `/etc/b2ctl/config.json`. **Optional** — missing or malformed
 falls back silently to all defaults. Never written by `config.py` itself;
 `cli._config_init()` writes it.
 
+### 10.0 File durability + modes + supply chain (v0.24.3 / F-147)
+
+**`config.atomic_write_json(path, data, *, mode=0o600)`** is now the one JSON
+writer: `tempfile.mkstemp(dir=<same dir>)` → `os.fdopen` → `flush` → `fsync` →
+`os.chmod` → `os.replace`, unlinking the temp file on any exception. Backs
+`_atomic_write` (CONFIG_PATH) and `write_bay_map`, and is what `cli._update` and
+`burnin.save_state` were pointed at.
+
+Why it changed: the old code used a **fixed** `<path>.tmp`. Two b2ctl processes —
+an MCP server and an operator, exactly the deployment ADR-007 exists for — used
+the same temp path, so one could truncate the other's half-written file
+immediately before `os.replace` published the interleaved result. That is the
+crash-safety F-075's docstring promised without the mechanism to back it. `fsync`
+before the rename closes the second hole: a crash between write and rename could
+otherwise publish an empty file.
+
+**Modes.** Nothing in `config.py` or `safety.py` ever stated one, so every
+root-written file took whatever the ambient umask gave it:
+
+| path | now | via |
+|---|---|---|
+| `/etc/b2ctl/config.json`, `bay_map.json` | 0600 | `atomic_write_json`'s explicit `chmod` (beats umask, unlike `open()`'s create mode) |
+| `/var/log/b2ctl/`, `…/snapshots/` | 0700 | `safety._ensure_dir()` (`makedirs` + unconditional `chmod`) |
+| `ops.jsonl`, `maint.jsonl` | 0600 | `os.open(…, O_WRONLY\|O_APPEND\|O_CREAT, 0o600)` — **keeps F-093's O_APPEND atomicity**; an existing file keeps its mode, matching O_CREAT semantics |
+| pre-op snapshots | 0600 | `chmod` after write |
+| install-time dirs | 0700 | `mkdir -p -m 700` in `install.sh` |
+
+**Config trust.** `config.load()` now drops `tool_paths`, `bay_map_path` and
+`ssd_spec_path` — the three keys that turn into root execution, `tool_paths` most
+directly (`config.tool()` hands them straight to subprocess argv) — and warns once
+via `common.warn()` when `/etc/b2ctl/config.json` is not root-owned or is
+group/world-writable. Every other key survives.
+
+The check is gated on **the path being under `/etc`**, not on `os.geteuid() == 0`.
+The risk lives in the file's ownership, not in who happens to be invoking b2ctl:
+an unprivileged `--json` read that resolves `tool_paths` from a tampered config is
+just as wrong as a root one, and a euid gate would hide the problem from every
+read-only caller. It also means the sim and the tests — which redirect
+`CONFIG_PATH` under `sim/var/` or a tempdir — are never under `/etc` and never
+trip it.
+
+**Supply chain.** `installer._SHA256` was `{}` while the comment above it claimed
+pinning, so `download()`'s verification block was dead code and the only surviving
+check was `size < 1024` — on an archive that is then extracted, copied to
+`/usr/sbin`, `chmod 0755`'d and executed as root. Both download paths now **fail
+closed**:
+
+- `installer.download(..., allow_unverified=False)` refuses before opening a
+  connection when there is no pin, naming `sha256sum <archive>` and the opt-out.
+- `install.sh`'s `_gdrive_get` gained the same refusal plus `sha256sum -c`,
+  reading `installer._SHA256` through the same `_gid`-style single-source trick
+  F-122 already used for `_GDRIVE`, so the two cannot drift again.
+- `B2CTL_ALLOW_UNVERIFIED=1` is the explicit, loudly-announced bootstrap opt-out —
+  `install_tools()` is the only caller that sets it.
+- `alien --scripts -i` → **`alien -i`** on both paths. `--scripts` runs the vendor
+  RPM's maintainer scriptlets as root; the only artefact consumed afterwards is
+  `/opt/MegaRAID/perccli/perccli64`, which plain `alien -i` extracts on its own.
+
+**The pin table is still empty.** The trusted digests are the operator's to
+supply from a known-good copy; until they are added, `b2ctl install --with-tools`
+and `./install.sh --perc` both refuse rather than silently installing unverified
+root binaries.
+
 ### Tool path resolution — `config.tool(name)`
 
 Priority:

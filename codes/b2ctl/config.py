@@ -10,7 +10,9 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
+import tempfile
 
 CONFIG_PATH = "/etc/b2ctl/config.json"
 
@@ -85,6 +87,36 @@ _DEFAULTS: dict = {
 
 _cache: dict | None = None
 
+# Keys that turn into ROOT execution: tool_paths feeds subprocess argv directly
+# (config.tool()), bay_map_path/ssd_spec_path point at files b2ctl trusts and
+# reads back in. If /etc/b2ctl/config.json itself is writable by anyone but
+# root, those keys are attacker-controlled (F-147).
+_TRUST_GATED_KEYS = ("tool_paths", "bay_map_path", "ssd_spec_path")
+
+
+def _untrusted_reason(path: str) -> str | None:
+    """Return why `path` must not be trusted for _TRUST_GATED_KEYS, or None.
+
+    Gated on the path being under /etc (the real deployment location) rather
+    than on the caller's euid: the risk is the FILE's ownership, not who is
+    currently running b2ctl — an unprivileged `--json` read that resolves
+    tool_paths from a tampered config is just as wrong as a root one, and
+    gating on euid==0 would hide the problem from every read-only caller.
+    This also means sim/tests, which redirect CONFIG_PATH under sim/var or a
+    tempdir, never hit this check — they are simply never under /etc.
+    """
+    if not (path == "/etc" or path.startswith("/etc" + os.sep)):
+        return None
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    if st.st_uid != 0:
+        return f"not owned by root (uid={st.st_uid})"
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        return "group/world-writable"
+    return None
+
 
 def load() -> dict:
     """Read config file and merge with defaults. Returns merged dict."""
@@ -150,6 +182,13 @@ def load() -> dict:
                 cfg["pool_defaults"]["autotrim"] = pd["autotrim"]
             if "autoscrub" in pd:
                 cfg["pool_defaults"]["autoscrub"] = bool(pd["autoscrub"])
+    reason = _untrusted_reason(CONFIG_PATH)
+    if reason:
+        from . import common as _common
+        _common.warn(f"{CONFIG_PATH} {reason} — ignoring "
+                     f"{'/'.join(_TRUST_GATED_KEYS)} from it (F-147)")
+        for key in _TRUST_GATED_KEYS:
+            cfg[key] = copy.deepcopy(_DEFAULTS[key])
     return cfg
 
 
@@ -285,16 +324,52 @@ def _load_for_write() -> dict:
     return data
 
 
+def atomic_write_json(path: str, data, *, mode: int = 0o600) -> None:
+    """Write `data` as JSON to `path` atomically and crash-safely.
+
+    Public + reusable (not just by this module): `cli._update` and
+    `burnin.save_state` write their own JSON files non-atomically with a
+    FIXED tmp name today — this is the shared helper they should switch to.
+
+    Two b2ctl processes writing at once (an MCP server + an operator) used to
+    race on the SAME fixed '<path>.tmp' name, so one could truncate the
+    other's half-written file right before os.replace published the
+    interleaved result. `tempfile.mkstemp` gives every writer its own tmp
+    file in the same directory (so os.replace stays on one filesystem and is
+    atomic), and flush()+fsync() before the rename means a crash/power-loss
+    between write and rename can never publish a truncated/empty file
+    (F-147, was F-075's docstring promise without the mechanism to back it).
+
+    `mode` is applied via chmod (not open()'s create mode), so it wins over
+    whatever the process umask would otherwise leave — these files can carry
+    root-execution-affecting data (tool_paths) or an audit trail, and default
+    to 0600. The tmp file is unlinked if anything raises before the rename.
+    """
+    dirpath = os.path.dirname(path) or "."
+    os.makedirs(dirpath, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=dirpath, prefix=".b2ctl-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def _atomic_write(data: dict) -> None:
-    """Write `data` to CONFIG_PATH atomically (tmp in same dir + os.replace) so a
-    crash/ENOSPC can't leave a truncated config that load() reads as all-defaults
-    (F-075). Creates /etc/b2ctl if needed. Callers clear _cache afterwards."""
-    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-    tmp = CONFIG_PATH + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(data, f, indent=2)
-        f.write("\n")
-    os.replace(tmp, CONFIG_PATH)
+    """Write `data` to CONFIG_PATH atomically (see atomic_write_json) so a
+    crash/ENOSPC/concurrent-writer race can't leave a truncated or
+    interleaved config that load() reads as all-defaults (F-075/F-147).
+    Callers clear _cache afterwards."""
+    atomic_write_json(CONFIG_PATH, data)
 
 
 def set_mode(mode: str) -> None:
@@ -389,19 +464,12 @@ def load_bay_map() -> list:
 
 
 def write_bay_map(panels: list) -> str:
-    """Write the bay_map.json panel list atomically (tmp in same dir +
-    os.replace), mirroring _atomic_write()'s crash-safety contract — but for
-    bay_map_write_path(), not CONFIG_PATH, so _atomic_write() itself can't be
-    reused. Raises OSError naturally on permission failure (caller reports it).
-    Returns the path actually written.
+    """Write the bay_map.json panel list atomically (see atomic_write_json)
+    to bay_map_write_path(), not CONFIG_PATH. Raises OSError naturally on
+    permission failure (caller reports it). Returns the path actually written.
     """
     path = bay_map_write_path()
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(panels, f, indent=2)
-        f.write("\n")
-    os.replace(tmp, path)
+    atomic_write_json(path, panels)
     return path
 
 

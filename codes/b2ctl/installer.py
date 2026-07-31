@@ -22,10 +22,16 @@ _GDRIVE = {
 }
 # Pinned SHA-256 per archive. These binaries run as root on both nodes, so a
 # swapped/tampered Drive file must be rejected before extraction (F-043). Fill
-# from a trusted copy: `sha256sum SAS2IRCU_P20.zip`. Left empty = unverified
-# (still size-checked); populate once the archives are pinned, and keep it in
-# lockstep with install.sh's `sha256sum -c`.
+# from a trusted copy: `sha256sum SAS2IRCU_P20.zip`. Left empty = download()
+# REFUSES by default (F-147 — an empty table used to mean "unverified but
+# still proceeds", making the F-043 comment describe a check that ran on
+# neither this path nor install.sh's, since install.sh has no sha256sum -c at
+# all). See download()'s allow_unverified for the one-time bootstrap opt-out.
 _SHA256: dict[str, str] = {}
+# Set B2CTL_ALLOW_UNVERIFIED=1 to bootstrap once without a pin (install_tools
+# reads this; download() itself never touches the environment — the opt-out
+# is the CALLER's decision, not a hidden default).
+_ALLOW_UNVERIFIED_ENV = "B2CTL_ALLOW_UNVERIFIED"
 _BASE = "https://drive.usercontent.google.com/download?export=download&confirm=t&id="
 _ARCHIVE_NAME = {
     "sas2ircu": "SAS2IRCU_P20.zip",
@@ -58,13 +64,28 @@ def tool_ok(name: str) -> bool:
     return path is not None and _executes(path, _PROBE.get(name, []))
 
 
-def download(file_id: str, dest_path: str, *, sha256: str | None = None) -> None:
+def download(file_id: str, dest_path: str, *, sha256: str | None = None,
+             allow_unverified: bool = False) -> None:
     """Download a Google Drive file to dest_path.
 
     Uses urlopen with a 60 s timeout so a black-holed connection can't hang the
     install forever (F-043). Raises RuntimeError on a <1 KB result (HTML error
     page) or, when a hash is pinned, on a SHA-256 mismatch (tampered archive).
+
+    FAILS CLOSED (F-147): with no `sha256` pin, this refuses BEFORE opening
+    any connection rather than silently downloading unverified content that
+    is about to run as root. `allow_unverified=True` is the explicit,
+    caller-stated opt-out for bootstrapping before a pin exists — see
+    install_tools(), which is the only place that sets it, gated on the
+    B2CTL_ALLOW_UNVERIFIED env var.
     """
+    if not sha256 and not allow_unverified:
+        raise RuntimeError(
+            f"no pinned SHA-256 for this archive — refusing to download "
+            f"unverified content that will run as root. Get the trusted "
+            f"digest (sha256sum {os.path.basename(dest_path)}) and add it to "
+            f"installer._SHA256, or set {_ALLOW_UNVERIFIED_ENV}=1 to "
+            f"bootstrap once without a pin.")
     url = _BASE + file_id
     print(f"    downloading...", end="", flush=True)
     with urllib.request.urlopen(url, timeout=60) as resp, open(dest_path, "wb") as f:
@@ -138,7 +159,12 @@ def install_perccli(archive: str) -> tuple[bool, str]:
                 break
         if not rpm:
             return False, "RPM not found in archive"
-        r = subprocess.run(["alien", "--scripts", "-i", rpm],
+        # alien's maintainer-scriptlet flag is intentionally OMITTED: it would
+        # run the vendor RPM's postinst as root, and the only artefact
+        # consumed afterwards is perccli64 (a plain data file `alien -i`
+        # extracts on its own), so those scriptlets are unneeded attack
+        # surface (F-147). install.sh's alien invocation must match.
+        r = subprocess.run(["alien", "-i", rpm],
                            cwd=tmp, capture_output=True, text=True)
         if r.returncode != 0:
             return False, f"alien failed: {r.stderr.strip()}"
@@ -215,6 +241,12 @@ def install_tools(tools: list[str] | None = None) -> None:
             return
     ensure_prereqs(tools)                # only the prereqs the subset needs (F-111)
 
+    # The ONE place allow_unverified is set — an explicit env var, read once
+    # per install run, not a hidden default inside download() (F-147).
+    allow_unverified = os.environ.get(_ALLOW_UNVERIFIED_ENV) == "1"
+    if allow_unverified:
+        print(f"  [!] {_ALLOW_UNVERIFIED_ENV}=1 — downloading WITHOUT SHA-256 verification")
+
     tmp = tempfile.mkdtemp()
     try:
         for name in tools:
@@ -225,7 +257,8 @@ def install_tools(tools: list[str] | None = None) -> None:
             print(f"  [*] {name}...")
             archive = os.path.join(tmp, _ARCHIVE_NAME[name])
             try:
-                download(_GDRIVE[name], archive, sha256=_SHA256.get(name))
+                download(_GDRIVE[name], archive, sha256=_SHA256.get(name),
+                         allow_unverified=allow_unverified)
             except (RuntimeError, OSError) as exc:
                 # OSError covers urllib URLError/HTTPError/socket errors on an
                 # offline box — print the clean line, don't traceback (F-044).

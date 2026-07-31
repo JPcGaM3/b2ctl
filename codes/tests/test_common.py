@@ -444,3 +444,86 @@ class TestAssessPoolUnknown:
         assess(d)
         assert d.level == "CRITICAL"
         assert any("SMART unreadable" in r for r in d.reasons)
+
+
+# ========================================================================== #
+# F-147 — direct tests of the single confirm/ask choke point ~90 prompt sites
+# funnel through (ask/confirm/confirm_target/NonInteractive/set_auto_confirm).
+# ========================================================================== #
+
+class TestConfirmGate(unittest.TestCase):
+    """Always restore set_auto_confirm(None) in teardown — leaving it set
+    would poison every prompt in every test that runs after this class."""
+
+    def tearDown(self):
+        from b2ctl.common import set_auto_confirm
+        set_auto_confirm(None)
+
+    # -- confirm_target: naming ONE target must not approve a DIFFERENT one -- #
+
+    def test_confirm_target_named_target_matches_only_itself(self):
+        from b2ctl.common import confirm_target, set_auto_confirm
+        set_auto_confirm("tank")
+        self.assertTrue(confirm_target("type pool name: ", "tank"))
+        # naming "tank" must NOT also approve an operation against "rpool" —
+        # the exact safety property a caller-supplied target exists to enforce.
+        self.assertFalse(confirm_target("type pool name: ", "rpool"))
+
+    def test_confirm_target_yes_approves_any_target(self):
+        from b2ctl.common import confirm_target, set_auto_confirm
+        set_auto_confirm("yes")
+        self.assertTrue(confirm_target("type pool name: ", "tank"))
+        self.assertTrue(confirm_target("type pool name: ", "rpool"))
+
+    # -- confirm_target: interactive path requires an EXACT typed match -- #
+
+    def test_confirm_target_interactive_exact_match_passes(self):
+        from b2ctl.common import confirm_target, set_auto_confirm
+        set_auto_confirm(None)
+        with patch("builtins.input", return_value="tank"):
+            self.assertTrue(confirm_target("type pool name: ", "tank"))
+
+    def test_confirm_target_interactive_wrong_answer_declines(self):
+        from b2ctl.common import confirm_target, set_auto_confirm
+        set_auto_confirm(None)
+        with patch("builtins.input", return_value="rpool"):
+            self.assertFalse(confirm_target("type pool name: ", "tank"))
+
+    def test_confirm_target_eof_is_a_safe_decline_not_a_traceback(self):
+        from b2ctl.common import confirm_target, set_auto_confirm
+        set_auto_confirm(None)
+        with patch("builtins.input", side_effect=EOFError):
+            self.assertFalse(confirm_target("type pool name: ", "tank"))
+
+    def test_confirm_target_keyboard_interrupt_is_a_safe_decline(self):
+        from b2ctl.common import confirm_target, set_auto_confirm
+        set_auto_confirm(None)
+        with patch("builtins.input", side_effect=KeyboardInterrupt):
+            self.assertFalse(confirm_target("type pool name: ", "tank"))
+
+    # -- ask(): non-interactive with no default must raise, naming what it needs -- #
+
+    def test_ask_no_default_raises_non_interactive_with_prompt_and_hint(self):
+        from b2ctl.common import NonInteractive, ask, set_auto_confirm
+        set_auto_confirm("yes")
+        with self.assertRaises(NonInteractive) as ctx:
+            ask("new pool name: ", hint="--name")
+        self.assertEqual(ctx.exception.prompt, "new pool name:")
+        self.assertEqual(ctx.exception.hint, "--name")
+
+    def test_ask_with_default_returns_it_non_interactively(self):
+        from b2ctl.common import ask, set_auto_confirm
+        set_auto_confirm("yes")
+        self.assertEqual(ask("size: ", default="whole disk"), "whole disk")
+
+    # -- confirm(): auto-approves non-interactively (deliberate, ADR-007) -- #
+
+    def test_confirm_auto_approves_in_non_interactive_mode(self):
+        from b2ctl.common import confirm, set_auto_confirm
+        set_auto_confirm("yes")
+        self.assertTrue(confirm("destroy tank?"))
+        # confirm() (unlike confirm_target()) doesn't check WHAT was named —
+        # any non-interactive value means "proceed", pinning the documented
+        # ADR-007 stance that this is deliberate, not a bug.
+        set_auto_confirm("tank")
+        self.assertTrue(confirm("destroy tank?"))

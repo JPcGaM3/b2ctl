@@ -1,11 +1,18 @@
 # ADR-003 — Autoscrub opt-in (default OFF), over-provisioning, and a maintenance history
 
-- **Status:** Accepted
+- **Status:** Accepted — **TRIM-timer rule later reversed by [ADR-004](ADR-004-unify-maintenance.md)**
 - **Date:** 2026-07-08
 - **Version:** v0.17.0-itmode
 - **Relates to:** ADR-001 (layering / read-path purity), ADR-002 (state-file redirect),
   `prompts/FEATURE_slog-overprovision-maintenance.md`, and the v0.16.0 systemd-timer
   change it partly reverses (`prompts/FEATURE_systemd-timers.md`).
+
+> **Reversed-in-part by ADR-004 (v0.18.0):** this ADR still carries v0.16.0's
+> `include_trim=` path (autotrim off ⇒ a monthly `zfs-trim` timer). ADR-004
+> **drops the monthly TRIM timer entirely** — `create` always calls
+> `install_pool_timers(…, include_trim=False)`, so `autotrim=off` is now
+> MANUAL-only (symmetric with autoscrub off). The autoscrub decision below is
+> unchanged.
 
 ## Context
 

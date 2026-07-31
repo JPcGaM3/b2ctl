@@ -209,5 +209,105 @@ class TestPrereqParity(unittest.TestCase):
                          f"installer prereqs missing from install.sh: {missing}")
 
 
+class TestDownloadFailsClosed(unittest.TestCase):
+    """F-147 — download() refuses BEFORE opening a connection when no SHA-256
+    pin is available, and the explicit opt-out bypasses that refusal."""
+
+    def _fake_urlopen(self, payload):
+        import contextlib
+        import io
+
+        @contextlib.contextmanager
+        def _cm(url, timeout=None):
+            yield io.BytesIO(payload)
+        return _cm
+
+    def test_missing_pin_refuses_without_touching_the_network(self):
+        tmp = tempfile.mkdtemp()
+        dest = os.path.join(tmp, "a.bin")
+        with patch("urllib.request.urlopen") as uo:
+            with self.assertRaises(RuntimeError) as ctx:
+                installer.download("id", dest)          # no sha256, no opt-out
+        uo.assert_not_called()                            # refused before any request
+        self.assertFalse(os.path.exists(dest))             # nothing written
+        self.assertIn("sha256sum", str(ctx.exception))     # tells the operator how to fix it
+        self.assertIn(installer._ALLOW_UNVERIFIED_ENV, str(ctx.exception))
+
+    def test_allow_unverified_bypasses_the_refusal(self):
+        payload = b"z" * 4096
+        tmp = tempfile.mkdtemp()
+        dest = os.path.join(tmp, "a.bin")
+        with patch("urllib.request.urlopen", self._fake_urlopen(payload)):
+            installer.download("id", dest, allow_unverified=True)   # must not raise
+        self.assertTrue(os.path.exists(dest))
+
+    def test_pinned_sha256_still_works_without_the_opt_out(self):
+        # A real pin satisfies the gate on its own — allow_unverified stays False.
+        import hashlib
+        payload = b"y" * 4096
+        digest = hashlib.sha256(payload).hexdigest()
+        tmp = tempfile.mkdtemp()
+        dest = os.path.join(tmp, "a.bin")
+        with patch("urllib.request.urlopen", self._fake_urlopen(payload)):
+            installer.download("id", dest, sha256=digest)   # must not raise
+        self.assertTrue(os.path.exists(dest))
+
+
+class TestInstallToolsUnverifiedEnv(unittest.TestCase):
+    """install_tools() is the ONLY place the env var opt-out is read; download()
+    itself never touches the environment."""
+
+    def test_env_unset_leaves_allow_unverified_false(self):
+        with patch("b2ctl.installer.ensure_prereqs"), \
+             patch("b2ctl.installer.download") as dl, \
+             patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(installer._ALLOW_UNVERIFIED_ENV, None)
+            installer.install_tools(["sas2ircu"])
+        self.assertFalse(dl.call_args.kwargs.get("allow_unverified"))
+
+    def test_env_set_passes_allow_unverified_true(self):
+        with patch("b2ctl.installer.ensure_prereqs"), \
+             patch("b2ctl.installer.download") as dl, \
+             patch.dict(os.environ, {installer._ALLOW_UNVERIFIED_ENV: "1"}):
+            installer.install_tools(["sas2ircu"])
+        self.assertTrue(dl.call_args.kwargs.get("allow_unverified"))
+
+
+class TestAlienNoScripts(unittest.TestCase):
+    """F-147 — `alien --scripts` runs the vendor RPM's maintainer scriptlets
+    as root; the only artefact consumed afterwards is perccli64 (a plain data
+    file alien -i extracts regardless of --scripts), so neither install path
+    may pass it. Source-text drift-guard mirrors TestGDriveParity's idiom;
+    the behavioural test pins the actual subprocess.run call."""
+
+    def test_installer_py_source_omits_scripts_flag(self):
+        import inspect
+        src = inspect.getsource(installer.install_perccli)
+        self.assertNotIn("--scripts", src)
+
+    def test_install_sh_omits_scripts_flag(self):
+        self.assertNotIn("--scripts", _install_sh_text())
+
+    def test_alien_invoked_without_scripts_flag(self):
+        import tarfile
+        tmp = tempfile.mkdtemp()
+        rpm_path = os.path.join(tmp, "perccli.rpm")
+        with open(rpm_path, "wb") as f:
+            f.write(b"fake-rpm")
+        archive = os.path.join(tmp, "perccli.tar.gz")
+        with tarfile.open(archive, "w:gz") as tf:
+            tf.add(rpm_path, arcname="perccli.rpm")
+        fake_proc = unittest.mock.Mock(returncode=0, stdout="", stderr="")
+        with patch("b2ctl.installer.subprocess.run", return_value=fake_proc) as sp, \
+             patch("b2ctl.installer.os.path.exists", return_value=True), \
+             patch("b2ctl.installer._install_to_usr_sbin",
+                   return_value=(True, "/usr/sbin/perccli")):
+            ok, msg = installer.install_perccli(archive)
+        self.assertTrue(ok)
+        called_args = sp.call_args[0][0]
+        self.assertIn("alien", called_args)
+        self.assertNotIn("--scripts", called_args)
+
+
 if __name__ == "__main__":
     unittest.main()

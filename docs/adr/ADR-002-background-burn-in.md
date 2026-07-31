@@ -1,9 +1,17 @@
 # ADR-002 — Background, re-attachable multi-disk burn-in
 
-- **Status:** Accepted
+- **Status:** Accepted — **command surface superseded-in-part by [ADR-004](ADR-004-unify-maintenance.md)**
 - **Date:** 2026-07-06
 - **Version:** v0.10.0-itmode
 - **Relates to:** ADR-001 (layering), CLAUDE.md §7 Task-B/§8 (sim), runbook STEP 02–03
+
+> **Superseded-in-part by ADR-004 (v0.18.0):** the burn-in *engine* below —
+> `run_multi`, the detached `badblocks` scan, the `burnin.json` re-attach state,
+> the live view, and the "exits 0 once started" semantics — all still stand. Only
+> the *command surface* moved: the top-level `b2ctl burnin` verb and the watch
+> `[b]` key are GONE; disk vetting is now `[m]aint → [3] health-check` and
+> `b2ctl maint health <dev…>` / `--status`. Read "`b2ctl burnin`" below as
+> "`b2ctl maint health`".
 
 ## Context
 

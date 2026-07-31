@@ -55,6 +55,19 @@ _PENDING: dict = {}
 _log_warned = False
 
 
+def _ensure_dir(path: str, mode: int = 0o700) -> None:
+    """mkdir -p `path` and force `mode` regardless of the process umask or a
+    pre-existing looser mode (F-147). LOG_DIR/SNAP_DIR hold the audit trail
+    and pre-op SMART/zpool snapshots — never group/world-readable. Silent on
+    failure, same as every other caller of these dirs (a read-only /var must
+    not crash the operation the audit trail is trying to record)."""
+    try:
+        os.makedirs(path, exist_ok=True)
+        os.chmod(path, mode)
+    except OSError:
+        pass
+
+
 def begin_op(
     op: str,
     serial: str,
@@ -72,11 +85,8 @@ def begin_op(
     `details` may carry named fields (currently old_dev/new_dev for replace) so
     rollback hints are built from names, not fragile positional cmd indices.
     """
-    try:
-        os.makedirs(LOG_DIR, exist_ok=True)
-        os.makedirs(SNAP_DIR, exist_ok=True)
-    except OSError:
-        pass
+    _ensure_dir(LOG_DIR)
+    _ensure_dir(SNAP_DIR)
     now = datetime.now()
     op_id = now.strftime("%Y%m%d-%H%M%S") + f"-{now.microsecond:06d}-{op}"
     entry = {
@@ -157,10 +167,7 @@ def _build_rollback_hint(entry: dict) -> str | None:
 
 def _capture_snapshot(op_id: str, pool: str, dev_path: str) -> str | None:
     """Capture zpool status + smartctl to snapshot file. Return path or None."""
-    try:
-        os.makedirs(SNAP_DIR, exist_ok=True)
-    except OSError:
-        pass
+    _ensure_dir(SNAP_DIR)
     lines = [f"=== b2ctl pre-op snapshot: {op_id} ===\n"]
     for cmd in (
         ["zpool", "status", pool],
@@ -174,6 +181,7 @@ def _capture_snapshot(op_id: str, pool: str, dev_path: str) -> str | None:
     try:
         with open(path, "w") as f:
             f.write("".join(lines))
+        os.chmod(path, 0o600)   # snapshot can contain device paths/pool state (F-147)
         return path
     except OSError:
         return None
@@ -182,10 +190,18 @@ def _capture_snapshot(op_id: str, pool: str, dev_path: str) -> str | None:
 def _append_jsonl(entry: dict) -> None:
     # O_APPEND of one small line is atomic on POSIX, so concurrent b2ctl
     # processes never interleave (F-093) — no locking or rewrite needed.
+    # os.open with an explicit 0600 (rather than open()'s umask-dependent
+    # create mode) so a freshly-created audit log — device paths, pool names,
+    # command output — is never group/world-readable (F-147); an
+    # already-existing file keeps whatever mode it has (chmod is not reapplied
+    # on every append, matching O_CREAT semantics for an existing file).
     global _log_warned
     try:
-        with open(LOG_FILE, "a") as f:
-            f.write(json.dumps(entry) + "\n")
+        fd = os.open(LOG_FILE, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.write(fd, (json.dumps(entry) + "\n").encode())
+        finally:
+            os.close(fd)
     except OSError as exc:
         if not _log_warned:
             _log_warned = True

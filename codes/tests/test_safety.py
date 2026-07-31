@@ -391,5 +391,75 @@ class TestWriteCmdsGate(unittest.TestCase):
         sp.assert_not_called()          # never executed under dry-run
 
 
+class TestDirModesAndFilePerms(unittest.TestCase):
+    """F-147 — LOG_DIR/SNAP_DIR are created 0700, a written snapshot and the
+    appended jsonl entry are 0600, regardless of the process umask."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.log_dir = os.path.join(self.tmp, "log")
+        self.snap_dir = os.path.join(self.tmp, "log", "snapshots")
+        self.log_file = os.path.join(self.tmp, "log", "ops.jsonl")
+        self.old_umask = os.umask(0)   # most permissive umask possible
+
+    def tearDown(self):
+        os.umask(self.old_umask)
+
+    def _import_safety(self):
+        import b2ctl.safety as safety
+        safety.LOG_DIR = self.log_dir
+        safety.SNAP_DIR = self.snap_dir
+        safety.LOG_FILE = self.log_file
+        return safety
+
+    def test_begin_op_creates_log_and_snap_dir_0700(self):
+        import stat
+        safety = self._import_safety()
+        cmds = [["zpool", "offline", "tank", "/dev/disk/by-id/x"]]
+        with patch.object(safety, "_capture_snapshot", return_value=None):
+            safety.begin_op("offline", "S1", 1, "/dev/disk/by-id/x", "tank",
+                             "raidz1-0", cmds)
+        self.assertEqual(stat.S_IMODE(os.stat(self.log_dir).st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(os.stat(self.snap_dir).st_mode), 0o700)
+
+    def test_snapshot_file_is_0600(self):
+        import stat
+        safety = self._import_safety()
+        os.makedirs(self.snap_dir, exist_ok=True)
+        cmds = [["zpool", "add", "tank", "spare", "/dev/disk/by-id/x"]]
+        with patch("b2ctl.safety.run_check", return_value=(True, "pool: tank")):
+            op_id = safety.begin_op("add_spare", "S1", 1, "/dev/disk/by-id/x",
+                                     "tank", "spares", cmds)
+        snap_path = os.path.join(self.snap_dir, f"{op_id}.txt")
+        self.assertTrue(os.path.exists(snap_path))
+        self.assertEqual(stat.S_IMODE(os.stat(snap_path).st_mode), 0o600)
+
+    def test_appended_jsonl_is_0600(self):
+        import stat
+        safety = self._import_safety()
+        os.makedirs(self.log_dir, exist_ok=True)
+        cmds = [["zpool", "offline", "tank", "/dev/disk/by-id/x"]]
+        with patch.object(safety, "_capture_snapshot", return_value=None):
+            safety.begin_op("offline", "S1", 1, "/dev/disk/by-id/x", "tank",
+                             "raidz1-0", cmds)
+        self.assertTrue(os.path.exists(self.log_file))
+        self.assertEqual(stat.S_IMODE(os.stat(self.log_file).st_mode), 0o600)
+
+    def test_unwritable_log_still_warns_exactly_once(self):
+        # Existing behaviour (F-092) must survive the os.open() rewrite:
+        # a directory that can't be created must still degrade to ONE
+        # 'audit log unwritable' warning per process, not per append.
+        import io
+        safety = self._import_safety()
+        safety._log_warned = False
+        safety.LOG_FILE = os.path.join(self.tmp, "no", "such", "dir", "ops.jsonl")
+        entry = {"op_id": "x-1", "op": "offline"}
+        with patch("sys.stdout", new_callable=io.StringIO) as out:
+            safety._append_jsonl(entry)
+            safety._append_jsonl(entry)
+        text = out.getvalue()
+        self.assertEqual(text.count("audit log unwritable"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

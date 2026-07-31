@@ -17,7 +17,8 @@ the structural decisions taken while resolving the **Fable5 code-review audit**
 - The two production nodes are **Dell R620, Proxmox VE 9.2 (Debian 13, ZFS 2.4)**,
   PERC H710 mini **crossflashed to IT/HBA mode** (presents as LSI SAS9207-8i /
   SAS2308). **Disks are raw.** A third class of box (R640, PERC H730P) runs the
-  controller in **RAID mode**.
+  controller in **RAID mode**. *(Later: the live hosting box in the v0.17–v0.18
+  runbook is an **R740xd**; the IT/RAID backend split above is unchanged.)*
 - Storage is **ZFS-on-root**: `rpool` is a 2-way mirror on `-part3` of by-id
   devices (the Proxmox boot pool); `tank` is **raidz1 (3× 870 EVO) + 1 hot spare**.
   There is no hardware RAID1 OS volume and no "no boot pool" — that early

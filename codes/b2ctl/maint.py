@@ -48,11 +48,18 @@ def log_event(kind: str, target: str, status: str, detail: str = "") -> dict:
         "detail": detail,
     }
     try:
-        os.makedirs(_state_dir(), exist_ok=True)
+        from . import safety
+        safety._ensure_dir(_state_dir())        # 0700, not umask's guess (F-147)
         # O_APPEND of one small line is atomic on POSIX, so concurrent b2ctl
-        # processes never interleave (mirrors safety._append_jsonl).
-        with open(_path(), "a") as f:
-            f.write(json.dumps(rec) + "\n")
+        # processes never interleave (mirrors safety._append_jsonl). os.open with
+        # an explicit 0600 for the same reason it does: this file records pool
+        # names and maintenance outcomes and must not be world-readable just
+        # because the operator's umask was loose (F-147).
+        fd = os.open(_path(), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.write(fd, (json.dumps(rec) + "\n").encode())
+        finally:
+            os.close(fd)
     except OSError:
         pass
     return rec

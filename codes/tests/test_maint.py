@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 import unittest
 from datetime import datetime, timedelta
 from unittest.mock import patch
 
-from b2ctl import maint
+from b2ctl import maint, safety
 
 
 class TestMaintLog(unittest.TestCase):
@@ -70,3 +71,32 @@ class TestRelTime(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMaintLogPermissions(unittest.TestCase):
+    """F-147: maint.jsonl records pool names and maintenance outcomes as root.
+    It must state its own mode, not inherit whatever umask the operator had."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._old = safety.LOG_DIR
+        safety.LOG_DIR = os.path.join(self.tmp, "b2ctl")
+        self._umask = os.umask(0)          # the hostile case: umask 000
+
+    def tearDown(self):
+        os.umask(self._umask)
+        safety.LOG_DIR = self._old
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_log_and_dir_are_not_world_readable(self):
+        maint.log_event("scrub", "tank", "ok", "completed")
+        self.assertEqual(os.stat(safety.LOG_DIR).st_mode & 0o777, 0o700)
+        self.assertEqual(os.stat(os.path.join(safety.LOG_DIR, "maint.jsonl")
+                                 ).st_mode & 0o777, 0o600)
+
+    def test_the_event_is_still_readable_back(self):
+        # Anti-overcorrection: tightening the mode must not break the writer.
+        maint.log_event("trim", "rpool", "ok", "")
+        ev = maint.last_event("trim", "rpool")
+        self.assertIsNotNone(ev)
+        self.assertEqual(ev["target"], "rpool")

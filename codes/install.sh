@@ -20,6 +20,15 @@ _GDRIVE_PERCCLI="$(_gid perccli)";   : "${_GDRIVE_PERCCLI:=1hJt5Sr2xNW4OHCD-Aoef
 _GDRIVE_BASE="$(_gid _base)"
 : "${_GDRIVE_BASE:=https://drive.usercontent.google.com/download?export=download&confirm=t&id=}"
 
+# Same single-source trick for the SHA-256 pins (F-147): read installer._SHA256
+# so this path and `b2ctl install` verify the SAME digests. Both FAIL CLOSED on
+# a missing pin — an unverified archive is extracted, copied to /usr/sbin and
+# then executed as root, so "download it anyway" is not a safe default. Empty
+# output = no pin for that tool.
+_sha() { PYTHONPATH="${SRC_DIR}" python3 -c \
+    "import b2ctl.installer as i; print(i._SHA256.get('$1', ''))" 2>/dev/null; }
+: "${B2CTL_ALLOW_UNVERIFIED:=0}"
+
 # Tool selection + optional controller mode:
 #   --with-tools : sas2ircu + perccli (no mode change)
 #   --perc       : perccli  + controller.mode=raid
@@ -65,8 +74,21 @@ download_tools() {
     fi
 
     _gdrive_get() {
-        local _id="$1" _out="$2"
+        local _id="$1" _out="$2" _tool="${3:-}"
         local _url="${_GDRIVE_BASE}${_id}"
+        local _want
+        _want="$(_sha "${_tool}")"
+        # Refuse BEFORE opening a connection, mirroring installer.download()
+        # (F-147). The size + magic-byte checks below catch a Google error page;
+        # they cannot catch a tampered archive, which is the threat that matters
+        # for a binary about to run as root.
+        if [ -z "${_want}" ] && [ "${B2CTL_ALLOW_UNVERIFIED}" != "1" ]; then
+            echo "  [✗] no pinned SHA-256 for ${_tool} — refusing to download" >&2
+            echo "      unverified content that will run as root." >&2
+            echo "      Add the trusted digest to installer._SHA256, or set" >&2
+            echo "      B2CTL_ALLOW_UNVERIFIED=1 to bootstrap once without a pin." >&2
+            return 1
+        fi
         echo "[*] $(basename "${_out}") ..."
         if [ "${_dl}" = "curl" ]; then
             curl -L --progress-bar "${_url}" -o "${_out}" || return 1
@@ -88,14 +110,23 @@ download_tools() {
         *.zip)    [ "${_magic}" = "504b" ] || { echo "  [✗] $(basename "${_out}"): not a zip (got magic ${_magic})" >&2; return 1; } ;;
         *.tar.gz) [ "${_magic}" = "1f8b" ] || { echo "  [✗] $(basename "${_out}"): not a gzip (got magic ${_magic})" >&2; return 1; } ;;
         esac
-        echo "  [✔] $(basename "${_out}")"
+        if [ -n "${_want}" ]; then
+            if ! echo "${_want}  ${_out}" | sha256sum -c - >/dev/null 2>&1; then
+                echo "  [✗] $(basename "${_out}"): SHA-256 mismatch — refusing a tampered archive" >&2
+                rm -f "${_out}"
+                return 1
+            fi
+            echo "  [✔] $(basename "${_out}") (sha256 verified)"
+            return 0
+        fi
+        echo "  [✔] $(basename "${_out}") (UNVERIFIED — B2CTL_ALLOW_UNVERIFIED=1)"
     }
 
     case " ${TOOLSET} " in
-    *" sas2ircu "*) _gdrive_get "${_GDRIVE_SAS2IRCU}" "${_dest}/SAS2IRCU_P20.zip" || return 1 ;;
+    *" sas2ircu "*) _gdrive_get "${_GDRIVE_SAS2IRCU}" "${_dest}/SAS2IRCU_P20.zip" sas2ircu || return 1 ;;
     esac
     case " ${TOOLSET} " in
-    *" perccli "*)  _gdrive_get "${_GDRIVE_PERCCLI}"  "${_dest}/perccli_7.1-007.0127_linux.tar.gz" || return 1 ;;
+    *" perccli "*)  _gdrive_get "${_GDRIVE_PERCCLI}"  "${_dest}/perccli_7.1-007.0127_linux.tar.gz" perccli || return 1 ;;
     esac
 }
 
@@ -157,7 +188,11 @@ install_tools() {
         local _perc_rpm
         _perc_rpm=$(find "${_tmp}/perc_src" -name "*.rpm" 2>/dev/null | head -1)
         if [ -n "${_perc_rpm}" ]; then
-            if (cd "${_tmp}/perc_src" && alien --scripts -i "${_perc_rpm}" 2>&1); then
+            # alien's maintainer-scriptlet flag is intentionally OMITTED: it
+            # would run the vendor RPM's postinst as root, and only perccli64
+            # (a plain data file `alien -i` extracts on its own) is consumed
+            # below (F-147). Must match installer.py's install_perccli() call.
+            if (cd "${_tmp}/perc_src" && alien -i "${_perc_rpm}" 2>&1); then
                 cp -f /opt/MegaRAID/perccli/perccli64 /usr/sbin/perccli
                 echo "  [✔] perccli64 -> /usr/sbin/perccli"
             else
@@ -182,7 +217,11 @@ fi
 
 echo "[*] installing b2ctl package -> ${PREFIX}"
 mkdir -p "${PREFIX}"
-mkdir -p /var/log/b2ctl/snapshots
+# 0700: audit trail + pre-op snapshots (device paths, pool state) must not be
+# group/world-readable; b2ctl.safety._ensure_dir enforces this at runtime too
+# (F-147), but this creates the dir before b2ctl ever runs.
+mkdir -p -m 700 /var/log/b2ctl/snapshots
+chmod 700 /var/log/b2ctl /var/log/b2ctl/snapshots
 # Replace the package dir (don't merge): `cp -r` into an existing tree leaves
 # upstream-removed modules importable forever and re-runs are non-idempotent
 # (F-112). Then drop any dev-machine __pycache__ that tagged along.

@@ -86,6 +86,30 @@ no internet needed.
 - Pick `--perc` **or** `--flash` to match your hardware — it installs just that
   backend's tool and sets the controller mode in `/etc/b2ctl/config.json`.
 
+> **⚠ Tool downloads now REFUSE without a checksum (v0.24.3).** `sas2ircu` and
+> `perccli` are fetched from Google Drive and then run **as root** on every
+> `b2ctl status`. The checksum table (`installer._SHA256`) shipped **empty**, so
+> nothing was ever verified — only "is this file bigger than 1 KB". Both
+> `b2ctl install --with-tools` and `./install.sh --perc` now stop with:
+>
+> ```
+> [✗] no pinned SHA-256 for perccli — refusing to download
+>     unverified content that will run as root.
+> ```
+>
+> **To fix it properly:** get the archive from a copy you trust, run
+> `sha256sum perccli.tar.gz`, and add the digest to `installer._SHA256`. Both
+> install paths read that one table, so they cannot drift apart.
+>
+> **To bootstrap once anyway:** `B2CTL_ALLOW_UNVERIFIED=1 b2ctl install --perc`.
+> It says so loudly while it runs. Use it only if you can verify the binary some
+> other way afterwards.
+>
+> Related: b2ctl no longer passes `--scripts` to `alien`, so installing perccli
+> no longer executes the vendor RPM's own install scripts as root. Nothing else
+> about the install changes — the only artefact b2ctl uses is the `perccli64`
+> binary, which `alien -i` extracts on its own.
+
 **Dependencies:**
 
 | binary | purpose | required? |

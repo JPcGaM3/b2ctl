@@ -523,3 +523,232 @@ class TestConfigPools:
         finally:
             cfg_mod.CONFIG_PATH = old
             cfg_mod._cache = None
+
+
+class TestAtomicWrite:
+    """F-147 — atomic_write_json: crash-safe under concurrent writers, and
+    root-only mode regardless of the process umask."""
+
+    def setup_method(self):
+        import b2ctl.config as cfg_mod
+        cfg_mod._cache = None
+
+    def test_concurrent_writers_never_interleave(self):
+        # Two writers racing on the SAME CONFIG_PATH used to share one fixed
+        # '.tmp' name, so one could truncate the other's half-written file
+        # right before os.replace. mkstemp gives each writer its own tmp file,
+        # so the published result is always ONE writer's complete payload,
+        # never a byte-interleaved mix — and always valid JSON.
+        import json
+        import os
+        import tempfile
+        import threading
+        import b2ctl.config as cfg_mod
+        tmp = tempfile.mkdtemp()
+        path = os.path.join(tmp, "config.json")
+        old = cfg_mod.CONFIG_PATH
+        cfg_mod.CONFIG_PATH = path
+        try:
+            payloads = [{"marker": f"writer-{i}", "pad": "x" * 20000} for i in range(2)]
+            errors = []
+
+            def _write(i):
+                try:
+                    cfg_mod._atomic_write(payloads[i])
+                except Exception as exc:                 # pragma: no cover
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=_write, args=(i,)) for i in range(2)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            assert errors == []
+            with open(path) as f:
+                data = json.load(f)          # must parse cleanly — never interleaved
+            assert data in payloads          # whole payload from exactly one writer
+        finally:
+            cfg_mod.CONFIG_PATH = old
+            cfg_mod._cache = None
+
+    def test_written_file_is_0600_even_under_permissive_umask(self):
+        import os
+        import stat
+        import tempfile
+        import b2ctl.config as cfg_mod
+        tmp = tempfile.mkdtemp()
+        path = os.path.join(tmp, "config.json")
+        old = cfg_mod.CONFIG_PATH
+        cfg_mod.CONFIG_PATH = path
+        old_umask = os.umask(0)      # most permissive umask possible
+        try:
+            cfg_mod._atomic_write({"controller": {"mode": "it", "index": "all"}})
+            mode = stat.S_IMODE(os.stat(path).st_mode)
+            assert mode == 0o600
+        finally:
+            os.umask(old_umask)
+            cfg_mod.CONFIG_PATH = old
+            cfg_mod._cache = None
+
+    def test_write_bay_map_is_also_0600(self):
+        import os
+        import stat
+        import tempfile
+        import b2ctl.config as cfg_mod
+        tmp = tempfile.mkdtemp()
+        old = cfg_mod.CONFIG_PATH
+        cfg_mod.CONFIG_PATH = os.path.join(tmp, "config.json")   # no bay_map override
+        old_umask = os.umask(0)
+        try:
+            cfg_mod._cache = {"tool_paths": {}, "controller": {"mode": "auto", "index": "all"},
+                               "bay_map_path": os.path.join(tmp, "bay_map.json"),
+                               "ssd_spec_path": ""}
+            written = cfg_mod.write_bay_map([{"panel": "front", "type": "sas",
+                                              "reverse_slots": False, "map": {}}])
+            mode = stat.S_IMODE(os.stat(written).st_mode)
+            assert mode == 0o600
+        finally:
+            os.umask(old_umask)
+            cfg_mod.CONFIG_PATH = old
+            cfg_mod._cache = None
+
+    def test_tmp_file_removed_on_failure(self):
+        # A json.dump failure (unserialisable value) must not leak the mkstemp
+        # tmp file, and CONFIG_PATH must be left untouched.
+        import os
+        import tempfile
+        import b2ctl.config as cfg_mod
+        tmp = tempfile.mkdtemp()
+        path = os.path.join(tmp, "config.json")
+        old = cfg_mod.CONFIG_PATH
+        cfg_mod.CONFIG_PATH = path
+        try:
+            try:
+                cfg_mod.atomic_write_json(path, {"bad": object()})   # not JSON-serialisable
+                assert False, "expected TypeError"
+            except TypeError:
+                pass
+            assert not os.path.exists(path)
+            leftover = [f for f in os.listdir(tmp) if f.startswith(".b2ctl-")]
+            assert leftover == []
+        finally:
+            cfg_mod.CONFIG_PATH = old
+            cfg_mod._cache = None
+
+
+class TestConfigTrust:
+    """F-147 — a /etc/b2ctl/config.json that is not root-owned or is
+    group/world-writable must not be trusted for execution-affecting keys
+    (tool_paths/bay_map_path/ssd_spec_path); everywhere else (sim/tests) the
+    check must never fire."""
+
+    def setup_method(self):
+        import b2ctl.common as common_mod
+        import b2ctl.config as cfg_mod
+        cfg_mod._cache = None
+        common_mod.set_json_mode(False)
+
+    def teardown_method(self):
+        import b2ctl.common as common_mod
+        import b2ctl.config as cfg_mod
+        cfg_mod._cache = None
+        common_mod.set_json_mode(False)
+
+    def _fake_stat(self, uid, mode):
+        import os
+        return os.stat_result((mode, 1, 1, 1, uid, uid, 0, 0, 0, 0))
+
+    def test_non_root_owned_etc_config_drops_execution_keys_and_warns(self):
+        import io
+        import json
+        from unittest.mock import mock_open
+        import b2ctl.config as cfg_mod
+        old = cfg_mod.CONFIG_PATH
+        cfg_mod.CONFIG_PATH = "/etc/b2ctl/config.json"
+        payload = json.dumps({
+            "tool_paths": {"zpool": "/tmp/evil-zpool"},
+            "bay_map_path": "/tmp/evil_bay_map.json",
+            "ssd_spec_path": "/tmp/evil_ssd_spec.json",
+            "controller": {"mode": "raid"},        # harmless key — must survive
+        })
+        fake_stat = self._fake_stat(uid=1000, mode=0o100644)   # not root
+        try:
+            with patch("b2ctl.config.os.path.exists", return_value=True), \
+                 patch("b2ctl.config.open", mock_open(read_data=payload)), \
+                 patch("b2ctl.config.os.stat", return_value=fake_stat), \
+                 patch("sys.stdout", new_callable=io.StringIO) as out:
+                cfg = cfg_mod.load()
+            assert cfg["tool_paths"]["zpool"] == ""            # dropped, not the evil override
+            assert cfg["bay_map_path"] == ""
+            assert cfg["ssd_spec_path"] == ""
+            assert cfg["controller"]["mode"] == "raid"          # harmless key preserved
+            assert "not owned by root" in out.getvalue()
+        finally:
+            cfg_mod.CONFIG_PATH = old
+            cfg_mod._cache = None
+
+    def test_world_writable_etc_config_drops_execution_keys_and_warns(self):
+        import io
+        import json
+        from unittest.mock import mock_open
+        import b2ctl.config as cfg_mod
+        old = cfg_mod.CONFIG_PATH
+        cfg_mod.CONFIG_PATH = "/etc/b2ctl/config.json"
+        payload = json.dumps({"tool_paths": {"zpool": "/tmp/evil-zpool"}})
+        fake_stat = self._fake_stat(uid=0, mode=0o100646)   # root-owned but world-writable
+        try:
+            with patch("b2ctl.config.os.path.exists", return_value=True), \
+                 patch("b2ctl.config.open", mock_open(read_data=payload)), \
+                 patch("b2ctl.config.os.stat", return_value=fake_stat), \
+                 patch("sys.stdout", new_callable=io.StringIO) as out:
+                cfg = cfg_mod.load()
+            assert cfg["tool_paths"]["zpool"] == ""
+            assert "group/world-writable" in out.getvalue()
+        finally:
+            cfg_mod.CONFIG_PATH = old
+            cfg_mod._cache = None
+
+    def test_trusted_root_owned_etc_config_keeps_execution_keys(self):
+        import io
+        import json
+        from unittest.mock import mock_open
+        import b2ctl.config as cfg_mod
+        old = cfg_mod.CONFIG_PATH
+        cfg_mod.CONFIG_PATH = "/etc/b2ctl/config.json"
+        payload = json.dumps({"tool_paths": {"zpool": "/usr/sbin/zpool"}})
+        fake_stat = self._fake_stat(uid=0, mode=0o100600)    # root-owned, 0600
+        try:
+            with patch("b2ctl.config.os.path.exists", return_value=True), \
+                 patch("b2ctl.config.open", mock_open(read_data=payload)), \
+                 patch("b2ctl.config.os.stat", return_value=fake_stat), \
+                 patch("sys.stdout", new_callable=io.StringIO) as out:
+                cfg = cfg_mod.load()
+            assert cfg["tool_paths"]["zpool"] == "/usr/sbin/zpool"
+            assert out.getvalue() == ""
+        finally:
+            cfg_mod.CONFIG_PATH = old
+            cfg_mod._cache = None
+
+    def test_check_never_fires_outside_etc(self):
+        # sim/tests redirect CONFIG_PATH to a path under sim/var or a tempdir,
+        # never /etc — the check must not fire there even for a maximally
+        # untrustworthy stat result.
+        import io
+        import json
+        from unittest.mock import mock_open
+        import b2ctl.config as cfg_mod
+        old = cfg_mod.CONFIG_PATH
+        cfg_mod.CONFIG_PATH = "/private/tmp/b2ctl-sim/config.json"
+        payload = json.dumps({"tool_paths": {"zpool": "/tmp/legit-zpool"}})
+        fake_stat = self._fake_stat(uid=1000, mode=0o100666)   # worst case
+        try:
+            with patch("b2ctl.config.os.path.exists", return_value=True), \
+                 patch("b2ctl.config.open", mock_open(read_data=payload)), \
+                 patch("b2ctl.config.os.stat", return_value=fake_stat), \
+                 patch("sys.stdout", new_callable=io.StringIO) as out:
+                cfg = cfg_mod.load()
+            assert cfg["tool_paths"]["zpool"] == "/tmp/legit-zpool"   # kept
+            assert out.getvalue() == ""
+        finally:
+            cfg_mod.CONFIG_PATH = old
+            cfg_mod._cache = None

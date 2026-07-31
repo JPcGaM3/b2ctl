@@ -313,6 +313,11 @@ def _assign_free_disk(d, tbw, all_disks=None) -> None:
             return
         print(G + "  ✔ replace started — resilvering" + N)
         ok_resilver = True if _DRY_RUN else _wait_resilver(pool)
+        if ok_resilver is None:
+            # Started, nobody watching (F-146). The replace itself succeeded;
+            # the detach below deliberately does NOT run.
+            safety.end_op(op_id, True, out, "", 0, dry_run=_DRY_RUN)
+            return
         if not ok_resilver:
             print(f"{Y}  resilver did not complete cleanly — NOT detaching the old "
                   f"member. Recover via: zpool status {pool}{N}")
@@ -671,8 +676,10 @@ def _cmd_offload(tbw, target=None) -> bool:
     # No spare: offline (degrade) + replace a new disk in the same bay, but only
     # if the vdev is redundant enough that offlining won't fail the pool.
     if zfs.can_offline(d.pool, _pool_dev(d), topo):
-        _offline_and_replace(d, tbw)
-        return True
+        # Report what actually happened. `return True` here made a failed offline,
+        # a declined confirm and an un-replaced bay all look like success — exit 0
+        # and `ok:true` on a pool that is now DEGRADED (F-144).
+        return _offline_and_replace(d, tbw)
     print(f"{Y}  no AVAIL spare, and offlining {ui.disk_label(d)} would risk "
           f"failing '{d.pool}' — add a spare or fix redundancy first{N}")
     return False
@@ -706,13 +713,27 @@ def _cmd_locate(tbw) -> None:
 
 
 
-def _wait_resilver(pool: str) -> bool:
+def _wait_resilver(pool: str):
     """Poll until a resilver finishes. Returns True ONLY on clean completion.
 
     Returns False on completed-with-errors, on Ctrl-C (the resilver keeps running
     in the background — the caller must NOT detach/pull), or if `zpool status`
     is unreadable for several polls in a row (never spins forever at 0%).
+
+    Returns **None** when there is nobody watching (`--confirm`): a resilver takes
+    hours, and blocking a machine caller for hours is not an answer — ADR-007 says
+    a mutating verb returns as soon as the operation is STARTED. None is a third
+    state on purpose: True would let the caller detach the old member while the
+    resilver is still running, and that member may hold the only copy of
+    unreconstructed blocks (§9); False would report a failure that did not happen.
+    Callers treat None as "started, do not detach, tell them to poll" (F-146).
     """
+    if common.is_non_interactive():
+        print(f"{Y}  resilver started on '{pool}' — not waiting (hours). "
+              f"Poll it with `b2ctl progress`.{N}")
+        print(f"{Y}  the old member stays attached until it completes; b2ctl "
+              f"detaches it on a later interactive pass.{N}")
+        return None
     fails = 0
     try:
         while True:
@@ -771,6 +792,11 @@ def _replace_member(d, new, *, detach_old=False, pull_led=False) -> bool:
         return False
     print(G + "  ✔ replace started — resilvering" + N)
     ok_resilver = True if _DRY_RUN else _wait_resilver(pool)
+    if ok_resilver is None:
+        # Started, nobody watching (F-146). Same §9 reasoning as the failure
+        # branch below — no detach, no LED — but this is not a failure.
+        safety.end_op(op_id, True, out, "", 0, dry_run=_DRY_RUN)
+        return True
     if not ok_resilver:
         # CLAUDE.md §9: never auto-detach / never light an LED after a resilver
         # that errored or is still running — the old disk may hold the only copy
@@ -793,26 +819,45 @@ def _replace_onto_spare(d, spare) -> bool:
     return _replace_member(d, spare, detach_old=True, pull_led=True)
 
 
-def _offline_and_replace(d, tbw) -> None:
+def _offline_and_replace(d, tbw) -> bool:
     """Spare-less offload: offline a member (pool -> DEGRADED), then replace it
     with a new disk inserted in the SAME bay. Guarded so it can't fail the pool.
+
+    Returns True ONLY when the replacement actually went in. Every earlier exit
+    leaves the pool DEGRADED with the member offline, which is emphatically not
+    success — this used to be `-> None` with bare `return`s, so `_cmd_offload`
+    reported exit 0 / `ok:true` after a FAILED offline on a raidz1 that was then
+    one disk from total loss (F-144).
     """
     pool = d.pool
     if not zfs.can_offline(pool, _pool_dev(d)):
         print(f"{R}  refuse: '{pool}' is not fully redundant right now — offlining "
               f"{ui.disk_label(d)} could fail the pool. Fix the other disk first.{N}")
-        return
+        return False
+    # A spare-less offload is a TWO-VISIT physical procedure: degrade the pool,
+    # walk to the rack, swap the disk. Non-interactively the auto-detection below
+    # cannot succeed — `before` is snapshotted AFTER the offline, so no disk can
+    # appear between two back-to-back scans — and the flow would reliably end at
+    # "couldn't auto-detect", leaving the pool DEGRADED for nobody. Refuse BEFORE
+    # the offline rather than half-finish (F-144).
+    if common.is_non_interactive():
+        print(f"{R}  refuse: '{pool}' has no AVAIL spare, so offloading "
+              f"{ui.disk_label(d)} means degrading the pool and physically "
+              f"swapping the disk — that cannot be driven non-interactively.{N}")
+        print(f"{Y}    add a spare first (`b2ctl watch` -> [a]ssign), or run this "
+              f"offload from an interactive terminal.{N}")
+        return False
     print(f"{Y}  '{pool}' will go DEGRADED (online, NO redundancy) until the new "
           f"disk finishes resilvering.{N}")
     cmds = [["zpool", "offline", pool, _pool_dev(d)]]
     if not _confirm_op("offline", d, None, pool, d.vdev, cmds):
-        return
+        return False
     op_id = safety.begin_op("offline", d.serial, d.bay, _pool_dev(d), pool, d.vdev, cmds, dry_run=_DRY_RUN)
     ok, out = zfs.offline(pool, _pool_dev(d), dry_run=_DRY_RUN)
     safety.end_op(op_id, ok, "", "" if ok else out, 0 if ok else 1, dry_run=_DRY_RUN)
     if not ok:
         print(R + f"  ✗ offline failed: {out}" + N)
-        return
+        return False
     print(G + f"  ✔ {ui.disk_label(d)} offlined — pool DEGRADED" + N)
 
     def _free(scan):
@@ -827,9 +872,11 @@ def _offline_and_replace(d, tbw) -> None:
         print(f"{Y}  pull bay {d.bay or '?'} and insert the replacement into the SAME bay.{N}")
         locate.blink_disk(d, locate.DEFAULT_SECONDS)
     # Blank IS the only documented answer here (the prompt just gates on a
-    # keypress; the return value is never read) — default="" lets --confirm
-    # proceed straight to auto-detection instead of blocking forever waiting
-    # for a physical action that can't be automated (ADR-007 phase 2).
+    # keypress; the return value is never read), so default="" keeps it from
+    # raising. It is NOT what serves a machine caller — the non-interactive
+    # refusal above happens before the offline, because auto-detection cannot
+    # succeed here: `before` is snapshotted after the offline, so no disk can
+    # appear between two back-to-back scans (F-144).
     _ask("  press Enter once the new disk is inserted> ", default="")
     after = _free(core.scan(tbw))
     new = None
@@ -841,8 +888,8 @@ def _offline_and_replace(d, tbw) -> None:
         print(f"{Y}  couldn't auto-detect the new disk. Leave watch running (it "
               f"auto-detects an insert), or use [a]ssign option 3. The member "
               f"stays OFFLINE meanwhile.{N}")
-        return
-    _replace_member(d, new)
+        return False
+    return _replace_member(d, new)
 
 
 def _cmd_replace(tbw, target=None) -> bool:
@@ -1122,6 +1169,11 @@ def _cmd_swap(tbw, target=None) -> bool:
         return False
     print(G + "  ✔ swap started — resilvering onto spare" + N)
     ok_resilver = True if _DRY_RUN else _wait_resilver(d.pool)
+    if ok_resilver is None:
+        # Started, nobody watching (F-146). Neither the detach nor the
+        # re-add-as-spare prompt below runs — both need the resilver finished.
+        safety.end_op(op_id, True, out, "", 0, dry_run=_DRY_RUN)
+        return True
     if not ok_resilver:
         # Do NOT detach or re-add the old disk as a spare — it may still be a
         # member of the replacing/spare vdev holding unreconstructed blocks.
@@ -1519,6 +1571,9 @@ def _repair_aux(pool: str, leaf: dict, new=None, *, new_token: str | None = None
     if resilver:
         print(G + "  ✔ replace started — resilvering" + N)
         ok_res = True if _DRY_RUN else _wait_resilver(pool)
+        if ok_res is None:                       # started, nobody watching (F-146)
+            safety.end_op(op_id, True, out, "", 0, dry_run=_DRY_RUN)
+            return True
         if not ok_res:
             print(f"{Y}  resilver did not complete cleanly — check: zpool status {pool}{N}")
             safety.end_op(op_id, False, out, "resilver incomplete or had errors", 1,

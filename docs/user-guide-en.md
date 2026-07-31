@@ -1157,6 +1157,48 @@ still one clean JSON document.
 > `b2ctl watch` has no `--json` form — it's an interactive terminal loop and
 > returns `UNSUPPORTED`.
 
+### You always get an envelope back, even when b2ctl dies (v0.25.0)
+
+Three ways a `--json` call used to give a program nothing usable:
+
+| you ran | you used to get | you now get |
+|---|---|---|
+| any verb on a box with no sas2ircu/perccli | **nothing at all** — zero bytes on stdout | `ok:false`, `error.code: "NO_BACKEND"`, and the reason in `error.message` |
+| anything that crashed unexpectedly | a Python traceback | `ok:false`, `error.code: "PARSE_ERROR"` |
+| `maint health --status --json` | **it never came back** — it opened the live progress view and redrew forever | the current health-check state, immediately |
+
+Two new error codes are now real, so you can tell "you named something that
+doesn't exist" from "the operation failed":
+
+```bash
+b2ctl destroy nosuchpool --json --confirm yes   # -> POOL_NOT_FOUND
+b2ctl locate 99:99 --json                       # -> DISK_NOT_FOUND
+```
+
+If `zpool` itself is silent you get `TOOL_MISSING`, **not** `POOL_NOT_FOUND` —
+b2ctl will not tell you a pool is gone when it merely could not look.
+
+### A resilver doesn't hold your program hostage (v0.25.0)
+
+`replace`, `swap` and `offload` start a resilver, which can run for hours.
+Interactively b2ctl draws a progress bar and waits. With `--confirm` it now
+returns as soon as the resilver has **started**:
+
+```bash
+b2ctl replace --disk 32:4 --json --confirm yes
+# ok:true — "resilver started on 'tank' — not waiting (hours).
+#            Poll it with `b2ctl progress`."
+b2ctl progress --json | jq '.data.running'
+```
+
+**The old disk stays attached until it finishes.** That is deliberate: until the
+resilver completes, the old member may hold the only copy of blocks that haven't
+been rebuilt yet, so detaching it early is exactly how you lose data. b2ctl
+detaches it for you the next time you're in `watch` and the resilver is done.
+
+Health-checks work the same way — start one under `--json`, then poll
+`b2ctl maint health --status --json`.
+
 ---
 
 ## 8. Warnings

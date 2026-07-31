@@ -1526,6 +1526,71 @@ existed.
 
 ---
 
+## 9.9 ADR-007 phase 3 — the envelope survives the abnormal exits (v0.25.0 / F-146)
+
+Phase 1 gave every read verb an envelope, phase 2 made mutations callable. Phase 3
+is the part that only shows up when something goes wrong.
+
+| failure | before | after |
+|---|---|---|
+| no HBA/RAID tool on the box | `backend.get_backend()` → `common.die()` → `sys.exit(1)`. **`SystemExit` is not an `Exception` subclass**, so `main()`'s handlers missed it and `b2ctl --json status` wrote **zero bytes** to stdout | `except SystemExit` → `NO_BACKEND`/`TOOL_MISSING` envelope. stderr is captured (under `--json` only) so `die()`'s own sentence becomes `error.message`, ANSI-stripped through the new shared `common.strip_ansi` |
+| any unhandled exception | Python traceback on stderr, nothing on stdout | final `except Exception` → `PARSE_ERROR` envelope |
+| SIGINT | `\n\x1b[33m[-] interrupted\x1b[0m` on the real stdout + exit **130** | envelope under `--json`; the human path keeps 130 (the conventional SIGINT code) |
+| `maint health --status --json` | tagged `emits_json=False`, so it routed into `_json_mutation` and called burn-in's `while True` live view inside a redirected stdout — **the request never returned**, and the StringIO grew without bound. On the one verb `_needs_root` advertises as safe to poll | short-circuits in `main()` to `jsonout.emit("maint", {"health": burnin.status_payload()})` |
+| starting a health-check under `--json` | same hang, from `run_multi`'s own `live_view()` | `burnin._unwatched()` skips the live view under json/`--confirm` and points at `--status`. Burn-in has been non-blocking since **ADR-002** — it exits 0 once the tests are STARTED — so refusing the verb would have been the wrong fix |
+| `replace`/`swap`/`offload`/aux-repair under `--json` | `watch._wait_resilver` polls until the resilver completes — **hours** | see below |
+
+### The third state: `_wait_resilver` returns `None`
+
+`None` = "started, nobody watching". It is not an accident that this is a
+tri-state rather than a bool:
+
+- `True` would let the caller run `_detach_if_lingers()` **while the resilver is
+  still running**, on a member that may hold the only copy of unreconstructed
+  blocks. That is the §9 data-loss path every guard in this file exists to
+  prevent.
+- `False` would report a failure that did not happen, and a machine caller would
+  retry a `zpool replace` that is already in flight.
+
+All four call sites (`_assign_free_disk` choice 3, `_replace_member`, `_cmd_swap`,
+the aux-vdev repair) record the op as a **success** — `zpool replace` did succeed —
+skip the detach and the pull LED, and tell the caller to poll `b2ctl progress`. The
+old member stays attached, which is the conservative state, and `_detach_if_lingers`
+runs on a later interactive pass. `raid_actions._wait_rebuild` needs no equivalent:
+F-144's abort now sits in front of its only caller.
+
+### rollback is a mutating verb and now has a mutating verb's guards
+
+`_rollback_cmd` rebuilt a command by whitespace-splitting a **string** out of
+ops.jsonl and ran it with no allowlist. No attacker needed:
+`safety._ROLLBACK["aux-repair"]` is English prose, which splits into
+`["aux", "vdev", "repair", …]`. Now `cmd[0]`'s basename is gated on
+`safety.WRITE_CMDS` (the allowlist the project already owns), the raw `input()` is
+`common.confirm`, every path returns an explicit `int` (falling off the end returned
+`None` → `OP_FAILED` even on success), and `"rollback"` left `_ROOT_EXEMPT`.
+
+### Newly reachable error codes
+
+`_mutation_precheck()` resolves the target **before** `_json_mutation` takes over:
+a named pool against `zfs.list_pools()` → `POOL_NOT_FOUND`, a named disk against
+`core.scan_light()` → `DISK_NOT_FOUND`. A **silent** zpool is deliberately not
+caught here — `ZfsUnavailable` propagates to `main()` and reports `TOOL_MISSING`,
+because "I could not look" must never be reported as "it is not there" (F-143).
+
+### Ride-alongs from F-144/F-147 that live in cli.py
+
+- `_partition_devs` validates `zfs.parse_size(size)` and each device's
+  `size_bytes` **before** the wipe loop. It used to wipe first and let
+  `zfs.partition`'s `max_bytes` fail afterwards, so a typo'd `--size` destroyed a
+  partition table and then errored. `watch._maybe_partition` always got this right.
+- `_resolve_devs(strict=True)` collects ALL matches and refuses when there is more
+  than one, printing the candidates — `watch._resolve_target` documents the same
+  rule. Permissive (`strict=False`) rm-path behaviour is unchanged.
+- `_update` writes through `config.atomic_write_json` and clears `config._cache`;
+  on `JSONDecodeError` it refuses instead of falling back to `load()`'s defaults
+  and rewriting the file, which silently discarded `tool_paths`/`controller.mode`/
+  `pools`.
+
 ## 10. Config file (`config.py`)
 
 Config file: `/etc/b2ctl/config.json`. **Optional** — missing or malformed

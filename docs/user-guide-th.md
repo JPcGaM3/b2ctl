@@ -1120,6 +1120,45 @@ b2ctl progress --json | jq '.data.running'
 
 > `b2ctl watch` ไม่มีโหมด `--json` — มันเป็น loop โต้ตอบบน terminal จะตอบ `UNSUPPORTED`
 
+### ได้ envelope กลับมาเสมอ ต่อให้ b2ctl ตาย (v0.25.0)
+
+เดิมมี 3 ทางที่เรียก `--json` แล้วโปรแกรมได้ของที่ใช้ไม่ได้:
+
+| สั่ง | เดิมได้ | ตอนนี้ได้ |
+|---|---|---|
+| verb อะไรก็ได้ บนเครื่องที่ไม่มี sas2ircu/perccli | **ไม่ได้อะไรเลย** — stdout ว่าง 0 ไบต์ | `ok:false`, `error.code: "NO_BACKEND"` พร้อมเหตุผลใน `error.message` |
+| อะไรก็ตามที่ crash ไม่คาดคิด | Python traceback | `ok:false`, `error.code: "PARSE_ERROR"` |
+| `maint health --status --json` | **ไม่คืนค่าเลย** — มันเปิด live view แล้ววาดใหม่ไปเรื่อยๆ ไม่จบ | สถานะ health-check ปัจจุบัน คืนทันที |
+
+error code เพิ่มมาใช้ได้จริง 2 ตัว แยกออกได้แล้วว่า "ตั้งชื่อของที่ไม่มีอยู่" กับ "ทำแล้วล้มเหลว":
+
+```bash
+b2ctl destroy nosuchpool --json --confirm yes   # -> POOL_NOT_FOUND
+b2ctl locate 99:99 --json                       # -> DISK_NOT_FOUND
+```
+
+ถ้า `zpool` เงียบเอง จะได้ `TOOL_MISSING` **ไม่ใช่** `POOL_NOT_FOUND` — b2ctl จะไม่บอกว่า
+pool หายไป ทั้งที่มันแค่มองไม่เห็น
+
+### resilver ไม่จับโปรแกรมคุณเป็นตัวประกัน (v0.25.0)
+
+`replace`, `swap`, `offload` จะเริ่ม resilver ซึ่งใช้เวลาเป็นชั่วโมง ถ้าสั่งเองบน terminal
+b2ctl วาดแถบความคืบหน้าแล้วรอ แต่ถ้าใส่ `--confirm` มันจะคืนค่าทันทีที่ resilver **เริ่ม**:
+
+```bash
+b2ctl replace --disk 32:4 --json --confirm yes
+# ok:true — "resilver started on 'tank' — not waiting (hours).
+#            Poll it with `b2ctl progress`."
+b2ctl progress --json | jq '.data.running'
+```
+
+**ดิสก์เก่ายังติดอยู่ในพูลจนกว่าจะเสร็จ** — ตั้งใจให้เป็นแบบนั้น เพราะระหว่างที่ resilver ยังไม่จบ
+ดิสก์เก่าอาจถือสำเนาเดียวของบล็อกที่ยังสร้างใหม่ไม่เสร็จอยู่ ถอดออกก่อน = ข้อมูลหาย
+b2ctl จะถอดให้เองรอบหน้าที่คุณเข้า `watch` แล้ว resilver จบแล้ว
+
+health-check ก็แบบเดียวกัน — สั่งเริ่มด้วย `--json` แล้ว poll ด้วย
+`b2ctl maint health --status --json`
+
 ---
 
 ## 8. ข้อควรระวัง

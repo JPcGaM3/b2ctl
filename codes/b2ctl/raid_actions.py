@@ -274,6 +274,24 @@ def _wait_rebuild(cs: str, controller: int = 0) -> bool:
         return False
 
 
+def _abort_at_insert_prompt(op_id: str, d, dr: bool) -> int:
+    """F-090/F-144: abort the guided replace without falling through to the
+    rebuild logic. Shared by the interactive EOF/KeyboardInterrupt handler AND
+    the non-interactive (--confirm) path — neither has an operator who can
+    actually pull and re-seat the physical drive, so the honest outcome in
+    both cases is 'prepared, come do your half', not a rebuild kicked off onto
+    the very drive the operator was just told to remove.
+
+    The drive is already offline+missing; the caller's `finally` still turns
+    the locate LED off.
+    """
+    safety.end_op(op_id, False, "", "aborted at insert prompt", 1, dry_run=dr)
+    print(f"{Y}[-] aborted — {disk_label(d)} is already offline+missing. "
+          f"Insert the replacement, then rerun `b2ctl raid-replace` to "
+          f"resume the rebuild.{N}")
+    return 1
+
+
 def replace(target: str | None = None) -> int:
     """Guided replace+rebuild of a hardware RAID member."""
     if not _require_raid():
@@ -320,28 +338,29 @@ def replace(target: str | None = None) -> int:
     try:
         hba_raid.locate(cs, True, ctrl, dry_run=dr)
         print(f"{Y}[!] LED ON at bay {d.bay} — pull that drive, insert the replacement.{N}")
+        # A non-interactive (--confirm) caller has nobody to wait on — but
+        # skipping the wait must NOT mean skipping the STEP (F-144): a
+        # physical drive swap cannot be automated, so take the same abort path
+        # an interactive Ctrl-C/EOF takes, rather than falling through to
+        # start_rebuild on the drive we just told the operator to pull.
+        if is_non_interactive():
+            return _abort_at_insert_prompt(op_id, d, dr)
         try:
-            # A non-interactive (--confirm) caller has nobody to wait on, so
-            # skip the wait outright rather than block forever (equivalent to
-            # a default=""). Interactive path keeps the raw input() so a real
-            # Ctrl-C/EOF still raises here and hits the F-090 abort below —
-            # common.ask() would swallow that exception internally and let a
-            # Ctrl-C at this exact prompt fall through into the rebuild logic,
-            # which is precisely the bug F-090 fixed.
-            if not is_non_interactive():
-                input("press Enter once the new drive is inserted... ")
+            # Interactive path keeps the raw input() so a real Ctrl-C/EOF
+            # still raises here and hits the F-090 abort below — common.ask()
+            # would swallow that exception internally and let a Ctrl-C at
+            # this exact prompt fall through into the rebuild logic, which is
+            # precisely the bug F-090 fixed.
+            input("press Enter once the new drive is inserted... ")
         except (EOFError, KeyboardInterrupt):
-            # F-090: aborting here must NOT fall through to the rebuild logic (which
-            # would poll an empty bay and, via the old 'Not in progress'==done
-            # conflation, falsely report success). The drive is already
-            # offline+missing, so record the failure and tell the operator how to
-            # resume. The finally block still turns the locate LED off.
+            # F-090: aborting here must NOT fall through to the rebuild logic
+            # (which would poll an empty bay and, via the old 'Not in
+            # progress'==done conflation, falsely report success). The drive
+            # is already offline+missing, so record the failure and tell the
+            # operator how to resume. The finally block still turns the
+            # locate LED off.
             print()
-            safety.end_op(op_id, False, "", "aborted at insert prompt", 1, dry_run=dr)
-            print(f"{Y}[-] aborted — {disk_label(d)} is already offline+missing. "
-                  f"Insert the replacement, then rerun `b2ctl raid-replace` to "
-                  f"resume the rebuild.{N}")
-            return 1
+            return _abort_at_insert_prompt(op_id, d, dr)
 
         if dr:
             safety.end_op(op_id, True, "", "", 0, dry_run=dr)

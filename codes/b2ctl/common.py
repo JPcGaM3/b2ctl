@@ -62,10 +62,17 @@ def is_json_mode() -> bool:
     return JSON_MODE
 
 
+def strip_ansi(msg: str) -> str:
+    """Drop SGR colour codes. Shared so every string that can reach a JSON field
+    is cleaned the same way — warnings[] via warn(), and error.message when the
+    CLI folds a captured die() line into an envelope (F-146)."""
+    return _ANSI_RE.sub("", msg)
+
+
 def warn(msg: str) -> None:
     """In JSON mode append to the pending list; otherwise print as today."""
     if JSON_MODE:
-        plain = _ANSI_RE.sub("", msg)
+        plain = strip_ansi(msg)
         if plain not in _pending_warnings:     # F-139: dedup within one run
             _pending_warnings.append(plain)
     else:

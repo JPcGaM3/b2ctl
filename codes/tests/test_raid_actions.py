@@ -282,6 +282,128 @@ class TestReplaceFlow(unittest.TestCase):
         self.assertEqual(cmds_logged[1][1:], ["/c0/e32/s1", "set", "missing"])
 
 
+class TestReplaceNonInteractive(unittest.TestCase):
+    """F-144: --confirm (non-interactive) must take the SAME abort path as an
+    interactive Ctrl-C at the insert prompt, not fall through into
+    start_rebuild on the very drive the operator was just told to pull."""
+
+    def setUp(self):
+        self.p = [
+            patch("b2ctl.raid_actions._require_raid", return_value=True),
+            patch("b2ctl.raid_actions.time.sleep"),
+        ]
+        for x in self.p:
+            x.start()
+
+    def tearDown(self):
+        for x in self.p:
+            x.stop()
+        common.set_dry_run(False)
+        common.set_auto_confirm(None)   # never let this leak into later tests
+
+    def _member_disk(self):
+        d = _member(bay="32:1", serial="M1")
+        d.ctrl_slot = "32:1"
+        return d
+
+    def test_confirm_yes_never_starts_rebuild_and_returns_1(self):
+        common.set_auto_confirm("yes")
+        d = self._member_disk()
+        with patch("b2ctl.raid_actions.core.scan", return_value=[d]), \
+             patch("b2ctl.hba_raid.set_offline", return_value=(True, "")), \
+             patch("b2ctl.hba_raid.set_missing", return_value=(True, "")), \
+             patch("b2ctl.hba_raid.locate", return_value=(True, "")), \
+             patch("b2ctl.hba_raid.start_rebuild") as sr, \
+             patch("b2ctl.raid_actions._wait_rebuild") as wr, \
+             patch("b2ctl.raid_actions.safety.begin_op", return_value="op1"), \
+             patch("b2ctl.raid_actions.safety.end_op") as eo, \
+             patch("builtins.input") as inp:
+            rc = ra.replace("32:1")
+        sr.assert_not_called()
+        wr.assert_not_called()
+        inp.assert_not_called()          # non-interactive: never blocks on input()
+        self.assertEqual(rc, 1)
+
+    def test_confirm_yes_still_offlines_and_records_failure(self):
+        # The operator DID ask for the swap, so offline+missing is genuinely
+        # correct prep — only the rebuild-onto-the-pulled-drive is refused.
+        common.set_auto_confirm("yes")
+        d = self._member_disk()
+        with patch("b2ctl.raid_actions.core.scan", return_value=[d]), \
+             patch("b2ctl.hba_raid.set_offline", return_value=(True, "")) as so, \
+             patch("b2ctl.hba_raid.set_missing", return_value=(True, "")) as sm, \
+             patch("b2ctl.hba_raid.locate", return_value=(True, "")), \
+             patch("b2ctl.hba_raid.start_rebuild"), \
+             patch("b2ctl.raid_actions.safety.begin_op", return_value="op1"), \
+             patch("b2ctl.raid_actions.safety.end_op") as eo, \
+             patch("builtins.input"):
+            rc = ra.replace("32:1")
+        so.assert_called_once()
+        sm.assert_called_once()
+        self.assertEqual(rc, 1)
+        self.assertFalse(eo.call_args.args[1])   # end_op(success=False)
+
+    def test_confirm_yes_still_turns_led_off(self):
+        common.set_auto_confirm("yes")
+        d = self._member_disk()
+        with patch("b2ctl.raid_actions.core.scan", return_value=[d]), \
+             patch("b2ctl.hba_raid.set_offline", return_value=(True, "")), \
+             patch("b2ctl.hba_raid.set_missing", return_value=(True, "")), \
+             patch("b2ctl.hba_raid.locate", return_value=(True, "")) as loc, \
+             patch("b2ctl.hba_raid.start_rebuild"), \
+             patch("b2ctl.raid_actions.safety.begin_op", return_value="op1"), \
+             patch("b2ctl.raid_actions.safety.end_op"), \
+             patch("builtins.input"):
+            ra.replace("32:1")
+        self.assertEqual(loc.call_count, 2)              # LED lit, then finally off
+        self.assertTrue(loc.call_args_list[0].args[1])   # locate ON
+        self.assertFalse(loc.call_args_list[1].args[1])  # locate OFF (finally)
+
+    def test_interactive_path_still_reaches_start_rebuild(self):
+        # Anti-overcorrection: prove the gate is on non-interactive mode, not
+        # on the flow itself — a real interactive run (no --confirm) must
+        # still reach start_rebuild exactly as before.
+        d = self._member_disk()
+        with patch("b2ctl.raid_actions._confirm", return_value=True), \
+             patch("b2ctl.raid_actions.core.scan", return_value=[d]), \
+             patch("b2ctl.hba_raid.set_offline", return_value=(True, "")), \
+             patch("b2ctl.hba_raid.set_missing", return_value=(True, "")), \
+             patch("b2ctl.hba_raid.locate", return_value=(True, "")), \
+             patch("b2ctl.hba_raid.pd_state", side_effect=iter(["UGood", "Onln"])), \
+             patch("b2ctl.hba_raid.rebuild_progress",
+                   return_value={"pct": 100.0, "done": True}), \
+             patch("b2ctl.hba_raid.start_rebuild", return_value=(True, "")) as sr, \
+             patch("b2ctl.raid_actions.safety.begin_op", return_value="op1"), \
+             patch("b2ctl.raid_actions.safety.end_op"), \
+             patch("builtins.input", return_value=""):
+            rc = ra.replace("32:1")
+        sr.assert_called_once()
+        self.assertEqual(rc, 0)
+
+    def test_f090_ctrl_c_abort_unchanged(self):
+        # The existing interactive Ctrl-C-at-insert-prompt behaviour must be
+        # byte-for-byte the same after extracting the shared abort helper.
+        d = self._member_disk()
+        with patch("b2ctl.raid_actions._confirm", return_value=True), \
+             patch("b2ctl.raid_actions.core.scan", return_value=[d]), \
+             patch("b2ctl.hba_raid.set_offline", return_value=(True, "")), \
+             patch("b2ctl.hba_raid.set_missing", return_value=(True, "")), \
+             patch("b2ctl.hba_raid.locate", return_value=(True, "")) as loc, \
+             patch("b2ctl.hba_raid.start_rebuild") as sr, \
+             patch("b2ctl.raid_actions._wait_rebuild") as wr, \
+             patch("b2ctl.raid_actions.safety.begin_op", return_value="op1"), \
+             patch("b2ctl.raid_actions.safety.end_op") as eo, \
+             patch("builtins.input", side_effect=KeyboardInterrupt):
+            rc = ra.replace("32:1")
+        sr.assert_not_called()
+        wr.assert_not_called()
+        self.assertEqual(rc, 1)
+        self.assertFalse(eo.call_args.args[1])
+        self.assertEqual(loc.call_count, 2)
+        self.assertTrue(loc.call_args_list[0].args[1])
+        self.assertFalse(loc.call_args_list[1].args[1])
+
+
 class TestOffline(unittest.TestCase):
     """F-088: offline() marks the member offline+missing and only lights the
     locate LED once that prep actually succeeded."""

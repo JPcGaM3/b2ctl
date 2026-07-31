@@ -1646,3 +1646,187 @@ class TestPoolUnknownRefusesAssignment:
         mock_ask.return_value = ""             # cancel at the first prompt
         _cmd_create({})
         mock_ask.assert_called()               # got as far as offering them
+
+
+# ========================================================================== #
+# F-144 — a mutation that half-finished never reports success
+# ========================================================================== #
+
+class TestOffloadTellsTheTruth:
+    """`_offline_and_replace` was `-> None` with bare `return` on all three
+    failure exits, and `_cmd_offload` did `_offline_and_replace(...)` then an
+    UNCONDITIONAL `return True`. So a declined confirm, a failed `zpool offline`
+    and an un-replaced bay all reported exit 0 / `ok:true` — on a raidz1 that is
+    now DEGRADED and one disk from total loss.
+
+    `zfs_actions.offload` is `_rc(watch._cmd_offload(...))` and `cli`'s JSON face
+    emits `ok:true` on rc 0, so the lie travels all the way to an MCP client.
+    """
+
+    def _member(self):
+        d = _disk(bay="1:4", vdev="raidz1-0", pool="tank")
+        d.by_id = "/dev/disk/by-id/wwn-0xMEMBER"
+        d.pool_token = d.by_id
+        return d
+
+    # ---- _cmd_offload propagates instead of asserting success -------------- #
+
+    @patch("b2ctl.watch._offline_and_replace", return_value=False)
+    @patch("b2ctl.watch.zfs")
+    @patch("b2ctl.watch.core")
+    @patch("b2ctl.watch._ask", return_value="1")
+    def test_offload_returns_false_when_the_replace_never_happened(
+            self, _ask, mock_core, mock_zfs, _oar):
+        from b2ctl.watch import _cmd_offload
+        mock_core.scan.return_value = [self._member()]
+        mock_zfs.topology.return_value = {}
+        mock_zfs.detach_safety.return_value = "no_mirror"   # not a mirror leg
+        mock_zfs.can_offline.return_value = True
+        assert _cmd_offload({}) is False
+
+    @patch("b2ctl.watch._offline_and_replace", return_value=True)
+    @patch("b2ctl.watch.zfs")
+    @patch("b2ctl.watch.core")
+    @patch("b2ctl.watch._ask", return_value="1")
+    def test_offload_returns_true_only_when_it_did(
+            self, _ask, mock_core, mock_zfs, _oar):
+        from b2ctl.watch import _cmd_offload
+        mock_core.scan.return_value = [self._member()]
+        mock_zfs.topology.return_value = {}
+        mock_zfs.detach_safety.return_value = "no_mirror"
+        mock_zfs.can_offline.return_value = True
+        assert _cmd_offload({}) is True
+
+    # ---- _offline_and_replace's own exits ---------------------------------- #
+
+    @patch("b2ctl.watch.zfs")
+    def test_false_when_the_vdev_is_not_redundant_enough(self, mock_zfs):
+        from b2ctl.watch import _offline_and_replace
+        mock_zfs.can_offline.return_value = False
+        assert _offline_and_replace(self._member(), {}) is False
+        mock_zfs.offline.assert_not_called()
+
+    @patch("b2ctl.watch._confirm_op", return_value=False)
+    @patch("b2ctl.watch.zfs")
+    def test_false_when_the_operator_declines_the_offline(self, mock_zfs, _c):
+        from b2ctl.watch import _offline_and_replace
+        mock_zfs.can_offline.return_value = True
+        assert _offline_and_replace(self._member(), {}) is False
+        mock_zfs.offline.assert_not_called()
+
+    @patch("b2ctl.watch.safety")
+    @patch("b2ctl.watch._confirm_op", return_value=True)
+    @patch("b2ctl.watch.zfs")
+    def test_false_when_zpool_offline_fails(self, mock_zfs, _c, _safety):
+        from b2ctl.watch import _offline_and_replace
+        mock_zfs.can_offline.return_value = True
+        mock_zfs.offline.return_value = (False, "no such device")
+        assert _offline_and_replace(self._member(), {}) is False
+
+    @patch("b2ctl.watch.locate")
+    @patch("b2ctl.watch.core")
+    @patch("b2ctl.watch._ask", return_value="")
+    @patch("b2ctl.watch.safety")
+    @patch("b2ctl.watch._confirm_op", return_value=True)
+    @patch("b2ctl.watch.zfs")
+    def test_false_when_the_new_disk_never_appears(self, mock_zfs, _c, _safety,
+                                                   _ask, mock_core, _loc):
+        # The pool is DEGRADED with the member offline and nothing replaced it.
+        # This is the exit that used to be reported as success.
+        from b2ctl.watch import _offline_and_replace
+        mock_zfs.can_offline.return_value = True
+        mock_zfs.offline.return_value = (True, "")
+        mock_core.scan.return_value = []          # no free disk before or after
+        assert _offline_and_replace(self._member(), {}) is False
+
+    # ---- refuse before degrading, not after -------------------------------- #
+
+    @patch("b2ctl.watch.zfs")
+    def test_non_interactive_refuses_before_touching_the_pool(self, mock_zfs):
+        """Auto-detection is structurally unreachable non-interactively: the
+        `before` serial snapshot is taken AFTER the offline, so no disk can
+        appear between two back-to-back scans. Running anyway would reliably
+        leave the pool DEGRADED for nobody. Refuse BEFORE the offline."""
+        from b2ctl import common
+        from b2ctl.watch import _offline_and_replace
+        mock_zfs.can_offline.return_value = True
+        common.set_auto_confirm("yes")
+        try:
+            assert _offline_and_replace(self._member(), {}) is False
+        finally:
+            common.set_auto_confirm(None)
+        mock_zfs.offline.assert_not_called()      # the pool was never degraded
+
+    @patch("b2ctl.watch._confirm_op", return_value=False)
+    @patch("b2ctl.watch.zfs")
+    def test_interactive_still_reaches_the_confirm(self, mock_zfs, mock_confirm):
+        # Anti-overcorrection: the refusal must be keyed on non-interactive
+        # mode, not on the spare-less flow itself.
+        from b2ctl.watch import _offline_and_replace
+        mock_zfs.can_offline.return_value = True
+        _offline_and_replace(self._member(), {})
+        mock_confirm.assert_called_once()
+
+
+class TestLongOpsDoNotBlockAMachineCaller:
+    """F-146: a resilver takes hours. ADR-007 says a mutating verb returns as
+    soon as the operation is STARTED, so `_wait_resilver` returns a third state
+    non-interactively.
+
+    Why None and not True/False: True would let the caller run
+    `_detach_if_lingers` while the resilver is still going, and the old member
+    may hold the only copy of unreconstructed blocks (§9) — that is the data-loss
+    path this whole family of guards exists to prevent. False would report a
+    failure that did not happen, and a machine caller would retry a replace that
+    is already running.
+    """
+
+    def test_wait_resilver_returns_none_and_never_polls(self):
+        from b2ctl import common
+        from b2ctl.watch import _wait_resilver
+        common.set_auto_confirm("yes")
+        try:
+            with patch("b2ctl.watch.zfs") as mock_zfs, \
+                 patch("b2ctl.watch.time.sleep") as slept:
+                assert _wait_resilver("tank") is None
+            mock_zfs.poll_resilver_status.assert_not_called()
+            slept.assert_not_called()          # returned immediately
+        finally:
+            common.set_auto_confirm(None)
+
+    def test_interactive_still_polls_to_completion(self):
+        # Anti-overcorrection: the interactive path is untouched.
+        from b2ctl.watch import _wait_resilver
+        with patch("b2ctl.watch.zfs") as mock_zfs, \
+             patch("b2ctl.watch.time.sleep"):
+            mock_zfs.poll_resilver_status.return_value = {
+                "ok": True, "completed": True, "done": 100.0,
+                "eta": "", "has_errors": False}
+            assert _wait_resilver("tank") is True
+        mock_zfs.poll_resilver_status.assert_called()
+
+    @patch("b2ctl.watch.locate")
+    @patch("b2ctl.watch._detach_if_lingers")
+    @patch("b2ctl.watch.safety")
+    @patch("b2ctl.watch._confirm_op", return_value=True)
+    @patch("b2ctl.watch.run_check", return_value=(True, ""))
+    @patch("b2ctl.watch.zfs")
+    def test_replace_member_never_detaches_what_it_did_not_watch(
+            self, mock_zfs, _rc, _co, mock_safety, mock_detach, _loc):
+        """The whole point of the None state: no detach, no pull LED."""
+        from b2ctl import common
+        from b2ctl.watch import _replace_member
+        d = _disk(bay="1:4", pool="tank", vdev="raidz1-0")
+        d.by_id = "/dev/disk/by-id/wwn-0xOLD"
+        d.pool_token = d.by_id
+        new = _disk(dev="/dev/sdz", serial="NEW1")
+        new.by_id = "/dev/disk/by-id/wwn-0xNEW"
+        common.set_auto_confirm("yes")
+        try:
+            result = _replace_member(d, new, detach_old=True, pull_led=True)
+        finally:
+            common.set_auto_confirm(None)
+        assert result is True                  # the replace DID start
+        mock_detach.assert_not_called()        # ...but nothing was detached
+        # and the op is recorded as a SUCCESS, not a failure to be retried
+        assert mock_safety.end_op.call_args.args[1] is True

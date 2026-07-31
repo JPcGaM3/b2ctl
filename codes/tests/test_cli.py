@@ -1192,3 +1192,326 @@ class TestSilentZpoolIsNotAnEmptyMachine(unittest.TestCase):
                 rc = cli_mod.main(["status"])
         self.assertEqual(rc, 0)
         self.assertIn("BAY", buf.getvalue())     # the table rendered
+
+
+class TestJsonCrashSafety(unittest.TestCase):
+    """F-146: a --json call must always answer with an envelope, even when the
+    process would otherwise die/crash/interrupt before completing."""
+
+    def test_system_exit_under_json_becomes_an_envelope(self):
+        # backend.get_backend() -> common.die() (SystemExit, NOT an Exception)
+        # used to leave a --json caller with nothing at all on stdout.
+        with patch("os.geteuid", return_value=0), \
+             patch("b2ctl.core.scan", side_effect=SystemExit(1)):
+            buf = io.StringIO()
+            with patch("sys.stdout", buf):
+                rc = cli_mod.main(["status", "--json"])
+        out = json.loads(buf.getvalue())          # the critical assertion
+        self.assertIs(out["ok"], False)
+        self.assertIn(out["error"]["code"], ("NO_BACKEND", "TOOL_MISSING"))
+        self.assertEqual(rc, 1)
+
+    def test_system_exit_without_json_still_propagates_unchanged(self):
+        # The human face must see byte-for-byte today's behaviour: SystemExit
+        # is not swallowed, it propagates exactly as before.
+        with patch("os.geteuid", return_value=0), \
+             patch("b2ctl.core.scan", side_effect=SystemExit(1)):
+            with self.assertRaises(SystemExit):
+                cli_mod.main(["status"])
+
+    def test_unexpected_exception_becomes_parse_error_not_a_traceback(self):
+        with patch("os.geteuid", return_value=0), \
+             patch("b2ctl.core.scan", side_effect=RuntimeError("boom")):
+            buf = io.StringIO()
+            with patch("sys.stdout", buf):
+                rc = cli_mod.main(["status", "--json"])
+        out = json.loads(buf.getvalue())
+        self.assertIs(out["ok"], False)
+        self.assertEqual(out["error"]["code"], "PARSE_ERROR")
+        self.assertIn("boom", out["error"]["message"])
+        self.assertEqual(rc, 1)
+
+    def test_sigint_under_json_emits_envelope_not_ansi(self):
+        with patch("os.geteuid", return_value=0), \
+             patch("b2ctl.core.scan", side_effect=KeyboardInterrupt):
+            buf = io.StringIO()
+            with patch("sys.stdout", buf):
+                rc = cli_mod.main(["status", "--json"])
+        out = json.loads(buf.getvalue())
+        self.assertIs(out["ok"], False)
+        self.assertEqual(out["error"]["code"], "OP_FAILED")
+        self.assertEqual(rc, 1)
+
+    def test_sigint_human_path_still_130(self):
+        with patch("os.geteuid", return_value=0), \
+             patch("b2ctl.core.scan", side_effect=KeyboardInterrupt), \
+             patch("sys.stdout", new_callable=io.StringIO):
+            rc = cli_mod.main(["status"])
+        self.assertEqual(rc, 130)
+
+
+class TestMaintHealthJsonNeverBlocks(unittest.TestCase):
+    """F-146: `maint health --status --json` used to route into `_json_mutation`,
+    which runs the handler inside a redirected stdout while it calls burnin's
+    live view (a `while True` redraw loop) — the request never returns. Starting
+    a NEW health-check under --json ends in the same mandatory live_view() call
+    inside burnin.run_multi()."""
+
+    def test_status_json_returns_and_never_touches_the_live_view(self):
+        with patch("os.geteuid", return_value=0), \
+             patch("b2ctl.burnin.status_payload",
+                   return_value=[{"dev": "/dev/sde", "verdict": "PASS"}]), \
+             patch("b2ctl.burnin.live_view",
+                   side_effect=AssertionError("must never call live_view")), \
+             patch("b2ctl.burnin.status_view",
+                   side_effect=AssertionError("must never call status_view")):
+            buf = io.StringIO()
+            with patch("sys.stdout", buf):
+                rc = cli_mod.main(["maint", "health", "--status", "--json"])
+        out = json.loads(buf.getvalue())
+        self.assertEqual(rc, 0)
+        self.assertIs(out["ok"], True)
+        self.assertEqual(out["data"]["health"],
+                         [{"dev": "/dev/sde", "verdict": "PASS"}])
+
+    def test_starting_a_new_check_under_json_starts_and_returns(self):
+        """Starting a health-check IS machine-callable. burn-in has been
+        non-blocking by design since ADR-002 — it exits 0 once the tests are
+        STARTED and the verdict is read later from --status — so the fix is to
+        skip the live view, not to refuse the verb (F-146)."""
+        with patch("os.geteuid", return_value=0), \
+             patch("b2ctl.burnin.run_multi", return_value=0) as rm, \
+             patch("b2ctl.burnin.live_view",
+                   side_effect=AssertionError("must never call live_view")):
+            buf = io.StringIO()
+            with patch("sys.stdout", buf):
+                rc = cli_mod.main(["maint", "health", "1:4", "--json"])
+        out = json.loads(buf.getvalue())
+        self.assertEqual(rc, 0)
+        self.assertIs(out["ok"], True)
+        rm.assert_called_once()                  # it really did start
+
+    def test_burnin_skips_the_live_view_when_nobody_is_watching(self):
+        # The guard itself, at the burnin layer: json mode or --confirm means
+        # there is no terminal to redraw for.
+        from b2ctl import burnin, common
+        try:
+            common.set_json_mode(True)
+            self.assertTrue(burnin._unwatched())
+            common.set_json_mode(False)
+            common.set_auto_confirm("yes")
+            self.assertTrue(burnin._unwatched())
+            common.set_auto_confirm(None)
+            self.assertFalse(burnin._unwatched())     # a real terminal: attach
+        finally:
+            common.set_json_mode(False)
+            common.set_auto_confirm(None)
+            common.take_warnings()
+
+
+class TestRollbackReturnsExplicitInt(unittest.TestCase):
+    """F-146: every path through _rollback_cmd must return an explicit int —
+    it used to fall off the end returning None on SUCCESS, which
+    `_json_mutation` reads as a non-zero rc and reports OP_FAILED even though
+    the rollback ran and worked."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def _write_entry(self, entry):
+        import b2ctl.safety as safety
+        safety.LOG_FILE = os.path.join(self.tmp, "ops.jsonl")
+        with open(safety.LOG_FILE, "w") as f:
+            f.write(json.dumps(entry) + "\n")
+
+    def test_json_rollback_success_emits_ok_true(self):
+        import b2ctl.cli as cli
+        self._write_entry({
+            "op_id": "20260617-replace", "op": "replace",
+            "disk_serial": "X", "disk_bay": 1, "pool": "tank",
+            "status": "ok", "started_at": "2026-06-17T10:00:00",
+            "dev_path": "/dev/disk/by-id/x", "vdev": "raidz1-0",
+            "cmds": [], "exit_code": 0, "stdout": "", "stderr": "",
+            "ended_at": None,
+            "rollback_hint": "zpool detach tank /dev/disk/by-id/x",
+            "snapshot_path": None,
+        })
+        with patch("os.geteuid", return_value=0), \
+             patch("b2ctl.common.run_check", return_value=(True, "detached")), \
+             patch("b2ctl.safety.begin_op", return_value="rb-1"), \
+             patch("b2ctl.safety.end_op"):
+            buf = io.StringIO()
+            with patch("sys.stdout", buf):
+                rc = cli.main(["rollback", "20260617-replace",
+                              "--json", "--confirm", "yes"])
+        out = json.loads(buf.getvalue())
+        self.assertEqual(rc, 0)
+        self.assertIs(out["ok"], True)
+
+    def test_rollback_hint_outside_write_cmds_is_refused_and_nothing_runs(self):
+        # F-146: the rollback hint for an irreversible op is english PROSE
+        # ("aux vdev repair on tank: verify `zpool status tank` — …"), which
+        # naive whitespace-splitting turns into an argv with no verb allowlist.
+        import b2ctl.cli as cli
+        self._write_entry({
+            "op_id": "20260617-auxrepair", "op": "aux-repair",
+            "disk_serial": "X", "disk_bay": 1, "pool": "tank",
+            "status": "ok", "started_at": "2026-06-17T10:00:00",
+            "dev_path": "", "vdev": "cache",
+            "cmds": [], "exit_code": 0, "stdout": "", "stderr": "",
+            "ended_at": None,
+            "rollback_hint": "aux vdev repair on tank: verify `zpool status tank`",
+            "snapshot_path": None,
+        })
+        with patch("b2ctl.common.run_check") as run_mock, \
+             patch("b2ctl.safety.begin_op") as begin_mock:
+            rc = cli._rollback_cmd("20260617-auxrepair")
+        self.assertEqual(rc, 1)
+        run_mock.assert_not_called()
+        begin_mock.assert_not_called()
+
+    def test_rollback_root_gating(self):
+        # F-146: rollback MUTATES (runs a stored zpool/wipefs/sgdisk command),
+        # so it must no longer be in the read-only root-exempt list.
+        import b2ctl.cli as cli
+        ns = cli.build_parser().parse_args(["rollback", "some-op"])
+        self.assertTrue(cli._needs_root(ns))
+
+
+class TestJsonPoolAndDiskNotFound(unittest.TestCase):
+    """F-146: resolve a named pool/disk BEFORE handing a --json mutation off,
+    so an unknown target reports POOL_NOT_FOUND/DISK_NOT_FOUND instead of the
+    generic OP_FAILED `_json_mutation` would otherwise report once the
+    underlying verb's own interactive handling declines."""
+
+    def test_json_destroy_nonexistent_pool_is_pool_not_found(self):
+        with patch("os.geteuid", return_value=0), \
+             patch("b2ctl.zfs.list_pools", return_value=[{"name": "tank"}]), \
+             patch("b2ctl.zfs_actions.destroy") as destroy_mock:
+            buf = io.StringIO()
+            with patch("sys.stdout", buf):
+                rc = cli_mod.main(["destroy", "tonk", "--json"])
+        out = json.loads(buf.getvalue())
+        self.assertEqual(rc, 1)
+        self.assertIs(out["ok"], False)
+        self.assertEqual(out["error"]["code"], "POOL_NOT_FOUND")
+        destroy_mock.assert_not_called()
+
+    def test_json_locate_unknown_target_is_disk_not_found(self):
+        with patch("os.geteuid", return_value=0), \
+             patch("b2ctl.core.scan_light", return_value=[]), \
+             patch("b2ctl.locate.blink_disk") as blink_mock:
+            buf = io.StringIO()
+            with patch("sys.stdout", buf):
+                rc = cli_mod.main(["locate", "bay-99", "--json"])
+        out = json.loads(buf.getvalue())
+        self.assertEqual(rc, 1)
+        self.assertIs(out["ok"], False)
+        self.assertEqual(out["error"]["code"], "DISK_NOT_FOUND")
+        blink_mock.assert_not_called()
+
+    def test_silent_zpool_is_tool_missing_not_pool_not_found(self):
+        # F-143's rule extends here: an unanswered zpool is UNKNOWN, never
+        # "not found" — never let this precheck report POOL_NOT_FOUND for it.
+        with patch("os.geteuid", return_value=0), \
+             patch("b2ctl.zfs.list_pools",
+                   side_effect=zfs.ZfsUnavailable("boom")), \
+             patch("b2ctl.zfs_actions.destroy") as destroy_mock:
+            buf = io.StringIO()
+            with patch("sys.stdout", buf):
+                rc = cli_mod.main(["destroy", "tank", "--json"])
+        out = json.loads(buf.getvalue())
+        self.assertEqual(rc, 1)
+        self.assertIs(out["ok"], False)
+        self.assertEqual(out["error"]["code"], "TOOL_MISSING")
+        destroy_mock.assert_not_called()
+
+
+class TestPartitionDevsPreflight(unittest.TestCase):
+    """F-144: the size must be validated for every target BEFORE any disk is
+    wiped, not only inside zfs.partition (i.e. after the wipe already ran)."""
+
+    def test_oversized_size_never_calls_wipe(self):
+        import b2ctl.cli as cli
+        from b2ctl.common import Disk
+        d = Disk(dev="/dev/sde", by_id="/dev/disk/by-id/x", size_bytes=100)
+        with patch("b2ctl.core.scan_light", return_value=[d]), \
+             patch("b2ctl.zfs.wipe") as wipe_mock, \
+             patch("b2ctl.zfs.partition") as part_mock:
+            out = cli._partition_devs(["/dev/disk/by-id/x"], "1T")
+        self.assertIsNone(out)
+        wipe_mock.assert_not_called()
+        part_mock.assert_not_called()
+
+    def test_invalid_size_never_calls_wipe(self):
+        import b2ctl.cli as cli
+        with patch("b2ctl.core.scan_light", return_value=[]), \
+             patch("b2ctl.zfs.wipe") as wipe_mock, \
+             patch("b2ctl.zfs.partition") as part_mock:
+            out = cli._partition_devs(["/dev/disk/by-id/x"], "not-a-size")
+        self.assertIsNone(out)
+        wipe_mock.assert_not_called()
+        part_mock.assert_not_called()
+
+
+class TestResolveDevsStrictAmbiguous(unittest.TestCase):
+    """F-144: strict resolution used to take the FIRST match silently —
+    mirror watch._resolve_target and refuse an ambiguous token instead."""
+
+    def test_strict_refuses_when_token_matches_two_disks(self):
+        import b2ctl.cli as cli
+        from b2ctl.common import Disk
+        d1 = Disk(dev="/dev/sde", by_id="/dev/disk/by-id/a", serial="DUP")
+        d2 = Disk(dev="/dev/sdf", by_id="/dev/disk/by-id/b", serial="DUP")
+        with patch("b2ctl.cli.core.scan_light", return_value=[d1, d2]):
+            self.assertIsNone(cli._resolve_devs(["DUP"], strict=True))
+
+
+class TestUpdateCorruptConfigRefuses(unittest.TestCase):
+    """F-146/F-147: a corrupt config.json used to be silently REWRITTEN with
+    load()'s all-defaults fallback, discarding tool_paths/controller.mode/
+    pools. `b2ctl update` must refuse and leave the file untouched instead."""
+
+    def test_corrupt_config_refuses_and_does_not_rewrite(self):
+        import b2ctl.cli as cli
+        import b2ctl.config as cfg_mod
+        tmp = tempfile.mkdtemp()
+        cfg_path = os.path.join(tmp, "config.json")
+        with open(cfg_path, "w") as f:
+            f.write("{not valid json")
+        original = open(cfg_path).read()
+        with patch.object(cfg_mod, "CONFIG_PATH", cfg_path), \
+             patch.object(cfg_mod, "STD_DIR", tmp), \
+             patch("b2ctl.config.validate", return_value=[]), \
+             patch("os.geteuid", return_value=0):
+            args = cli.build_parser().parse_args(["update"])
+            rc = args.func(args)
+        self.assertEqual(rc, 1)
+        with open(cfg_path) as f:
+            self.assertEqual(f.read(), original)
+
+
+class TestEnvelopeStringsAreCleanForMachines(unittest.TestCase):
+    """F-146: error.message is a JSON string a client may log, display or match
+    on. common.die() colours its line for a terminal, so the captured text has
+    to be stripped the same way warnings[] already is."""
+
+    def test_no_ansi_in_error_message_when_the_backend_dies(self):
+        from b2ctl import common as _common
+        with ExitStack() as stack:
+            stack.enter_context(patch("os.geteuid", return_value=0))
+            stack.enter_context(patch(
+                "b2ctl.backend.get_backend",
+                side_effect=lambda *a, **k: _common.die("no HBA/RAID tool usable")))
+            buf = io.StringIO()
+            with patch("sys.stdout", buf):
+                rc = cli_mod.main(["status", "--json"])
+        out = json.loads(buf.getvalue())
+        self.assertEqual(rc, 1)
+        self.assertIs(out["ok"], False)
+        self.assertNotIn("\x1b", out["error"]["message"])
+        self.assertIn("no HBA/RAID tool", out["error"]["message"])
+
+    def test_strip_ansi_is_the_shared_helper(self):
+        self.assertEqual(common.strip_ansi("\x1b[1;31mred\x1b[0m"), "red")
+        self.assertEqual(common.strip_ansi("plain"), "plain")

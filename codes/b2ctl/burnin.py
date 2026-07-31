@@ -630,8 +630,29 @@ def run_multi(targets, tbw_table: dict | None = None, *,
             return 1
         if started_any or records:
             save_state(records)
+    if _unwatched():
+        return 0
     live_view(records)
     return 0
+
+
+def _unwatched() -> bool:
+    """True when there is nobody at the terminal to render a live view for.
+
+    burn-in has always been non-blocking BY DESIGN (ADR-002: it exits 0 once the
+    tests are STARTED, and the verdict is read later from --status). The live
+    view is the interactive convenience on top of that, and it is a `while True`
+    redraw loop — under --json it would hang the request for the hours a long
+    self-test takes, while the captured-stdout buffer grew without bound. Skip
+    it and point at the pollable form instead (F-146).
+    """
+    from . import common
+    if not (common.is_json_mode() or common.is_non_interactive()):
+        return False
+    if not common.is_json_mode():
+        print(f"{Y}  started — not attaching the live view. Poll it with "
+              f"`b2ctl maint health --status` or `b2ctl progress`.{N}")
+    return True
 
 
 def status_view() -> int:
@@ -639,6 +660,8 @@ def status_view() -> int:
     records = load_state()
     if not records:
         print(f"{Y}  no burn-in in progress{N}")
+        return 0
+    if _unwatched():
         return 0
     live_view(records)
     return 0

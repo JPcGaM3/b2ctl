@@ -425,6 +425,57 @@ def _progress(args) -> int:
     return 0
 
 
+def _mutation_precheck(args):
+    """Resolve a named pool/disk BEFORE a --json mutation runs (F-146).
+
+    Without this, a typo'd pool/disk name fell all the way through to the
+    underlying verb's own interactive 'no such pool'/picker handling, which
+    declines under --confirm and comes back as a generic OP_FAILED — a client
+    cannot tell "you named something that doesn't exist" from "the operation
+    ran and failed". `destroy`/`scrub`/`trim` name a pool; `offload`/`replace`/
+    `swap`/`demote`/`locate` name a disk via --disk (locate: positional
+    `target`). `maint scrub`/`maint trim` share `_scrub`/`_trim` but arrive
+    here with cmd='maint' (the top parser's dest), so check `maint_cmd` too —
+    the envelope still reports `command: 'maint'`, matching what
+    `_json_mutation` would have emitted for it anyway.
+
+    A pool name is checked against `zfs.list_pools()`, which RAISES
+    ZfsUnavailable (not an empty list) when zpool does not answer — that
+    propagates straight out to main()'s existing handler, which reports
+    TOOL_MISSING. Catching it here and reporting POOL_NOT_FOUND would tell a
+    client the pool is gone when b2ctl merely could not look (F-143's rule).
+
+    Returns an envelope rc to short-circuit the mutation, or None to proceed.
+    """
+    from . import jsonout
+    cmd = getattr(args, "cmd", "?")
+    verb = getattr(args, "maint_cmd", None) if cmd == "maint" else cmd
+
+    if verb in ("destroy", "scrub", "trim"):
+        pool = getattr(args, "pool", None)
+        if pool is None:                # omitted -> today's interactive picker
+            return None
+        names = {p["name"] for p in zfs.list_pools()}
+        if pool not in names:
+            return jsonout.fail(cmd, jsonout.ERR_POOL_NOT_FOUND,
+                                f"no pool named '{pool}'")
+        return None
+
+    if verb in ("offload", "replace", "swap", "demote", "locate"):
+        target = getattr(args, "target" if verb == "locate" else "disk", None)
+        if target is None:              # omitted -> today's interactive picker
+            return None
+        disks = core.scan_light()       # identity only, no SMART needed (F-102)
+        hit = any(target in (d.bay, d.serial, d.dev, d.dev.replace("/dev/", ""),
+                             d.by_id) for d in disks)
+        if not hit:
+            return jsonout.fail(cmd, jsonout.ERR_DISK_NOT_FOUND,
+                                f"no disk matches '{target}'")
+        return None
+
+    return None
+
+
 def _json_mutation(args) -> int:
     """Run a MUTATING verb under --json and wrap whatever it printed.
 
@@ -437,6 +488,9 @@ def _json_mutation(args) -> int:
     import contextlib
     import io
     from . import jsonout
+    precheck_rc = _mutation_precheck(args)
+    if precheck_rc is not None:
+        return precheck_rc
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         rc = args.func(args)
@@ -550,23 +604,37 @@ def _resolve_devs(tokens, *, strict: bool = False):
     yet — so a freshly hot-plugged disk is never added under an unstable /dev/sdX
     that shuffles on reboot (F-032). The rm paths stay permissive: a raw zpool
     leaf token that matches no disk is passed straight to `zpool remove`.
+
+    F-144: strict mode used to take `next(...)` — the FIRST match — silently.
+    `watch._resolve_target` (the interactive equivalent) refuses an ambiguous
+    match instead of guessing; mirror that here, since guessing which disk the
+    operator meant is exactly how the wrong disk gets wiped (§9). Permissive
+    mode is unchanged — a raw leaf token deliberately passes through verbatim.
     """
     disks = core.scan_light()       # resolution needs by-id/bay/serial, not SMART (F-102)
     out = []
     for t in tokens:
-        match = next((d for d in disks if t in (d.bay, d.serial, d.dev,
-                      d.dev.replace("/dev/", ""), d.by_id)), None)
         if strict:
-            if match is None:
+            matches = [d for d in disks if t in (d.bay, d.serial, d.dev,
+                       d.dev.replace("/dev/", ""), d.by_id)]
+            if not matches:
                 print(f"{R}[-] '{t}' matches no disk — check the bay/serial, or "
                       f"wait for udev if just inserted.{N}")
                 return None
+            if len(matches) > 1:
+                labels = ", ".join(ui.disk_label(m) for m in matches)
+                print(f"{R}[-] '{t}' is ambiguous — matches {len(matches)} disks: "
+                      f"{labels}{N}")
+                return None
+            match = matches[0]
             if not match.by_id:
                 print(f"{R}[-] {match.dev} has no stable by-id link yet — wait for "
                       f"udev / re-insert before adding it to a pool.{N}")
                 return None
             out.append(match.by_id)
         else:
+            match = next((d for d in disks if t in (d.bay, d.serial, d.dev,
+                          d.dev.replace("/dev/", ""), d.by_id)), None)
             out.append((match.by_id or match.dev) if match else t)
     return out
 
@@ -587,10 +655,25 @@ def _partition_devs(devs, size):
     by-id device to `size`, returning the -part1 tokens (or None on failure).
     The wipe is mandatory — `sgdisk -n 1:0:+<size>` needs a clean GPT or it places
     partition 1 past a stale one (the used-disk `partition failed` bug, F-132).
-    Validates size against the scanned Disk.size_bytes (defensive max_bytes)."""
+
+    F-144: the size used to be validated only INSIDE zfs.partition, i.e. AFTER
+    the wipe loop had already destroyed the first disk's partition table — a
+    typo'd --size wiped a disk and then failed. Mirror watch._maybe_partition:
+    parse `size` and check it against every target's Disk.size_bytes BEFORE
+    anything is touched, so an invalid/oversized size rejects the whole batch
+    up front."""
     from . import zfs
     from .common import confirm
     sizes = {d.by_id: d.size_bytes for d in core.scan_light() if d.by_id}
+    req = zfs.parse_size(size)
+    if req is None:
+        print(f"{R}[-] invalid size '{size}'{N}")
+        return None
+    for dev in devs:
+        sz = sizes.get(dev)
+        if sz and req > sz:
+            print(f"{R}[-] size '{size}' exceeds {dev} ({sz} bytes){N}")
+            return None
     # §9: the wipe is destructive, so confirm it HERE — before any device is
     # touched — not at the later add-cache/add-log prompt (which runs post-wipe).
     print(f"{Y}[!] over-provision will WIPE then partition: {', '.join(devs)}{N}")
@@ -957,8 +1040,20 @@ def _update(args) -> int:
     try:
         with open(cfg_path) as f:
             cfg = _json.load(f)
-    except (OSError, _json.JSONDecodeError):
+    except FileNotFoundError:
         cfg = _cfg_mod.load()
+    except _json.JSONDecodeError as exc:
+        # F-147 companion bug: a corrupt config used to be silently REWRITTEN
+        # with load()'s all-defaults fallback here, discarding whatever the
+        # operator had in tool_paths/controller.mode/pools. Refuse instead —
+        # the file needs a human, not a guess (matches config._load_for_write's
+        # rule for every other config writer).
+        print(f"\n  {R}[-] {cfg_path} is not valid JSON ({exc}) — refusing to "
+              f"touch it. Fix or remove the file, then re-run `b2ctl update`.{N}")
+        return 1
+    except OSError as exc:
+        print(f"\n  {R}[-] cannot read {cfg_path}: {exc}{N}")
+        return 1
 
     print(f"\n{C}[sync {_cfg_mod.STD_DIR}]{N}")
     _SYNC_ICON = {"created": f"{G}[✔]{N}", "current": f"{G}[✔]{N}",
@@ -975,8 +1070,13 @@ def _update(args) -> int:
             note = "  (no bundled copy — skipped)"
         print(f"  {icon} {os.path.basename(dest):<14} {state}{note}  →  {dest}")
 
-    with open(cfg_path, "w") as f:
-        _json.dump(cfg, f, indent=2)
+    # F-147: a plain truncating open(...,"w") here regressed the crash-safety
+    # every other config writer gets from atomic_write_json (ENOSPC/crash mid-
+    # write could leave a truncated file that load() then reads as all-
+    # defaults). Clear the in-process cache afterwards the way config.set_mode
+    # does, so a later read in the same process sees what was just written.
+    _cfg_mod.atomic_write_json(cfg_path, cfg)
+    _cfg_mod._cache = None
     print(f"\n  {G}[✔]{N} config bound: bay_map_path, ssd_spec_path → {_cfg_mod.STD_DIR}")
     print(f"      Edit those files freely — install.sh won't overwrite them; "
           f"`b2ctl update` keeps your edits.")
@@ -1045,38 +1145,55 @@ def _log_cmd(args):
     print()
 
 
-def _rollback_cmd(op_id: str):
+def _rollback_cmd(op_id: str) -> int:
+    """Reverse a logged operation. Always returns an explicit int (F-146) —
+    every path used to fall off the end returning None, which `_json_mutation`
+    reads as a non-zero rc and reports OP_FAILED even when the rollback ran
+    and succeeded."""
     from . import safety
     entry = safety.find_entry(op_id)
     if entry is None:
         print(f"Op not found: {op_id}")
-        return
+        return 1
     hint = entry.get("rollback_hint")
     if not hint:
         snap = entry.get("snapshot_path", "")
         print("Op not reversible.")
         if snap:
             print(f"  See snapshot: {snap}")
-        return
-    print(f"\nOp:       {entry.get('op')}  ({entry.get('started_at','')})")
-    print(f"Disk:     bay {entry.get('disk_bay')} | {entry.get('disk_serial')}")
-    print(f"Pool:     {entry.get('pool')}/{entry.get('vdev')}")
-    print(f"Rollback: {hint}\n")
-    ans = input("Execute rollback? [y/N]: ").strip().lower()
-    if ans not in ("y", "yes"):
-        print("Cancelled.")
-        return
-    from .common import run_check
+        return 1
     # F-013: the create-op hint ends with a '# WARNING …' comment; strip it
     # before splitting so the comment words never become command tokens.
     cmd = hint.split("#", 1)[0].split()
     if not cmd:
         print("  Rollback hint is empty after stripping its comment — resolve manually.")
-        return
+        return 1
     if any(t.startswith("<") and t.endswith(">") for t in cmd):
         print("  Rollback hint contains unresolved placeholders — resolve manually:")
         print(f"     {hint}")
-        return
+        return 1
+    # F-146: the hint is free-text prose for irreversible ops (e.g. aux-repair's
+    # "aux vdev repair on tank: verify `zpool status tank` — …"), and naive
+    # whitespace-splitting turns THAT into an argv and hands it to run_check
+    # with no verb allowlist. Gate cmd[0]'s basename on the same WRITE_CMDS the
+    # rest of the project already trusts for this exact purpose (dry-run gating)
+    # — anything else is refused before it ever reaches a subprocess.
+    if os.path.basename(cmd[0]) not in safety.WRITE_CMDS:
+        print(f"  Rollback hint's command '{cmd[0]}' is not a recognised "
+              f"write command — refusing to run it. Resolve manually:")
+        print(f"     {hint}")
+        return 1
+    print(f"\nOp:       {entry.get('op')}  ({entry.get('started_at','')})")
+    print(f"Disk:     bay {entry.get('disk_bay')} | {entry.get('disk_serial')}")
+    print(f"Pool:     {entry.get('pool')}/{entry.get('vdev')}")
+    print(f"Rollback: {hint}\n")
+    # F-146: rollback was the one prompt in the product still using a raw
+    # input() (never caught EOF, never honored --confirm). common.confirm
+    # covers both.
+    if not common.confirm("Execute rollback?"):
+        print("Cancelled.")
+        return 1
+    from .common import run_check
     # F-013: honor --dry-run so a rollback PREVIEW never runs the stored zpool cmd.
     dry = watch._DRY_RUN
     rb_op_id = safety.begin_op(
@@ -1089,6 +1206,7 @@ def _rollback_cmd(op_id: str):
     print(f"{'✓' if ok else '✗'} rollback {'complete' if ok else 'failed'}")
     if not ok:
         print(f"  {R}{out}{N}")
+    return 0 if ok else 1
 
 
 def _pos_int(s: str) -> int:
@@ -1418,7 +1536,9 @@ def build_parser() -> argparse.ArgumentParser:
 # disks/pools/volumes/bays are NOT listed: they probe real hardware (smartctl,
 # zpool, sas2ircu/perccli), exactly like `status`, so they need root for the same
 # reason. Being machine-readable does not make a probe cheaper (ADR-007).
-_ROOT_EXEMPT = ("version", "check", "config", "log", "rollback",
+# F-146: `rollback` is NOT here — it runs a stored write command (`zpool`/
+# `wipefs`/`sgdisk`/…), so it was the one exempt verb that actually MUTATES.
+_ROOT_EXEMPT = ("version", "check", "config", "log",
                 "install", "update", "maint", "raid-foreign")
 
 
@@ -1471,17 +1591,50 @@ def main(argv=None) -> int:
             return jsonout.fail(getattr(args, "cmd", "?"), jsonout.ERR_NEEDS_ROOT,
                                 "run as root (smartctl / sas2ircu / zpool need it)")
         need_root()
+    import contextlib
+    import io
+    # F-146: common.die() is a SystemExit, not an Exception — under --json its
+    # message went straight to the REAL stderr and the process exited with
+    # NOTHING on stdout for a machine caller to parse (e.g. get_backend() dying
+    # because no HBA/RAID tool is on the box). Capture stderr ONLY under --json
+    # so the die() text can be folded into the envelope's message instead of
+    # lost, and so a caller reading only stdout still sees total silence on the
+    # error path too. The human face is untouched: without --json this context
+    # manager is a no-op and stderr prints live, exactly as before.
+    stderr_buf = io.StringIO()
+    stderr_ctx = contextlib.redirect_stderr(stderr_buf) if want_json else contextlib.nullcontext()
     try:
-        # A read verb builds its own envelope (emits_json). Everything else is a
-        # mutation whose narration has to be captured instead of printed.
-        if want_json and not getattr(args, "emits_json", False):
-            if getattr(args, "cmd", None) == "watch":
-                from . import jsonout
-                return jsonout.fail("watch", jsonout.ERR_UNSUPPORTED,
-                                    "watch is an interactive terminal loop and "
-                                    "has no machine-readable form")
-            return _json_mutation(args)
-        return args.func(args)
+        with stderr_ctx:
+            # A read verb builds its own envelope (emits_json). Everything else
+            # is a mutation whose narration has to be captured instead of printed.
+            if want_json and not getattr(args, "emits_json", False):
+                cmd = getattr(args, "cmd", None)
+                if cmd == "watch":
+                    from . import jsonout
+                    return jsonout.fail("watch", jsonout.ERR_UNSUPPORTED,
+                                        "watch is an interactive terminal loop and "
+                                        "has no machine-readable form")
+                if cmd == "maint" and getattr(args, "maint_cmd", None) == "health":
+                    from . import jsonout
+                    if getattr(args, "status", False):
+                        # Pure read: build the envelope straight from the
+                        # PURE-READ status_payload() and return. Never reach
+                        # burnin.live_view()/status_view() here — those redraw
+                        # in a `while True` loop and would hang the request
+                        # forever (F-146; this is the one verb `_needs_root`
+                        # advertises as safe to poll).
+                        from . import burnin
+                        return jsonout.emit("maint",
+                                            {"health": burnin.status_payload()})
+                    # Starting a NEW health-check is machine-callable: burn-in has
+                    # been non-blocking by design since ADR-002 (it exits 0 once
+                    # the tests are STARTED), and burnin._unwatched() now skips
+                    # the live view under --json instead of hanging the request
+                    # for the hours a long self-test takes (F-146). So it falls
+                    # through to _json_mutation like any other mutation, and the
+                    # caller polls `maint health --status --json`.
+                return _json_mutation(args)
+            return args.func(args)
     except common.NonInteractive as exc:
         # --confirm was given but a prompt still had no answer. Name it, so the
         # caller learns WHICH argument to supply instead of the command hanging
@@ -1508,10 +1661,50 @@ def main(argv=None) -> int:
                                 jsonout.ERR_TOOL_MISSING, msg)
         print(f"{R}[-] {msg}{N}", file=sys.stderr)
         return 1
+    except SystemExit as exc:
+        # F-146: the ONLY production call site reaching here unguarded is
+        # backend.get_backend() -> common.die() when neither sas2ircu nor
+        # perccli can be used (core.scan()/scan_light() call it unconditionally,
+        # before any --json branch gets a chance to degrade gracefully). Without
+        # --json, re-raise so a human sees exactly what they see today (die()
+        # already printed to the real stderr, and the process exits with die()'s
+        # own code) — this handler must never change that path.
+        if not want_json:
+            raise
+        from . import jsonout
+        # die() colours its line for a terminal; a machine caller must not get
+        # raw ANSI inside a JSON string. common.warn() strips the same way for
+        # warnings[] — error.message gets the same treatment (F-146).
+        stderr_text = common.strip_ansi(stderr_buf.getvalue()).strip()
+        code = (jsonout.ERR_NO_BACKEND
+                if "no hba/raid tool" in stderr_text.lower()
+                else jsonout.ERR_TOOL_MISSING)
+        msg = stderr_text or (
+            f"b2ctl exited before completing (code {exc.code}) — a required "
+            f"tool could not be used; run `b2ctl check` for details")
+        return jsonout.fail(getattr(args, "cmd", "?"), code, msg)
     except KeyboardInterrupt:
         # F-022: Ctrl-C at any prompt exits cleanly, not with a traceback.
+        # F-146: under --json, ANSI text on the real stdout/stderr is useless to
+        # a machine caller (and stdout must carry exactly one envelope) — report
+        # it as a normal failed-mutation envelope instead. The human path keeps
+        # 130, the conventional SIGINT exit code operators/scripts may rely on;
+        # ADR-007's 0/1 contract is for --json only.
+        if want_json:
+            from . import jsonout
+            return jsonout.fail(getattr(args, "cmd", "?"), jsonout.ERR_OP_FAILED,
+                                "interrupted (SIGINT) before the command completed")
         print(f"\n{Y}[-] interrupted{N}")
         return 130
+    except Exception as exc:
+        # F-146: an unhandled bug used to crash a --json caller with a bare
+        # traceback on stdout instead of an envelope. A human keeps today's full
+        # traceback (re-raise) — this is strictly the machine face's safety net.
+        if not want_json:
+            raise
+        from . import jsonout
+        return jsonout.fail(getattr(args, "cmd", "?"), jsonout.ERR_PARSE_ERROR,
+                            str(exc) or exc.__class__.__name__)
 
 
 if __name__ == "__main__":

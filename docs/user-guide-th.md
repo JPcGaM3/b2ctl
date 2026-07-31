@@ -736,6 +736,18 @@ b2ctl> m
   ผล long test ล่าสุด `OK`/`ERR` + อายุเป็น power-on hours (เช่น `OK 120hPOH`) — ใช้ได้กับ
   **SATA, SAS และ NVMe** (v0.18.0 แก้บั๊กที่ดิสก์ **SAS** ปกติ — ซึ่งรายงานสำเร็จเป็นคำว่า
   `Completed` เฉย ๆ ไม่ใช่ `Completed without error` แบบ ATA — ถูกตัดเป็น `ERR`/`FAIL`)
+- **ดิสก์ที่ไม่ตอบ ตอนนี้ FAIL ไม่ใช่ PASS (v0.24.2)** — เดิมดิสก์ที่อ่าน SMART ไม่ได้เลย
+  ทุก counter จะว่างหมด เลยหลุดผ่านทุกด่านแล้วออกมาเป็น `PASS — safe to add to a pool`
+  ซึ่งเป็นคำตอบที่แย่ที่สุด: ดิสก์ลูกเดียวที่เราไม่รู้อะไรเลย คือลูกที่ห้ามเชื่อที่สุด ตอนนี้ขึ้น
+  `FAIL — SMART did not answer (drive unreadable) — cannot vet this disk`
+  และถ้า self-test ไม่มีผลเลย (ไม่มีบันทึก + ไม่มีเทสรันอยู่) จะเป็น
+  **WARN — no self-test verdict available** ไม่ใช่ PASS
+- **ดิสก์ PERC Unconfigured-Good ตรวจได้แล้ว (v0.24.2)** — ดิสก์ที่อยู่หลัง PERC ไม่มี
+  device node ของตัวเอง (ตาราง DEV ขึ้น `-`) b2ctl เลยตรวจผ่าน controller
+  (`smartctl -d megaraid,<DID>`) ซึ่งเป็นทางเดียวกับที่ตารางสุขภาพใช้อ่านมันอยู่แล้ว
+  self-test ของ firmware รันปกติ ส่วน **surface scan จะข้าม** ขึ้น `n/a` เพราะ `badblocks`
+  ต้องการ block device จริง ถ้าไปสแกน controller handle มันจะอ่าน virtual disk ทั้งก้อน
+  ไม่ใช่ตัวดิสก์
 - CLI: `b2ctl maint health <bay|dev> [<bay|dev> …] [--scan] [--short]`; กลับเข้าดูด้วย
   `b2ctl maint health --status`
 

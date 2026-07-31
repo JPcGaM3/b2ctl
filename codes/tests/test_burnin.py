@@ -1,5 +1,6 @@
 """Unit tests for b2ctl.burnin — self-test parsing, ETA, background scan,
 state file, multi-disk run + live view, verdict."""
+import json
 import os
 import tempfile
 import unittest
@@ -209,6 +210,127 @@ class TestAssess(unittest.TestCase):
             verdict, _ = burnin.assess(d)
         self.assertEqual(verdict, "WARN")
 
+    def test_unreadable_disk_fails_and_names_no_answer(self):
+        # F-145 headline: a disk SMART never answered used to fall through every
+        # check below (all zero/None) and come out PASS.
+        d = _disk(readable=False, health="NOREAD", uncorr=0, realloc=0, poh=None)
+        with self._patch_status():
+            verdict, reasons = burnin.assess(d)
+        self.assertEqual(verdict, "FAIL")
+        self.assertTrue(any("did not answer" in r.lower() for r in reasons))
+        # must NOT reuse the wording used for a drive that answered and failed
+        self.assertFalse(any("health = FAILED" in r for r in reasons))
+
+    def test_noread_health_fails_even_if_readable_flag_lags(self):
+        d = _disk(readable=True, health="NOREAD", uncorr=0, realloc=0, poh=10000)
+        with self._patch_status():
+            verdict, reasons = burnin.assess(d)
+        self.assertEqual(verdict, "FAIL")
+        self.assertTrue(any("did not answer" in r.lower() for r in reasons))
+
+    def test_answered_and_failed_selftest_still_fails(self):
+        # Do not regress the existing "answered, self-test errored" FAIL path.
+        d = _disk(health="PASSED", uncorr=0, realloc=0, poh=10000)
+        with self._patch_status(result="Completed: read failure"):
+            verdict, reasons = burnin.assess(d)
+        self.assertEqual(verdict, "FAIL")
+        self.assertTrue(any("self-test" in r.lower() for r in reasons))
+
+    def test_empty_selftest_result_nothing_running_warns_not_pass(self):
+        d = _disk(health="PASSED", uncorr=0, realloc=0, poh=10000)
+        with self._patch_status(result=""):
+            verdict, reasons = burnin.assess(d)
+        self.assertEqual(verdict, "WARN")
+        self.assertTrue(any("no self-test verdict" in r.lower() for r in reasons))
+
+    def test_healthy_disk_still_passes(self):
+        # Anti-overcorrection: prove F-145 didn't just make everything fail.
+        d = _disk(health="PASSED", uncorr=0, realloc=0, poh=10000)
+        with self._patch_status(result="Completed without error"):
+            verdict, reasons = burnin.assess(d)
+        self.assertEqual(verdict, "PASS")
+        self.assertEqual(reasons, [])
+
+    def test_assess_targets_ctrl_dev_for_megaraid_disk(self):
+        # F-145 Defect 2: a PERC PD behind a VD has no OS device node of its own
+        # (dev == '-'); smartctl must be pointed at the megaraid ioctl handle.
+        d = _disk(dev="/dev/sda", smart_dtype="megaraid,7", ctrl_dev="/dev/sda",
+                   health="PASSED", uncorr=0, realloc=0, poh=10000)
+        seen = {}
+        with patch.object(burnin, "selftest_status",
+                          side_effect=lambda dev, dtype: (seen.update(dev=dev, dtype=dtype),
+                                                          {"running": False, "pct": 100,
+                                                           "result": "Completed", "eta_min": None})[1]):
+            verdict, _ = burnin.assess(d)
+        self.assertEqual(verdict, "PASS")
+        self.assertEqual(seen["dev"], "/dev/sda")
+        self.assertEqual(seen["dtype"], "megaraid,7")
+
+
+class TestSmartTarget(unittest.TestCase):
+    """_smart_target: mirrors smart.read()'s device-selection rule (F-145)."""
+
+    def test_plain_disk_uses_dev(self):
+        d = _disk(dev="/dev/sdb", smart_dtype="", ctrl_dev="")
+        self.assertEqual(burnin._smart_target(d), "/dev/sdb")
+
+    def test_megaraid_disk_with_ctrl_dev_prefers_ctrl_dev(self):
+        d = _disk(dev="-", smart_dtype="megaraid,7", ctrl_dev="/dev/sda")
+        self.assertEqual(burnin._smart_target(d), "/dev/sda")
+
+    def test_smart_dtype_without_ctrl_dev_falls_back_to_dev(self):
+        d = _disk(dev="/dev/sdc", smart_dtype="megaraid,3", ctrl_dev="")
+        self.assertEqual(burnin._smart_target(d), "/dev/sdc")
+
+
+class TestPoolableTarget(unittest.TestCase):
+
+    def test_dev_dash_is_refused(self):
+        # A hidden PERC member (no OS device node) must never reach smartctl
+        # through burn-in's target picker (F-145).
+        d = _disk(dev="-", pool=None, vdev=None, vdev_state=None, smart_dtype="")
+        self.assertFalse(burnin._poolable_target(d))
+
+    def test_free_disk_is_accepted(self):
+        d = _disk(dev="/dev/sdh", pool=None, vdev=None, vdev_state=None)
+        self.assertTrue(burnin._poolable_target(d))
+
+    def test_perc_unconfigured_good_is_accepted_via_its_controller_handle(self):
+        """Vetting a PERC Unconfigured-Good drive before adding it to a volume is
+        what this verb is FOR, and `smartctl -t long -d megaraid,<DID> <ctrl_dev>`
+        reads it fine — the same path the status table already uses.
+
+        `Disk.is_poolable` excludes every `smart_dtype` disk because ZFS must not
+        zap a drive sharing the VD's block device; burn-in does no such thing, so
+        gating on is_poolable ALONE would silently drop this capability (F-145)."""
+        d = _disk(dev="-", pool=None, vdev=None, vdev_state=None)
+        d.smart_dtype = "megaraid,7"
+        d.ctrl_dev = "/dev/sda"
+        self.assertFalse(d.is_poolable)          # correctly not a ZFS target...
+        self.assertTrue(burnin._poolable_target(d))   # ...but IS vettable
+        self.assertEqual(burnin._smart_target(d), "/dev/sda")
+
+    def test_perc_pd_without_a_controller_handle_is_still_refused(self):
+        # smart_dtype set but ctrl_dev never resolved: there is no device to open.
+        d = _disk(dev="-", pool=None, vdev=None, vdev_state=None)
+        d.smart_dtype = "megaraid,7"
+        d.ctrl_dev = ""
+        self.assertFalse(burnin._poolable_target(d))
+
+    def test_an_in_pool_perc_member_is_still_refused(self):
+        d = _disk(dev="-", pool="tank", vdev="raidz1-0")
+        d.smart_dtype = "megaraid,7"
+        d.ctrl_dev = "/dev/sda"
+        self.assertFalse(burnin._poolable_target(d))
+
+    def test_unknown_pool_membership_refuses_a_perc_pd_too(self):
+        # F-143's guard must not be bypassed by the new smart_dtype branch.
+        d = _disk(dev="-", pool=None, vdev=None, vdev_state=None)
+        d.smart_dtype = "megaraid,7"
+        d.ctrl_dev = "/dev/sda"
+        d.pool_known = False
+        self.assertFalse(burnin._poolable_target(d))
+
 
 class TestStartSelftest(unittest.TestCase):
 
@@ -283,12 +405,24 @@ class TestScanProgress(unittest.TestCase):
         # 50% done, 10 min elapsed -> ~10 min remaining.
         rec = {"scan_pid": 999, "scan_log": "/x", "started": 1000.0}
         with patch.object(burnin, "_pid_alive", return_value=True), \
+             patch.object(burnin, "_is_our_badblocks", return_value=True), \
              patch.object(burnin, "_parse_badblocks_log", return_value=(50, 0)), \
              patch.object(burnin, "_now", return_value=1000.0 + 600):
             sp = burnin.scan_progress(rec)
         self.assertTrue(sp["running"])
         self.assertEqual(sp["pct"], 50)
         self.assertEqual(sp["eta_min"], 10)
+
+    def test_scan_progress_pid_alive_but_not_ours_reports_not_running(self):
+        # PID-reuse guard (F-145): os.kill(pid, 0) succeeding only proves SOME
+        # process now owns that pid — not that it is still our badblocks scan.
+        rec = {"scan_pid": 999, "scan_log": "/x", "started": 1000.0, "dev": "/dev/sdb"}
+        with patch.object(burnin, "_pid_alive", return_value=True), \
+             patch.object(burnin, "_is_our_badblocks", return_value=False) as ours, \
+             patch.object(burnin, "_parse_badblocks_log", return_value=(50, 0)):
+            sp = burnin.scan_progress(rec)
+        self.assertFalse(sp["running"])
+        ours.assert_called_once_with(999, "/dev/sdb")
 
 
 class TestPidAlive(unittest.TestCase):
@@ -463,6 +597,22 @@ class TestFinish(unittest.TestCase):
         self.assertIn("WARN", joined)
         self.assertIn("bad block", joined)
 
+    def test_serial_less_records_keyed_by_dev_too(self):
+        # F-145: SAS drives can report NO serial until SMART runs. Keying the
+        # prune on serial ALONE made finishing ONE serial-less record drop
+        # EVERY OTHER serial-less record too.
+        rec_done = {"serial": "", "dev": "/dev/sdb", "bay": "1:0", "do_scan": False}
+        rec_other = {"serial": "", "dev": "/dev/sdc", "bay": "1:1", "do_scan": False}
+        kept = {}
+        with patch("b2ctl.core.scan_one", return_value=_disk(serial="")), \
+             patch("b2ctl.spec.load", return_value={}), \
+             patch.object(burnin, "assess", return_value=("PASS", [])), \
+             patch.object(burnin, "load_state", return_value=[rec_done, rec_other]), \
+             patch.object(burnin, "save_state",
+                          side_effect=lambda r: kept.setdefault("recs", r)):
+            burnin._finish([rec_done])
+        self.assertEqual(kept["recs"], [rec_other])
+
 
 class TestStatusView(unittest.TestCase):
 
@@ -577,6 +727,48 @@ class TestCancel(unittest.TestCase):
             self.assertFalse(burnin._is_our_badblocks(4321, "/dev/sdb"))
         with patch("builtins.open", side_effect=OSError):
             self.assertFalse(burnin._is_our_badblocks(4321, "/dev/sdb"))
+
+
+class TestStatusPayload(unittest.TestCase):
+    """status_payload(): pure-read JSON snapshot for `maint health --status --json`."""
+
+    def test_empty_state_is_empty_list(self):
+        with patch.object(burnin, "load_state", return_value=[]):
+            self.assertEqual(burnin.status_payload(), [])
+
+    def test_json_serialisable_and_starts_nothing(self):
+        recs = [{"serial": "S1", "dev": "/dev/sdb", "bay": "1:4", "do_scan": False}]
+        with patch.object(burnin, "load_state", return_value=recs), \
+             patch.object(burnin, "selftest_status",
+                          return_value={"running": True, "pct": 40,
+                                        "result": "", "eta_min": 5}), \
+             patch.object(burnin, "start_selftest") as start, \
+             patch.object(burnin, "start_scan") as scan, \
+             patch.object(burnin, "save_state") as save, \
+             patch.object(burnin, "cancel") as cancel:
+            payload = burnin.status_payload()
+        json.dumps(payload)                       # must not raise
+        self.assertEqual(len(payload), 1)
+        self.assertFalse(payload[0]["done"])
+        self.assertIsNone(payload[0]["verdict"])
+        start.assert_not_called()
+        scan.assert_not_called()
+        save.assert_not_called()
+        cancel.assert_not_called()
+
+    def test_done_record_carries_full_verdict(self):
+        rec = {"serial": "S1", "dev": "/dev/sdb", "bay": "1:4", "do_scan": False}
+        with patch.object(burnin, "load_state", return_value=[rec]), \
+             patch.object(burnin, "selftest_status",
+                          return_value={"running": False, "pct": 100,
+                                        "result": "Completed without error", "eta_min": None}), \
+             patch("b2ctl.spec.load", return_value={}), \
+             patch("b2ctl.core.scan_one", return_value=_disk(serial="S1")), \
+             patch.object(burnin, "assess", return_value=("PASS", [])):
+            payload = burnin.status_payload()
+        self.assertTrue(payload[0]["done"])
+        self.assertEqual(payload[0]["verdict"], "PASS")
+        json.dumps(payload)
 
 
 if __name__ == "__main__":

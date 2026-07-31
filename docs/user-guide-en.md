@@ -742,6 +742,21 @@ b2ctl> m
 - **PASS** — clean. **WARN** — usable but aged (power-on hours > 40000, grown
   defects, or the surface scan found bad blocks): use as lower-priority. **FAIL** —
   uncorrected errors or a failed self-test: do not pool it.
+- **A disk that says nothing now FAILS, not PASSes (v0.24.2).** Previously a drive
+  whose SMART could not be read at all had every counter come back empty, so it
+  fell through every check and was reported `PASS — safe to add to a pool`. That
+  was the worst possible answer: the one drive you learned nothing about is the
+  one you must not trust. It now reads
+  `FAIL — SMART did not answer (drive unreadable) — cannot vet this disk`.
+  Likewise, a self-test that produced **no verdict** (nothing on record and
+  nothing running) is now **WARN — no self-test verdict available**, not PASS.
+- **PERC Unconfigured-Good drives can be vetted too (v0.24.2).** A drive sitting
+  behind a PERC has no device node of its own — the table shows `-` in DEV — so
+  b2ctl vets it through the controller (`smartctl -d megaraid,<DID>`), the same
+  route the health table already uses to read it. The firmware self-test runs
+  normally; the **surface scan is skipped** and shows `n/a`, because `badblocks`
+  needs a real block device and scanning the controller handle would read the
+  whole virtual disk instead of the drive.
 - Read-only: the only actions are the self-test trigger and (optionally) a
   read-only `badblocks` scan — your data/disk is never written.
 - CLI: `b2ctl maint health <bay|dev> [<bay|dev> …] [--scan] [--short]`;

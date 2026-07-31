@@ -13,16 +13,19 @@ small state file (`burnin.json` under the audit dir) — see ADR-002.
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import re
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 from . import config as _cfg
-from .common import R, Y, G, C, N, run as _run, run_check, selftest_passed
+from .common import R, Y, G, C, N, run as _run, run_check, selftest_passed, warn
 
 
 # Thresholds (from the hosting-platform runbook).
@@ -33,6 +36,16 @@ POLL_SECS = 2.5             # live-view refresh cadence
 # --------------------------------------------------------------------------- #
 # Self-test: trigger + parse
 # --------------------------------------------------------------------------- #
+def _smart_target(d) -> str:
+    """Device string to hand smartctl for this Disk. Mirrors smart.read()'s rule
+    (smart.py): since v0.21.0 a PERC physical drive behind a virtual disk has NO
+    OS device node (`Disk.dev == '-'`) — smartctl must instead open the per-VD
+    megaraid ioctl handle in `Disk.ctrl_dev` via `-d <smart_dtype>`. burn-in used
+    to build every smartctl command against `d.dev` regardless, which on a
+    RAID-mode box meant literally addressing '-' (F-145)."""
+    return d.ctrl_dev if d.smart_dtype and d.ctrl_dev else d.dev
+
+
 def start_selftest(dev: str, kind: str = "long", dtype: str = "", *, dry_run: bool = False):
     """`smartctl -t long|short [-d <dtype>] <dev>` — kicks off a background test.
 
@@ -187,7 +200,13 @@ def scan_progress(rec: dict) -> dict:
     pid, log = rec.get("scan_pid"), rec.get("scan_log")
     if not pid or not log:
         return {"pct": None, "eta_min": None, "running": False, "bad": 0}
-    running = _pid_alive(pid)
+    # PID-reuse guard (F-145): os.kill(pid, 0) succeeding only proves SOME
+    # process owns that pid now, not that it is still OUR badblocks — across a
+    # reboot or just a busy box, a reused pid would pin this health-check as
+    # "running" forever. _is_our_badblocks answers False when it cannot verify
+    # (no /proc, e.g. a macOS dev box) — the safe side here is "not running",
+    # never claiming a process we can't identify.
+    running = _pid_alive(pid) and _is_our_badblocks(pid, rec.get("dev", ""))
     pct, bad = _parse_badblocks_log(log)
     eta = None
     if running and pct and pct > 0:
@@ -251,9 +270,10 @@ def _cancel_records(recs: list, *, dry_run: bool = False) -> int:
         return 1
     sc = _cfg.tool("smartctl")
     for rec in recs:
-        dev = rec["dev"]
+        dev = rec["dev"]                          # badblocks target (F-145: NOT smartctl's)
+        smart_dev = rec.get("smart_dev") or dev    # falls back for pre-v0.19 state files
         dtype = rec.get("dtype", "")
-        cmd = [sc, "-X"] + (["-d", dtype] if dtype else []) + [dev]
+        cmd = [sc, "-X"] + (["-d", dtype] if dtype else []) + [smart_dev]
         if dry_run:
             print(f"[DRY-RUN] would run: {' '.join(cmd)}")
         else:
@@ -271,8 +291,9 @@ def _cancel_records(recs: list, *, dry_run: bool = False) -> int:
               f"({rec.get('serial') or '?'}){N}")
     if not dry_run:
         keys = {(r.get("serial"), r["dev"]) for r in recs}
-        save_state([r for r in load_state()
-                    if (r.get("serial"), r.get("dev")) not in keys])
+        with _state_lock():
+            save_state([r for r in load_state()
+                        if (r.get("serial"), r.get("dev")) not in keys])
     return 0
 
 
@@ -309,16 +330,36 @@ def cancel_all(*, dry_run: bool = False) -> int:
 # Verdict
 # --------------------------------------------------------------------------- #
 def assess(d) -> tuple[str, list[str]]:
-    """Judge a scanned Disk. Returns (verdict, reasons). FAIL > WARN > PASS."""
+    """Judge a scanned Disk. Returns (verdict, reasons). FAIL > WARN > PASS.
+
+    A disk that never answered SMART at all used to fall through every check
+    below (all zero/None) and come out PASS — "safe to add to a pool" for a
+    drive nothing was actually read from. common.assess() (the main status-table
+    grader) already treats `not d.readable` as CRITICAL ('SMART unreadable');
+    this is burn-in agreeing with it instead of being the one grader that
+    ignores it (F-145). Decisive and checked first: nothing else here is
+    meaningful about a drive that gave back no data."""
+    if not d.readable or d.health == "NOREAD":
+        return "FAIL", ["SMART did not answer (drive unreadable) — cannot vet this disk"]
+
     reasons: list[str] = []
     verdict = "PASS"
     if d.health == "FAILED":
         verdict = "FAIL"; reasons.append("SMART health = FAILED")
     if d.uncorr and d.uncorr > 0:
         verdict = "FAIL"; reasons.append(f"uncorrected errors = {d.uncorr}")
-    st = selftest_status(d.dev, d.smart_dtype)
-    if st["result"] and not selftest_passed(st["result"]):
-        verdict = "FAIL"; reasons.append(f"self-test: {st['result']}")
+    st = selftest_status(_smart_target(d), d.smart_dtype)
+    if st["result"]:
+        if not selftest_passed(st["result"]):
+            verdict = "FAIL"; reasons.append(f"self-test: {st['result']}")
+    elif not st["running"]:
+        # Empty result + nothing running: selftest_status cannot tell "never
+        # tested" from "smartctl gave us nothing for the current test" here, so
+        # this must not silently read as a pass either (F-145) — it just isn't
+        # the same certainty as a completed test, hence WARN not FAIL.
+        if verdict != "FAIL":
+            verdict = "WARN"
+        reasons.append("no self-test verdict available (empty result, none running)")
     if verdict != "FAIL":
         if d.realloc and d.realloc > 0:
             verdict = "WARN"; reasons.append(f"grown defects/reallocated = {d.realloc}")
@@ -357,16 +398,61 @@ def load_state() -> list:
 
 
 def save_state(records: list) -> None:
-    """Best-effort atomic write; a burn-in still runs if state can't be saved."""
+    """Best-effort atomic write; a burn-in still runs if state can't be saved.
+
+    Uses a per-call unique temp name (`tempfile.mkstemp`) rather than a fixed
+    `.tmp` path — two b2ctl processes (e.g. an MCP server alongside an operator)
+    writing at once used to race on the SAME tmp file, so one process's
+    `os.replace` could publish the OTHER's half-written/interleaved content
+    (F-145). Still just one atomic `os.replace`; callers serialise the
+    surrounding read-modify-write with `_state_lock()`."""
+    d = _state_dir()
+    try:
+        os.makedirs(d, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".burnin-", suffix=".tmp", dir=d)
+    except OSError:
+        return
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(records, f, indent=2)
+        os.replace(tmp, _state_path())
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+@contextlib.contextmanager
+def _state_lock():
+    """Advisory lock serialising burnin.json's read-modify-write across
+    processes (F-145): run_multi / _finish / _cancel_records all do
+    `load_state() -> mutate -> save_state()`, and with two b2ctl processes
+    (an MCP server + an operator's own CLI, say) racing that window, the
+    second writer's save clobbers the first's — orphaning a detached
+    badblocks scan the state file no longer names.
+
+    A lock FILE beside burnin.json (not the state file itself — save_state
+    replaces that atomically). Degrades to running unlocked, with a warning,
+    if the lock can't be taken: losing an update is bad, but a health-check
+    that deadlocks or crashes because /var/log/b2ctl is unwritable is worse."""
+    fh = None
     try:
         os.makedirs(_state_dir(), exist_ok=True)
-        path = _state_path()
-        tmp = path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(records, f, indent=2)
-        os.replace(tmp, path)
-    except OSError:
-        pass
+        fh = open(_state_path() + ".lock", "a+")
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+    except OSError as e:
+        warn(f"burn-in state lock unavailable ({e}) — proceeding without it")
+        fh = None
+    try:
+        yield
+    finally:
+        if fh is not None:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+            fh.close()
 
 
 def _now() -> float:
@@ -380,7 +466,11 @@ def burnin_snapshot(records: list) -> list[dict]:
     """One poll of every record -> row dicts for ui.render_burnin_view."""
     rows = []
     for rec in records:
-        st = selftest_status(rec["dev"], rec.get("dtype", ""))
+        # smart_dev (F-145): the smartctl target, which for a PERC PD differs
+        # from rec["dev"] (badblocks' target / display identity, "-" when the
+        # OS has no node for it). Falls back to "dev" for state files written
+        # before this field existed.
+        st = selftest_status(rec.get("smart_dev") or rec["dev"], rec.get("dtype", ""))
         row = {
             "bay": rec.get("bay"), "dev": rec["dev"], "serial": rec.get("serial", ""),
             "st_running": st["running"], "st_pct": st["pct"], "st_eta": st.get("eta_min"),
@@ -427,19 +517,29 @@ def live_view(records: list, *, sleep=None) -> None:
               f"`b2ctl maint health --status` to re-attach{N}")
 
 
+def _record_verdict(rec: dict, tbw) -> tuple[str, list[str], object]:
+    """Full PASS/WARN/FAIL verdict for a COMPLETED record: re-scan the disk
+    fresh (core.scan_one) and fold in the badblocks bad-block count. Shared by
+    `_finish` (which also prunes state) and `status_payload` (read-only, no
+    pruning) so the two can never disagree about what "done" means (F-145)."""
+    from . import core
+    d = core.scan_one(rec["dev"], tbw)
+    verdict, reasons = assess(d)
+    if rec.get("do_scan"):
+        bad = scan_progress(rec)["bad"]
+        if bad and bad > 0:
+            reasons = reasons + [f"read-surface scan: {bad} bad block(s)"]
+            if verdict == "PASS":
+                verdict = "WARN"
+    return verdict, reasons, d
+
+
 def _finish(records: list) -> None:
     """All burn-ins complete: print per-disk verdict, drop them from state."""
-    from . import core, spec
+    from . import spec
     tbw = spec.load()
     for rec in records:
-        d = core.scan_one(rec["dev"], tbw)
-        verdict, reasons = assess(d)
-        if rec.get("do_scan"):
-            bad = scan_progress(rec)["bad"]
-            if bad and bad > 0:
-                reasons = reasons + [f"read-surface scan: {bad} bad block(s)"]
-                if verdict == "PASS":
-                    verdict = "WARN"
+        verdict, reasons, d = _record_verdict(rec, tbw)
         colour = {"PASS": G, "WARN": Y, "FAIL": R}[verdict]
         print(f"{colour}  [{verdict}] bay {rec.get('bay') or '?'} {rec['dev']} "
               f"({d.serial or rec.get('serial', '')}){N}")
@@ -447,8 +547,14 @@ def _finish(records: list) -> None:
             print(f"    - {r}")
         if verdict == "PASS":
             print(f"{G}    ✔ safe to add to a pool.{N}")
-    done_serials = {rec.get("serial") for rec in records}
-    save_state([r for r in load_state() if r.get("serial") not in done_serials])
+    # Composite (serial, dev) key (F-145): several enterprise SAS drives report
+    # NO serial until SMART actually runs, so keying on serial alone made ONE
+    # serial-less record's completion drop EVERY OTHER serial-less record too —
+    # same fix as _cancel_records already had.
+    done_keys = {(rec.get("serial"), rec.get("dev")) for rec in records}
+    with _state_lock():
+        save_state([r for r in load_state()
+                    if (r.get("serial"), r.get("dev")) not in done_keys])
 
 
 def _resolve_targets(targets: list, tbw) -> list:
@@ -479,38 +585,51 @@ def run_multi(targets, tbw_table: dict | None = None, *,
     if not disks:
         return 1
 
-    records = load_state()
-    active_serials = {r.get("serial") for r in records}
-    started_any = False
-    for d in disks:
-        # Re-entrancy: never restart a disk already under a self-test (F-011 spirit).
-        st = selftest_status(d.dev, d.smart_dtype)
-        if st["running"] or d.serial in active_serials:
-            print(f"{Y}  {d.dev} (bay {d.bay or '?'}) already under a self-test "
-                  f"— reporting, not restarting.{N}")
-            continue
-        print(f"{C}Burn-in {d.dev} (bay {d.bay or '?'}) {d.model} ({d.serial}){N}")
-        ok, out = start_selftest(d.dev, kind, d.smart_dtype, dry_run=dry_run)
-        if not ok:
-            print(f"{R}[-] could not start self-test on {d.dev}: {out}{N}")
-            continue
-        rec = {"serial": d.serial, "dev": d.dev, "bay": d.bay,
-               "dtype": d.smart_dtype, "kind": kind, "do_scan": do_scan,
-               "scan_pid": None, "scan_log": None, "started": _now()}
-        if do_scan and not dry_run:
-            rec["scan_pid"], rec["scan_log"] = start_scan(d.dev, d.serial)
-        records.append(rec)
-        active_serials.add(d.serial)
-        started_any = True
+    # Locked for the whole load -> mutate -> save window (F-145), released
+    # before live_view (which can run for hours and must not hold the state
+    # file locked against another b2ctl process the whole time).
+    with _state_lock():
+        records = load_state()
+        active_serials = {r.get("serial") for r in records}
+        started_any = False
+        for d in disks:
+            target = _smart_target(d)          # F-145: smartctl's device, not d.dev
+            # Re-entrancy: never restart a disk already under a self-test (F-011 spirit).
+            st = selftest_status(target, d.smart_dtype)
+            if st["running"] or d.serial in active_serials:
+                print(f"{Y}  {d.dev} (bay {d.bay or '?'}) already under a self-test "
+                      f"— reporting, not restarting.{N}")
+                continue
+            print(f"{C}Burn-in {d.dev} (bay {d.bay or '?'}) {d.model} ({d.serial}){N}")
+            ok, out = start_selftest(target, kind, d.smart_dtype, dry_run=dry_run)
+            if not ok:
+                print(f"{R}[-] could not start self-test on {d.dev}: {out}{N}")
+                continue
+            rec = {"serial": d.serial, "dev": d.dev, "smart_dev": target, "bay": d.bay,
+                   "dtype": d.smart_dtype, "kind": kind, "do_scan": do_scan,
+                   "scan_pid": None, "scan_log": None, "started": _now()}
+            if do_scan and not dry_run:
+                # badblocks needs a real block device. A PERC PD behind a VD has
+                # none (dev == '-') — scanning its ctrl_dev would read the whole
+                # VIRTUAL DISK, i.e. the wrong media entirely. The firmware
+                # self-test above still covers it (F-145).
+                if d.dev in ("", "-"):
+                    print(f"{Y}  no block device for bay {d.bay or '?'} — "
+                          f"self-test only, surface scan skipped.{N}")
+                else:
+                    rec["scan_pid"], rec["scan_log"] = start_scan(d.dev, d.serial)
+            records.append(rec)
+            active_serials.add(d.serial)
+            started_any = True
 
-    if dry_run:
-        print(f"{Y}[dry-run] would burn-in {len(disks)} disk(s)"
-              + (" + read-surface scan" if do_scan else "") + f" ({kind} self-test){N}")
-        return 0
-    if not records:
-        return 1
-    if started_any or records:
-        save_state(records)
+        if dry_run:
+            print(f"{Y}[dry-run] would burn-in {len(disks)} disk(s)"
+                  + (" + read-surface scan" if do_scan else "") + f" ({kind} self-test){N}")
+            return 0
+        if not records:
+            return 1
+        if started_any or records:
+            save_state(records)
     live_view(records)
     return 0
 
@@ -526,17 +645,69 @@ def status_view() -> int:
 
 
 def _poolable_target(d) -> bool:
-    """A health-check target must be a free disk, never an in-pool member (the
-    PASS/WARN/FAIL 'safe to add to a pool' verdict + surface scan are meaningless
-    on an active member). To self-test a member, run `smartctl -t long` directly."""
+    """A health-check target must be free/spare and genuinely reachable — never
+    an in-pool member (the PASS/WARN/FAIL 'safe to add to a pool' verdict +
+    surface scan are meaningless on an active member; self-test one directly
+    with `smartctl -t long`), never a disk zpool never answered for, and never
+    a hidden PERC member with no OS device node (`dev == '-'`) smartctl could
+    be pointed at wrong (F-145).
+
+    `d.is_poolable` is the single authority for "free disk ZFS may be handed"
+    (F-103), but it is deliberately NOT the whole rule here. It excludes any disk
+    with `smart_dtype` set, because ZFS must never `sgdisk --zap-all` a PERC
+    member sharing the VD's block device — burn-in does no such thing. Vetting a
+    PERC Unconfigured-Good drive before adding it to a volume is exactly what
+    this verb is for, and `smartctl -t long -d megaraid,<DID> <ctrl_dev>` reads
+    it fine (the same path the status table already uses). So the real gate is
+    "do we have a device smartctl can open" — which is what `_smart_target`
+    answers, and what `d.dev` alone could not (F-145)."""
+    if d.is_poolable or (d.smart_dtype and _smart_target(d) not in ("", "-")
+                         and not d.in_pool and d.pool_known
+                         and d.health != "GHOST"):
+        return True
     if d.in_pool:
-        print(f"{R}[-] maint health vets free/spare disks; {d.dev} is in pool "
-              f"'{d.pool}' — self-test it with `smartctl -t long` directly.{N}")
-        return False
-    return True
+        reason = f"is in pool '{d.pool}' — self-test it with `smartctl -t long` directly"
+    elif not d.pool_known:
+        reason = "pool membership is UNKNOWN (zpool did not answer) — fix ZFS, then re-run"
+    elif d.health == "GHOST":
+        reason = "is a ghost (seen before but not present now)"
+    elif _smart_target(d) in ("", "-"):
+        reason = ("has no device smartctl can open (no OS node, and no controller "
+                  "handle for megaraid passthrough)")
+    else:
+        reason = "is not a free/poolable disk"
+    print(f"{R}[-] maint health vets free/spare disks; {d.dev} {reason}.{N}")
+    return False
 
 
 def run(target, tbw_table: dict | None = None, *,
         do_scan: bool = False, kind: str = "long", dry_run: bool = False) -> int:
     """Single-disk burn-in — thin wrapper over run_multi([target])."""
     return run_multi([target], tbw_table, do_scan=do_scan, kind=kind, dry_run=dry_run)
+
+
+def status_payload() -> list[dict]:
+    """JSON-serialisable snapshot of every in-flight/completed burn-in record —
+    the data behind an upcoming `b2ctl maint health --status --json`.
+
+    Built from the SAME `burnin_snapshot()` the live terminal view renders, so
+    the two can never show a different picture of what's running. PURE READ:
+    unlike `status_view()`, this never starts, cancels, or prunes state, and it
+    does one pass over the records (no polling loop) — a done record additionally
+    gets its full PASS/WARN/FAIL verdict via the same `_record_verdict()` helper
+    `_finish()` uses, just without `_finish()`'s state mutation."""
+    from . import spec
+    records = load_state()
+    rows = burnin_snapshot(records)
+    tbw = None
+    payload = []
+    for rec, row in zip(records, rows):
+        entry = dict(row)
+        entry["verdict"], entry["reasons"] = None, []
+        if row["done"]:
+            if tbw is None:
+                tbw = spec.load()
+            verdict, reasons, _d = _record_verdict(rec, tbw)
+            entry["verdict"], entry["reasons"] = verdict, reasons
+        payload.append(entry)
+    return payload

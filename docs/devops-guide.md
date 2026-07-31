@@ -485,10 +485,26 @@ re-attachable. See **ADR-002** for the background-process/state-file architectur
 | verdict | on completion `_finish()` re-reads SMART (`core.scan_one`) + `assess(disk)` → FAIL (uncorrected>0 / self-test error via `common.selftest_passed`, v0.18.0), WARN (grown defects / surface-scan bad blocks / power-on hours **if** `health.<type>.poh_warn` is set — off by default, v0.13.0), else PASS |
 | cancel (v0.12.0) | `cancel(targets)` / `cancel_all()` — per record: **abort self-test** `smartctl -X [-d <dtype>] <dev>` (`_cancel_records`) + **stop scan** `os.kill(scan_pid, SIGTERM)`, but only after `_is_our_badblocks(pid,dev)` confirms `/proc/<pid>/cmdline` is our `badblocks <dev>` (PID-reuse guard) — then drop the record from state. Honors `--dry-run`. Both are read-only/abort ops; nothing is written |
 
+#### v0.24.2 (F-145) — what the grader, the target and the state file got wrong
+
+| defect | before | after |
+|---|---|---|
+| **the verdict** | a disk whose SMART returned NOTHING had every counter empty, fell through every check, and came out `PASS` — "safe to add to a pool" for a drive nothing was read from. The only grader in the codebase ignoring `d.readable`; `common.assess()` already graded that state CRITICAL "SMART unreadable" | `not d.readable or d.health == "NOREAD"` → **FAIL**, checked FIRST and worded distinctly from a drive that answered and failed. An empty self-test result with nothing running → **WARN "no verdict available"** (`selftest_status` cannot tell "never tested" from "smartctl produced nothing") |
+| **the device** | every smartctl command built against `d.dev`. Since v0.21.0 that is the DISPLAY node and is literally `"-"` for a PERC PD behind a VD | `_smart_target(d)` mirrors `smart.read()`'s rule (`ctrl_dev if smart_dtype and ctrl_dev else dev`) and is persisted as `rec["smart_dev"]` so a re-attach targets the same handle |
+| **the gate** | `_poolable_target` tested bare `d.in_pool`, so a hidden PERC PD was accepted and then addressed as `-` | accepts a free disk (`is_poolable`) **or** a reachable PERC PD (`smart_dtype` + a `_smart_target` that is not `-`/`""`, not in-pool, `pool_known`, not GHOST). **Deliberately NOT `is_poolable` alone**: that excludes every `smart_dtype` disk because ZFS must not zap a drive sharing the VD's block device — burn-in does no such thing, and vetting a UGood PERC drive is what this verb is for. `badblocks` is skipped when `d.dev` is `-` (it needs a real block device; the controller handle is the whole VD) |
+| **PID reuse** | `scan_progress` trusted a bare PID, so an unrelated process pinned a check "running" forever | `_pid_alive(pid) and _is_our_badblocks(pid, dev)` — the guard existed but was wired only into the cancel path. "Cannot verify" resolves to not-ours, the safe side |
+| **serial-less records** | `_finish` pruned by serial alone, so one serial-less disk finishing dropped EVERY other serial-less record (enterprise SAS drives report no serial until SMART runs) | composite `(serial, dev)` key, matching `_cancel_records` |
+| **concurrent writers** | `save_state` used a FIXED `.tmp` name and every read-modify-write was unlocked | `tempfile.mkstemp` + `os.replace`; `_state_lock()` (`fcntl.flock` on a lock file beside the state file) wraps load→mutate→save in `run_multi`/`_finish`/`_cancel_records`, released before `live_view` so a multi-hour run never holds it. Degrades to unlocked with a `common.warn()` rather than deadlocking |
+
+New `burnin.status_payload()` — pure-read, JSON-serialisable, built from the same
+`burnin_snapshot()` the live view uses. It is the data behind
+`b2ctl maint health --status --json`.
+
 - **State file:** `os.path.join(safety.LOG_DIR, "burnin.json")` (records keyed by
-  serial: dev/bay/dtype/kind/do_scan/scan_pid/scan_log/started), plus per-disk
-  `scan-<serial>.log`. Path is read at call time so the sim's `safety.LOG_DIR`
-  monkeypatch redirects it to `sim/var/` (`save_state`/`load_state`).
+  serial: dev/**smart_dev**/bay/dtype/kind/do_scan/scan_pid/scan_log/started), plus
+  per-disk `scan-<serial>.log`. Path is read at call time so the sim's
+  `safety.LOG_DIR` monkeypatch redirects it to `sim/var/`
+  (`save_state`/`load_state`).
 - **Re-entrancy:** `run_multi` polls `selftest_status` first and **never restarts**
   a disk already under a self-test; `_finish` prunes completed records from state.
 - **Exit code note:** because the run is backgrounded, `b2ctl maint health <disk>`

@@ -763,6 +763,11 @@ b2ctl> m
   `FAIL — SMART did not answer (drive unreadable) — cannot vet this disk`
   และถ้า self-test ไม่มีผลเลย (ไม่มีบันทึก + ไม่มีเทสรันอยู่) จะเป็น
   **WARN — no self-test verdict available** ไม่ใช่ PASS
+- **ผลตัดสินเป็นของดิสก์ลูกที่คุณสั่ง (v0.25.1)** — บนเครื่อง PERC คอลัมน์ DEV ขึ้น `-` ทุกลูก
+  ที่อยู่หลัง controller เพราะไม่มีลูกไหนมี device node เป็นของตัวเอง ตอนตัดสินผล health-check
+  b2ctl ไปอ่าน SMART ใหม่โดยใช้ `-` นั้น ซึ่งไปตรงกับลูก**แรก** ไม่ใช่ลูกของคุณ → PASS/WARN/FAIL
+  อาจมาจากดิสก์ข้างๆ ตอนนี้ระบุด้วย serial แล้ว **เครื่อง IT mode ไม่เคยโดน** (ทุกลูกมี `/dev/sdX`
+  ของตัวเอง) และมันเพิ่งเข้าถึงได้ตอน v0.24.2 ที่เริ่มตรวจดิสก์ PERC ได้
 - **ดิสก์ PERC Unconfigured-Good ตรวจได้แล้ว (v0.24.2)** — ดิสก์ที่อยู่หลัง PERC ไม่มี
   device node ของตัวเอง (ตาราง DEV ขึ้น `-`) b2ctl เลยตรวจผ่าน controller
   (`smartctl -d megaraid,<DID>`) ซึ่งเป็นทางเดียวกับที่ตารางสุขภาพใช้อ่านมันอยู่แล้ว

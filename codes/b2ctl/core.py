@@ -215,8 +215,8 @@ def pool_maint(name: str) -> dict:
             "last_trim": maint.rel_time(trim_iso) if trim_iso else ""}
 
 
-def scan_one(dev: str, tbw_table=None) -> Disk:
-    """Build a single Disk for a hot-plugged device WITHOUT a full fleet scan.
+def scan_one(dev: str, tbw_table=None, *, serial: str = "") -> Disk:
+    """Build a single Disk for one device WITHOUT a full fleet scan.
 
     Enumerates the inventory once (one lsblk + by-id index — cheap), then reads
     SMART and matches ZFS membership for ONLY the target device. The old version
@@ -224,9 +224,23 @@ def scan_one(dev: str, tbw_table=None) -> Disk:
     double bay-attach) and discarded all but one Disk, blocking the watch select
     loop for seconds on each hotplug (F-079). Falls back to a bare Disk(dev) when
     lsblk shows nothing yet (device still OS-rejected / vanished), as before.
+
+    `serial`, when the caller knows it, is the PRIMARY key. Matching on `dev`
+    alone is not a lookup on a RAID box: since v0.21.0 every PERC physical drive
+    behind a virtual disk reports `dev == '-'` (F-136), so `x.dev == '-'` matches
+    the FIRST hidden drive rather than the one asked for — and burn-in's verdict
+    is computed from whatever that returned, i.e. a neighbour's SMART (F-148).
+    `dev` stays the fallback for the hot-plug path, which has a real /dev/sdX and
+    no serial yet; it is skipped for '-'/'' so a missed serial cannot silently
+    fall back into the same arbitrary match.
     """
     bk = _backend_mod.get_backend()
-    d = next((x for x in bk.enumerate_disks() if x.dev == dev), None)
+    disks = bk.enumerate_disks()
+    d = None
+    if serial:
+        d = next((x for x in disks if x.serial and x.serial == serial), None)
+    if d is None and dev not in ("", "-"):
+        d = next((x for x in disks if x.dev == dev), None)
     if d is None:
         return Disk(dev=dev)
     bm = bk.bay_map() if bk.have_tool() else {}

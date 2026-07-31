@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-07-31
-- **Version:** v0.22.0-itmode
+- **Version:** v0.22.0-itmode (phase 1) · v0.23.0 (phase 2) · v0.25.0 (phase 3)
 - **Relates to:** ADR-006 (controller-scoped confirms — the confirm model this
   ADR will have to express for machine callers, phase 2), ADR-001 (module
   layering), CLAUDE.md §9 (safety rules — unchanged by this ADR, which adds no
@@ -215,6 +215,90 @@ inverse of `completed`: the "scrub repaired …" line persists until the next
 scrub, so a pool that has never been scrubbed reports `completed=False` as well —
 and `progress` announced a phantom scrub on every such pool until the positive
 signal existed.
+
+## Phase 3 (v0.25.0) — the envelope survives the abnormal exits
+
+Phases 1 and 2 made the contract hold whenever a command ran to completion. Phase
+3 is about the paths where it does not. **A contract that only holds on the happy
+path is not a contract** — an MCP client cannot branch on an answer it never got.
+
+### The envelope is emitted from `main()`, not from each verb
+
+`common.die()` is `sys.exit(1)`, and **`SystemExit` is not an `Exception`
+subclass**, so `main()`'s handlers missed it entirely. On a box with neither
+sas2ircu nor perccli, `backend.get_backend()` dies inside `core.scan()` and
+`b2ctl --json status` wrote **zero bytes** to stdout. `main()` now catches
+`SystemExit` and, separately, a final `Exception`; both re-raise untouched without
+`--json`, so the human face is byte-identical.
+
+The catch belongs at the single dispatch point, not per verb: every verb reaches
+the backend through `core.scan()`/`scan_light()`, and a per-verb guard would be
+the same edit forty times with forty chances to forget one.
+
+stderr is redirected **under `--json` only**, so `die()`'s own sentence becomes
+`error.message` instead of being lost — passed through `common.strip_ansi`,
+because a machine caller must not receive terminal colour codes inside a JSON
+string. That helper is now shared with `warn()`, which strips the same way for
+`warnings[]`.
+
+SIGINT gets an envelope too. The human path keeps exit 130 (the conventional SIGINT
+code operators and scripts rely on); ADR-007's 0/1 rule is for `--json`.
+
+### New rule: no verb under `--json` may block on a live view
+
+`maint health --status --json` — the one verb `_needs_root` advertises as the safe
+read-only form — **never returned**. Tagged `emits_json=False`, it routed into
+`_json_mutation`, which runs the handler inside a redirected stdout while burn-in's
+live view redraws in a `while True` loop: the request hung forever and the capture
+buffer grew without bound.
+
+The fix is not to refuse the verb. Burn-in has been **non-blocking by design since
+ADR-002** — it exits 0 once the tests are *started*, and the verdict is read later
+from `--status`. So the live view is the interactive convenience on top, and
+`burnin._unwatched()` simply skips it when nobody is watching. Starting a
+health-check under `--json` stays machine-callable.
+
+### Long operations return "started", and `None` is a third state on purpose
+
+This section's existing promise — *"Mutating verbs return as soon as the operation
+is started"* — was **false for resilvers** until v0.25.0. `watch._wait_resilver`
+polled to completion, so `replace`/`swap`/`offload` held a `--json` request open
+for the hours a resilver takes.
+
+It now returns `None` when there is nobody watching. Deliberately not a bool:
+
+- `True` would let the caller run `_detach_if_lingers()` **while the resilver is
+  still running**, on a member that may hold the only copy of unreconstructed
+  blocks. That is the §9 data-loss path every guard in `watch.py` exists to prevent.
+- `False` would report a failure that did not happen, and a machine caller would
+  retry a `zpool replace` that is already in flight.
+
+All four call sites record the op as a success (`zpool replace` did succeed), skip
+the detach and the pull LED, and point at `b2ctl progress`. The old member staying
+attached is the conservative state; `_detach_if_lingers` runs on a later
+interactive pass. `raid_actions._wait_rebuild` needs no equivalent — F-144's
+non-interactive abort sits in front of its only caller.
+
+### The closed error set is now fully reachable
+
+Four of the nine codes were dead: every domain failure collapsed to `OP_FAILED`, so
+a client could not tell *"you named something that does not exist"* from *"the
+operation ran and failed"*. `cli._mutation_precheck` resolves the target **before**
+`_json_mutation` takes over — a named pool against `zfs.list_pools()`, a named disk
+against `core.scan_light()`.
+
+One rule is explicit, and it is F-143's: a **silent** `zpool` reports
+`TOOL_MISSING`, never `POOL_NOT_FOUND`. `list_pools()` raises `ZfsUnavailable`
+rather than returning `[]`, and that propagates past the precheck untouched.
+*"I could not look"* must never be reported as *"it is not there"* — the same
+mistake that made b2ctl offer a live boot mirror as a free disk.
+
+### Where this met F-144
+
+An exit code is only worth reading if the verb is honest about what it did.
+`_cmd_offload` used to return `True` unconditionally after a spare-less offload,
+so `ok:true` was reported on a pool that had just gone DEGRADED and stayed there.
+Machine-callable and truthful are the same requirement, reached from two sides.
 
 ## Earlier notes (superseded by the sections above)
 

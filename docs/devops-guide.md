@@ -500,6 +500,36 @@ New `burnin.status_payload()` — pure-read, JSON-serialisable, built from the s
 `burnin_snapshot()` the live view uses. It is the data behind
 `b2ctl maint health --status --json`.
 
+#### v0.25.1 (F-148) — the verdict re-scan resolved the wrong drive
+
+`_record_verdict` re-reads SMART fresh before grading, via
+`core.scan_one(rec["dev"], tbw)`. `scan_one` matched on the device node:
+
+```python
+d = next((x for x in bk.enumerate_disks() if x.dev == dev), None)
+```
+
+Since v0.21.0 **every** PERC physical drive behind a virtual disk reports
+`dev == '-'` (F-136), so on a RAID box `'-'` is not an identity — `next()` returns
+the first hidden drive. The verdict was then computed from a neighbour's SMART: a
+failing disk graded from a healthy one, or vice versa. Reproduced in the sim
+(6 PDs, all `dev == '-'`): asking for bay **1:7** returned bay **1:0**.
+
+`scan_one(dev, tbw_table=None, *, serial="")` now resolves by serial first:
+
+| caller | key |
+|---|---|
+| `burnin._record_verdict` | `serial=rec["serial"]` — the record has carried it since v0.10.0 |
+| `watch._handle_new_disk` (hot-plug) | `dev` — a real `/dev/sdX`, no serial yet |
+
+The `dev not in ("", "-")` guard on the fallback matters: without it a missed
+serial re-enters the same arbitrary match. An unresolvable request returns a bare
+`Disk`, never a neighbour.
+
+**IT mode was never affected** — every disk has a unique `/dev/sdX`. The bug was
+latent from v0.21.0 and only became reachable in v0.24.2, when F-145 let PERC
+drives through `_poolable_target`.
+
 - **State file:** `os.path.join(safety.LOG_DIR, "burnin.json")` (records keyed by
   serial: dev/**smart_dev**/bay/dtype/kind/do_scan/scan_pid/scan_log/started), plus
   per-disk `scan-<serial>.log`. Path is read at call time so the sim's

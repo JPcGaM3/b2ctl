@@ -48,6 +48,8 @@ CLAUDE.md
 TASKS.md
 prompts/
 reviews/
+graphify-out/
+_COMMUNITY_*.md
 
 # AI design-canvas scaffold (unrelated to b2ctl)
 design/

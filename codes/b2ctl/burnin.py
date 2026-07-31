@@ -523,7 +523,10 @@ def _record_verdict(rec: dict, tbw) -> tuple[str, list[str], object]:
     `_finish` (which also prunes state) and `status_payload` (read-only, no
     pruning) so the two can never disagree about what "done" means (F-145)."""
     from . import core
-    d = core.scan_one(rec["dev"], tbw)
+    # Resolve by SERIAL, not by dev: a PERC PD has dev == '-' and so does every
+    # other one, so scan_one(dev) would grade this record from an arbitrary
+    # neighbour's SMART (F-148). The record has carried the serial since v0.10.0.
+    d = core.scan_one(rec["dev"], tbw, serial=rec.get("serial", ""))
     verdict, reasons = assess(d)
     if rec.get("do_scan"):
         bad = scan_progress(rec)["bad"]

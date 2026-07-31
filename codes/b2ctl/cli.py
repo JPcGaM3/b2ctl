@@ -1106,10 +1106,15 @@ def _config_init(_args) -> int:
     # the write fails with PermissionError — surface the house-style one-liner
     # instead of a raw traceback (F-034).
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
         cfg = _cfg_mod.load()
-        with open(path, "w") as f:
-            json.dump(cfg, f, indent=2)
+        # F-148: the writer that CREATES the file must obey the same rules as
+        # every writer that later rewrites it — atomic, and 0600 rather than
+        # whatever the umask gives. This is the file whose tool_paths become root
+        # execution and which config.load() now trust-checks (F-147); it was the
+        # last open(...,"w") + json.dump in the package. atomic_write_json does
+        # its own makedirs and raises OSError on a permission failure, so the
+        # non-root one-liner below (F-034) still fires unchanged.
+        _cfg_mod.atomic_write_json(path, cfg)
     except OSError as exc:
         print(f"{R}[-] cannot write {path} — run as root ({exc}){N}")
         return 1

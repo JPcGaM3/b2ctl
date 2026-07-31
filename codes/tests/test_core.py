@@ -420,3 +420,84 @@ class TestPoolMembershipUnknown:
         result = _core_mod.scan()
         assert all(d.pool_known for d in result)
         assert all(d.is_poolable for d in result)
+
+
+class TestScanOneResolvesTheDiskYouAskedFor:
+    """F-148: a health verdict must be about the disk the caller named.
+
+    Since v0.21.0 every PERC physical drive behind a virtual disk reports
+    `dev == '-'` (F-136), so `next(x for x in disks if x.dev == dev)` returns
+    the FIRST hidden drive, not the one asked for. burn-in's `_record_verdict`
+    graded from whatever that returned — a neighbour's SMART.
+    """
+
+    def _perc_fleet(self):
+        """Three hidden PERC drives: same dev, different serials."""
+        out = []
+        for serial, bay in (("AAA", "1:0"), ("BBB", "1:1"), ("CCC", "1:7")):
+            d = Disk(dev="-", serial=serial)
+            d.bay = bay
+            d.smart_dtype = f"megaraid,{len(out)}"
+            d.ctrl_dev = "/dev/sdz"
+            out.append(d)
+        return out
+
+    def _wire(self, mock_backend_mod, disks):
+        mock_bk = MagicMock()
+        mock_backend_mod.get_backend.return_value = mock_bk
+        mock_bk.enumerate_disks.return_value = disks
+        mock_bk.have_tool.return_value = False
+        mock_bk.attach_bays.return_value = None
+        return mock_bk
+
+    @patch("b2ctl.core.zfs")
+    @patch("b2ctl.core.smart")
+    @patch("b2ctl.core._backend_mod")
+    @patch("b2ctl.core.spec")
+    def test_serial_wins_over_an_ambiguous_dev(self, _spec, mock_backend_mod,
+                                               _smart, mock_zfs):
+        self._wire(mock_backend_mod, self._perc_fleet())
+        mock_zfs.topology.return_value = {}
+        for want, bay in (("CCC", "1:7"), ("BBB", "1:1"), ("AAA", "1:0")):
+            d = _core_mod.scan_one("-", {}, serial=want)
+            assert d.serial == want and d.bay == bay
+
+    @patch("b2ctl.core.zfs")
+    @patch("b2ctl.core.smart")
+    @patch("b2ctl.core._backend_mod")
+    @patch("b2ctl.core.spec")
+    def test_without_a_serial_a_dash_never_claims_a_neighbour(
+            self, _spec, mock_backend_mod, _smart, mock_zfs):
+        # The old behaviour returned disks[0] here. '-' is not an identity, so
+        # the honest answer is a bare Disk.
+        self._wire(mock_backend_mod, self._perc_fleet())
+        mock_zfs.topology.return_value = {}
+        d = _core_mod.scan_one("-", {})
+        assert d.serial == ""
+
+    @patch("b2ctl.core.zfs")
+    @patch("b2ctl.core.smart")
+    @patch("b2ctl.core._backend_mod")
+    @patch("b2ctl.core.spec")
+    def test_an_unknown_serial_does_not_fall_back_onto_a_neighbour(
+            self, _spec, mock_backend_mod, _smart, mock_zfs):
+        # The `dev not in ("", "-")` guard: a missed serial must not re-enter
+        # the arbitrary match this whole fix is about.
+        self._wire(mock_backend_mod, self._perc_fleet())
+        mock_zfs.topology.return_value = {}
+        d = _core_mod.scan_one("-", {}, serial="NOSUCH")
+        assert d.serial == ""
+
+    @patch("b2ctl.core.zfs")
+    @patch("b2ctl.core.smart")
+    @patch("b2ctl.core._backend_mod")
+    @patch("b2ctl.core.spec")
+    def test_hotplug_path_still_resolves_by_dev(self, _spec, mock_backend_mod,
+                                                _smart, mock_zfs):
+        # Anti-overcorrection: watch._handle_new_disk has a real /dev/sdX and no
+        # serial yet — that is exactly what the dev fallback is for (F-079).
+        disks = self._perc_fleet() + [Disk(dev="/dev/sdx", serial="NEW1")]
+        self._wire(mock_backend_mod, disks)
+        mock_zfs.topology.return_value = {}
+        d = _core_mod.scan_one("/dev/sdx", {})
+        assert d.serial == "NEW1"

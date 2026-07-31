@@ -1515,3 +1515,60 @@ class TestEnvelopeStringsAreCleanForMachines(unittest.TestCase):
     def test_strip_ansi_is_the_shared_helper(self):
         self.assertEqual(common.strip_ansi("\x1b[1;31mred\x1b[0m"), "red")
         self.assertEqual(common.strip_ansi("plain"), "plain")
+
+
+class TestConfigInitWritesLikeEveryOtherWriter(unittest.TestCase):
+    """F-148: `config init` CREATES /etc/b2ctl/config.json — the file whose
+    tool_paths become root execution and which config.load() trust-checks
+    (F-147). It was the last open(...,"w") + json.dump in the package, so it
+    created the file at umask mode and non-atomically while every writer that
+    later rewrote it used atomic_write_json at 0600."""
+
+    def setUp(self):
+        import tempfile
+        from b2ctl import config as _cfg
+        self.tmp = tempfile.mkdtemp()
+        self._old_path = _cfg.CONFIG_PATH
+        _cfg.CONFIG_PATH = os.path.join(self.tmp, "b2ctl", "config.json")
+        _cfg._cache = None
+        self._umask = os.umask(0)          # the hostile case
+
+    def tearDown(self):
+        import shutil
+        from b2ctl import config as _cfg
+        os.umask(self._umask)
+        _cfg.CONFIG_PATH = self._old_path
+        _cfg._cache = None
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_created_config_is_0600_even_under_umask_zero(self):
+        from b2ctl import config as _cfg
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            rc = cli_mod.main(["config", "init"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(os.stat(_cfg.CONFIG_PATH).st_mode & 0o777, 0o600)
+
+    def test_the_content_is_unchanged_and_reads_back(self):
+        # Anti-overcorrection: swapping the writer must not alter what is written.
+        from b2ctl import config as _cfg
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            cli_mod.main(["config", "init"])
+        with open(_cfg.CONFIG_PATH) as f:
+            written = json.load(f)
+        self.assertIn("tool_paths", written)
+        _cfg._cache = None
+        self.assertEqual(_cfg.load()["controller"], written["controller"])
+
+    def test_existing_config_is_still_refused(self):
+        from b2ctl import config as _cfg
+        os.makedirs(os.path.dirname(_cfg.CONFIG_PATH), exist_ok=True)
+        with open(_cfg.CONFIG_PATH, "w") as f:
+            f.write('{"keep": "me"}')
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            rc = cli_mod.main(["config", "init"])
+        self.assertEqual(rc, 1)                       # early return intact
+        with open(_cfg.CONFIG_PATH) as f:
+            self.assertEqual(json.load(f), {"keep": "me"})   # not clobbered

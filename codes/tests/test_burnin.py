@@ -773,3 +773,53 @@ class TestStatusPayload(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRecordVerdictGradesTheRightDisk(unittest.TestCase):
+    """F-148: the verdict re-scan must find the disk the record is about.
+
+    `_record_verdict` re-reads SMART fresh before grading. It passed
+    `rec["dev"]`, which is '-' for a PERC PD — and so is every other hidden
+    drive's — so on a RAID box with more than one, a healthy neighbour's SMART
+    decided this record's PASS/WARN/FAIL.
+    """
+
+    def _rec(self, serial):
+        return {"serial": serial, "dev": "-", "smart_dev": "/dev/sdz",
+                "bay": "1:7", "dtype": "megaraid,5", "kind": "long",
+                "do_scan": False, "scan_pid": None, "scan_log": None}
+
+    def test_scan_one_is_asked_by_serial(self):
+        seen = {}
+
+        def _fake_scan_one(dev, tbw=None, *, serial=""):
+            seen["dev"], seen["serial"] = dev, serial
+            d = _disk(dev="-", serial=serial or "WRONG")
+            d.readable = True
+            d.health = "PASSED"
+            return d
+
+        with patch("b2ctl.core.scan_one", side_effect=_fake_scan_one), \
+             patch.object(burnin, "selftest_status",
+                          return_value={"running": False, "pct": 100,
+                                        "result": "Completed without error",
+                                        "eta_min": None}):
+            verdict, _reasons, d = burnin._record_verdict(self._rec("CCC"), {})
+        self.assertEqual(seen["serial"], "CCC")     # the identity that is unique
+        self.assertEqual(d.serial, "CCC")
+        self.assertEqual(verdict, "PASS")
+
+    def test_a_record_without_a_serial_still_works(self):
+        # Serial-less SAS drives exist (no SERIAL until SMART runs). The call
+        # must not blow up — it degrades to the old dev lookup.
+        with patch("b2ctl.core.scan_one") as so, \
+             patch.object(burnin, "selftest_status",
+                          return_value={"running": False, "pct": 100,
+                                        "result": "Completed without error",
+                                        "eta_min": None}):
+            d = _disk(dev="/dev/sdb", serial="")
+            d.readable = True
+            d.health = "PASSED"
+            so.return_value = d
+            burnin._record_verdict({"serial": "", "dev": "/dev/sdb"}, {})
+        self.assertEqual(so.call_args.kwargs.get("serial"), "")

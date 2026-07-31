@@ -774,6 +774,14 @@ b2ctl> m
   `FAIL — SMART did not answer (drive unreadable) — cannot vet this disk`.
   Likewise, a self-test that produced **no verdict** (nothing on record and
   nothing running) is now **WARN — no self-test verdict available**, not PASS.
+- **The verdict is about the drive you named (v0.25.1).** On a PERC box the DEV
+  column shows `-` for every drive behind a controller, because none of them has
+  a device node of its own. b2ctl was re-reading SMART by that `-` when it graded
+  a finished health-check, which matched the *first* such drive rather than yours
+  — so a PASS/WARN/FAIL could come from a neighbouring disk. It now identifies the
+  drive by its serial. **IT-mode boxes were never affected** (every disk there has
+  its own `/dev/sdX`), and this only became reachable in v0.24.2 when PERC drives
+  started being vettable at all.
 - **PERC Unconfigured-Good drives can be vetted too (v0.24.2).** A drive sitting
   behind a PERC has no device node of its own — the table shows `-` in DEV — so
   b2ctl vets it through the controller (`smartctl -d megaraid,<DID>`), the same

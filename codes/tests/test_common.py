@@ -527,3 +527,12 @@ class TestConfirmGate(unittest.TestCase):
         # ADR-007 stance that this is deliberate, not a bug.
         set_auto_confirm("tank")
         self.assertTrue(confirm("destroy tank?"))
+
+
+class TestAskDecodeError(unittest.TestCase):
+    def test_invalid_bytes_reprompt_instead_of_traceback(self):
+        import b2ctl.common as common
+        bad = UnicodeDecodeError("utf-8", b"\x80\x81", 0, 2, "invalid continuation byte")
+        with patch.object(common, "is_non_interactive", return_value=False), \
+             patch("builtins.input", side_effect=[bad, " 1M "]):
+            self.assertEqual(common.ask("> "), "1M")

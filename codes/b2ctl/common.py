@@ -184,11 +184,18 @@ def ask(prompt: str, *, default: str | None = None, hint: str = "") -> str:
         if default is not None:
             return default
         raise NonInteractive(prompt, hint)
-    try:
-        return input(prompt).strip()
-    except (EOFError, KeyboardInterrupt):
-        print()
-        return ""
+    while True:
+        try:
+            return input(prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return ""
+        except UnicodeDecodeError:
+            # Terminal/SSH sent bytes that aren't valid in the locale encoding
+            # (stray escape sequence, layout/locale mismatch). Never traceback
+            # in a prompt: tell the user and ask again.
+            print("\n  ! input contained invalid characters (not UTF-8) — "
+                  "please type again (ASCII, e.g. 1M)")
 
 
 def confirm(msg: str) -> bool:
